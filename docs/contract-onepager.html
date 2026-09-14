@@ -49,7 +49,7 @@
 <body>
 
 <h1>Pachakutech Presence — the Contract</h1>
-<p class="subtitle">An MCP Binding for a Presence Layer: six typed actions through which an agent puts something into the user's actual space, instead of only describing it in text. This is the piece we think is worth reviewing first — not the pitch, the schema.</p>
+<p class="subtitle">An MCP Binding for a Presence Layer: six typed actions through which an agent puts something into the user's actual space, instead of only describing it in text.</p>
 
 <h2>The two-process split</h2>
 <div class="diagram">agent CLI (Claude Code, Codex, ...)
@@ -109,7 +109,7 @@ GPU: dma_buf-imported webcam/screen frames, wlr-layer-shell output</div>
 <p>One JSON line per message, nothing dense crosses this boundary — no buffers, no pixels. Every MCP tool has a matching Rust <code>Proposal</code> variant, kept in lockstep by hand at six tools; regenerating one from the other becomes worth it past that.</p>
 
 <div class="status">
-<b>Status, plainly:</b> <span class="real">Real today</span> — MCP server, Policy Gate, CLI, and the daemon's Vulkan device init (verified compiling and running, including graceful failure with no GPU present) all independently build and run. <span class="stub">Stubbed today</span> — the MCP Binding still talks to a notify-send + JSONL stand-in, not the daemon above; webcam/screen ingress and compositor output are scoped (<code>docs/architecture.md</code>) but not yet built. The contract is the part that's finished; the rendering behind it is the part that's next.
+<b>Status:</b> <span class="real">As of today</span> — MCP server, Policy Gate, CLI, and the daemon's Vulkan device init (verified compiling and running, including graceful failure with no GPU present) all independently build and run. <span class="stub">Stubbed today</span> — the MCP Binding still talks to a notify-send + JSONL stand-in, not the daemon above; webcam/screen ingress and compositor output are scoped (<code>docs/architecture.md</code>) but not yet built. The contract is the part that's finished; the rendering behind it is the part that's next.
 </div>
 
 <div class="footer">pachakutech-presence · MIT licensed · github.com/Pachakutech/pachakutech-situated-ai-presence-mcp</div>

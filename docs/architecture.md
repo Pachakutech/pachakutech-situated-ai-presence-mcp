@@ -2,8 +2,7 @@
 
 ## Why two processes
 
-MCP's TypeScript SDK runs on Node. There's no mature way to hold a `VkDevice`
-or import a `dma_buf` fd directly from Node. So the design is a split:
+Our design is two-tiered for portability and :
 
 - **MCP Binding** (`src/`, TypeScript) — the typed front door. Owns the tool
   schema and the Policy Gate. Speaks MCP over stdio to whichever agent CLI
@@ -116,18 +115,13 @@ dimensional reduction this project exists to avoid. The daemon-side
 Presence actor owns turning semantic intent into motion; the client only
 ever gives intent.
 
-The open question was *how* the daemon does that internally — regenerate a
-new splat cloud every frame, or deform a fixed one. Checked against current
-research (2023–2026) rather than assumed: every real-time animatable
-Gaussian-splat method that exists, including generative ones (AGORA, 2026),
-animates by deforming a canonical/static splat cloud with linear blend
-skinning or dual-quaternion skinning driven by a small, compact per-frame
-parameter code (as few as ~94 floats — pose + shape + global transform) —
+Full per-frame generation isn't real-time-feasible today; every real-time
+animatable Gaussian-splat method that exists, including generative ones
+(AGORA, 2026), animates by deforming a canonical/static splat cloud with
+linear blend skinning or dual-quaternion skinning driven by a compact
+per-frame parameter code (as few as ~94 floats — pose + shape + global transform) —
 not by regenerating Gaussian positions and covariances from scratch each
-frame. Even AGORA's generative pipeline precomputes a set of Gaussian
-blendshapes once per identity and replays them at inference specifically
-because full per-frame generation isn't real-time-feasible today. That's
-strong, current precedent for the planned shape here:
+frame; we follow their lead:
 
 1. **Control actor** ingests an `addArtifact` splat cloud into sparse Scene
    Memory — the canonical pose, plus (eventually) skinning weights per
@@ -139,21 +133,14 @@ strong, current precedent for the planned shape here:
    the same mechanism every cited method above uses, rather than a fresh
    generative pass per frame.
 
-This keeps the contract exactly as small as it already is, keeps rendering
-inside real-time budgets using an approach the field has already converged
-on, and means the interesting unbuilt work is concentrated in one place:
-the text-to-pose-code model, not the rendering pipeline underneath it.
-
 ## Artifact scope: splat clouds only, on purpose
 
-`addArtifact` accepts Gaussian splat clouds and nothing else for now — no
-glTF, no mesh+texture formats. That's a scope decision, not an oversight: a
+`addArtifact` accepts Gaussian splat clouds and nothing else for now: a
 glTF-to-splat converter is a plausible future tool, but mesh/texture assets
 open a real problem space (billboarding, UV-mapped textures, arbitrary
 polycount) this project doesn't need to solve to answer the question that
 matters — can an agent hand a Presence actor something concrete to look
-like. Constraining input to one representation keeps that question
-answerable now instead of later.
+like.
 
 ## What's honestly unbuilt
 

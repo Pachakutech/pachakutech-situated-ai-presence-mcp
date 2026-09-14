@@ -10,8 +10,8 @@ It's also a natural fit for a population Omarchy already has and most agent
 tooling ignores: people running open-weight models locally. If you're
 running Llama, Gemma, or Qwen on your own box, there's currently no local,
 open equivalent of what cloud products like Astra do with a camera and a
-screen — no way to give your model a body. That's what this is building
-toward. See [`../docs/vision.md`](../docs/vision.md) for the full argument,
+screen — no way to give your model a body. That's what this project is
+unlocking. See [`../docs/vision.md`](../docs/vision.md) for the full argument,
 including why it's explicitly not built around a single privileged agent —
 several agents, or several instances of the same one, are meant to read and
 act on the same shared perceptual state, not compete for it.
