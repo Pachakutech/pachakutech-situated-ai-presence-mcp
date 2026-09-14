@@ -62,7 +62,7 @@ Presence Daemon (Rust) — Vulkan device + live registry, ONE persistent process
     │                     shared by every MCP Binding connected to it
     ▼
 GPU: dma_buf-imported webcam/screen frames, wlr-layer-shell output</div>
-<p>Node has no mature way to hold a <code>VkDevice</code>, so the daemon is a separate Rust process. That separation is also what makes multi-agent sharing real rather than asserted: MCP servers are spawned per agent session, so if GPU state lived inside that process, every agent would get its own private, disconnected copy. One persistent daemon, reachable by however many agents connect, is what lets two agents (or two instances of one) act on the <em>same</em> live presences — no privileged "agent in the middle" owns the substrate.</p>
+<p>Node has no mature way to hold a <code>VkDevice</code>, so the daemon is a separate Rust process. That separation is also what makes multi-agent sharing real rather than asserted: MCP servers are spawned per agent session; one persistent daemon, reachable by however many agents connect, is what lets two agents (or two instances of one) act on the <em>same</em> live presences — no privileged "agent in the middle" owns the substrate.</p>
 
 <h2>The six tools</h2>
 <table>
