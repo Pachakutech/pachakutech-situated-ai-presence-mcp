@@ -6,6 +6,16 @@ plugin is meant to sit at that same level: not a new app to switch to, but a
 capability your existing agent (Claude Code, Codex, or whichever you've set
 as default) picks up automatically.
 
+It's also a natural fit for a population Omarchy already has and most agent
+tooling ignores: people running open-weight models locally. If you're
+running Llama, Gemma, or Qwen on your own box, there's currently no local,
+open equivalent of what cloud products like Astra do with a camera and a
+screen — no way to give your model a body. That's what this is building
+toward. See [`../docs/vision.md`](../docs/vision.md) for the full argument,
+including why it's explicitly not built around a single privileged agent —
+several agents, or several instances of the same one, are meant to read and
+act on the same shared perceptual state, not compete for it.
+
 ## Install
 
 ```
@@ -19,19 +29,24 @@ presence setup claude   # wires the skill + registers the MCP server
 claude mcp add presence -- presence mcp
 ```
 
-and copies `skills/presence/SKILL.md` into Claude Code's skill path. Codex
-and the other pre-wired CLIs work the same way through their own MCP config
-(see each CLI's docs — the server itself is unchanged across all of them,
-per the Model Context Protocol).
+and points you at `skills/presence/SKILL.md` to install into Claude Code's
+skill path by hand if your version doesn't support plugin installs directly.
+Codex and the other pre-wired CLIs work the same way through their own MCP
+config (see each CLI's docs — the server itself is unchanged across all of
+them, per the Model Context Protocol).
 
 ## What you'll see today
 
-The four Manifestations are real and callable, but the rendering underneath
-is currently a stand-in: `notify-send` and a JSONL log
-(`~/.local/state/pachakutech-presence/log.jsonl`), not yet a Hyprland overlay.
-That's deliberate scoping, not a hidden limitation — see
-`docs/architecture.md` for the native Vulkan/Wayland daemon this is meant to
-grow into, and why the MCP layer was built first.
+All six Manifestations (`manifestHighlight`, `spawnPresence` /
+`animatePresence` / `retirePresence`, `addArtifact` / `retireArtifact`) are
+real and callable, but the rendering underneath is currently a stand-in:
+`notify-send` and a JSONL log (`~/.local/state/pachakutech-presence/log.jsonl`),
+not yet a Hyprland overlay. A native Vulkan daemon exists alongside it
+(`../daemon/`) — it initializes a real GPU device and checks for zero-copy
+`dma_buf` support, but isn't wired to the MCP server yet, and doesn't render
+anything either. Both gaps are deliberate scoping, not hidden limitations —
+see [`../docs/architecture.md`](../docs/architecture.md) for the full
+two-process design and what's left to connect.
 
 ## Why start here
 

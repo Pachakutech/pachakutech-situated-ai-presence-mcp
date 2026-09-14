@@ -101,4 +101,14 @@ from any other tool call. This is that vocabulary, built as an open MCP
 server rather than a pitch deck, because the fastest way to have this
 conversation with anyone is to hand them something that already runs.
 
+This isn't an attempt to out-cloud Google's Astra — it's a different
+starting point aimed at a different person: someone already running an
+open-weight model locally (Llama, Gemma, Qwen — whatever), who right now has
+no way to give that model a body. No persistent perceptual memory, nothing
+it can manifest into their space, nothing past a text prompt. That's the gap
+this fills: a common, open-source, local-first, open-weight-model-ready
+multimodal presence layer, starting on Linux. See
+[`docs/vision.md`](docs/vision.md) for the fuller version of why, including
+where this is headed if local models keep closing the gap with cloud ones.
+
 MIT licensed. Contributions and forks welcome.
