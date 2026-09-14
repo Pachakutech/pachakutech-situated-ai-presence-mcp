@@ -7,6 +7,30 @@ package is the MCP Binding: the same substrate also binds to AppFunctions on
 Android and App Intents on iOS, but this is the one that runs on your
 desktop, today, against whatever agent you're already running.
 
+## The contract
+
+| Tool | Pattern | Does |
+|---|---|---|
+| `manifestHighlight` | ephemeral | Highlights described on-screen content for N seconds |
+| `spawnPresence` | instanced (1/3) | Spawns a persistent audio-visual presence derived from context (optionally from a held artifact), returns a `presenceId` |
+| `animatePresence` | instanced (2/3) | Feeds new content to a spawned presence |
+| `retirePresence` | instanced (3/3) | Ends a presence and frees its slot |
+| `addArtifact` | instanced (1/2) | Adds a Gaussian splat cloud to the substrate as reference material — held, not rendered directly, for `spawnPresence` to build from |
+| `retireArtifact` | instanced (2/2) | Removes a held artifact and frees its slot |
+
+Every call passes a Policy Gate first: a 1.5s minimum interval between calls
+to the same tool, a cap of 3 concurrent presences, a cap of 20 held
+artifacts — presences and artifacts are capped independently since they're
+different risk classes (one is actively rendered, the other is inert content
+sitting in the substrate).
+
+Full schemas are in [`src/index.ts`](src/index.ts); the reasoning behind the
+ephemeral/instanced split, why artifacts are a separate registry from
+presences, and why the tool *list* stays fixed while what each tool generates
+stays wide open is in [`skills/presence/SKILL.md`](skills/presence/SKILL.md).
+A one-page version of this contract, formatted for printing/sharing, is in
+[`docs/contract-onepager.html`](docs/contract-onepager.html).
+
 ## Install
 
 ```
@@ -22,22 +46,6 @@ via `omarchy-mise-install`.
 Run `presence doctor` any time to check what this machine can support —
 today that's informational only (see below), but it's the same check the
 native daemon will depend on once it exists.
-
-## What it exposes
-
-| Tool | Pattern | Does |
-|---|---|---|
-| `manifestHighlight` | ephemeral | Highlights described on-screen content for N seconds |
-| `spawnPresence` | instanced (1/3) | Spawns a persistent audio-visual presence derived from context (optionally from a held artifact), returns a `presenceId` |
-| `animatePresence` | instanced (2/3) | Feeds new content to a spawned presence |
-| `retirePresence` | instanced (3/3) | Ends a presence and frees its slot |
-| `addArtifact` | instanced (1/2) | Adds a Gaussian splat cloud (or other content asset) to the substrate as reference material — held, not rendered directly, for `spawnPresence` to build from |
-| `retireArtifact` | instanced (2/2) | Removes a held artifact and frees its slot |
-
-Full schemas are in [`src/index.ts`](src/index.ts); the reasoning behind the
-ephemeral/instanced split, why artifacts are a separate registry from
-presences, and why the tool *list* stays fixed while what each tool generates
-stays wide open is in [`skills/presence/SKILL.md`](skills/presence/SKILL.md).
 
 ## Where this runs, and what it needs access to
 

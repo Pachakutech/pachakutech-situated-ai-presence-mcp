@@ -85,6 +85,76 @@ for bars, notifications, and overlays that float above windows without being
 reparented into them. The natural home for whatever a Presence Actor
 eventually renders.
 
+## Scope: is this the runtime, or a client of the runtime?
+
+Worth answering directly, because it changes what "done" looks like. The
+plan is the latter in spirit but built as the former today: `daemon/` is
+meant to become the actual perceptual substrate — the thing that holds
+Scene Memory, runs the Perception/Presence actors, and would still exist
+even if `presence-mcp` didn't — while `src/` is the *first* Binding onto it,
+not the thing itself. That's not in tension with "do one thing well": the
+daemon and the MCP Binding are already two separate processes, each doing
+one job, talking over the narrow socket protocol above. Bundling them in
+one repo is a convenience for early development (one clone, both halves),
+not a coupling — nothing stops the daemon from being extracted into its own
+package once a second Binding (an AppFunctions Binding on Android, say)
+needs to talk to the same kind of substrate. The one thing worth doing now
+to keep that option open: keep `daemon/src/registry.rs`'s eventual actor
+logic platform-agnostic, and push anything Linux-specific (V4L2, Wayland
+protocols) into clearly separate ingress/output modules, so the core isn't
+quietly Linux-shaped by accident.
+
+## Presence actor design: how `animatePresence` should turn text into motion
+
+The `animatePresence` contract takes exactly one piece of content — `text`
+— and always will. This is deliberate, not a placeholder: the client agent
+should never see or author skeleton/bone/blend-shape parameters directly,
+even though a glTF-style rig is a genuinely low-dimensional way to describe
+motion. Exposing it would mean the client needs domain expertise in the
+substrate's internal representation to do anything, which is exactly the
+dimensional reduction this project exists to avoid. The daemon-side
+Presence actor owns turning semantic intent into motion; the client only
+ever gives intent.
+
+The open question was *how* the daemon does that internally — regenerate a
+new splat cloud every frame, or deform a fixed one. Checked against current
+research (2023–2026) rather than assumed: every real-time animatable
+Gaussian-splat method that exists, including generative ones (AGORA, 2026),
+animates by deforming a canonical/static splat cloud with linear blend
+skinning or dual-quaternion skinning driven by a small, compact per-frame
+parameter code (as few as ~94 floats — pose + shape + global transform) —
+not by regenerating Gaussian positions and covariances from scratch each
+frame. Even AGORA's generative pipeline precomputes a set of Gaussian
+blendshapes once per identity and replays them at inference specifically
+because full per-frame generation isn't real-time-feasible today. That's
+strong, current precedent for the planned shape here:
+
+1. **Control actor** ingests an `addArtifact` splat cloud into sparse Scene
+   Memory — the canonical pose, plus (eventually) skinning weights per
+   Gaussian.
+2. **Presence actor** maps `animatePresence`'s `text` to a compact
+   pose/expression code (this is the one piece that needs a real model —
+   likely the most involved unbuilt piece of this whole design).
+3. That code drives classical LBS/DQS deformation of the canonical cloud,
+   the same mechanism every cited method above uses, rather than a fresh
+   generative pass per frame.
+
+This keeps the contract exactly as small as it already is, keeps rendering
+inside real-time budgets using an approach the field has already converged
+on, and means the interesting unbuilt work is concentrated in one place:
+the text-to-pose-code model, not the rendering pipeline underneath it.
+
+## Artifact scope: splat clouds only, on purpose
+
+`addArtifact` accepts Gaussian splat clouds and nothing else for now — no
+glTF, no mesh+texture formats. That's a scope decision, not an oversight: a
+glTF-to-splat converter is a plausible future tool, but mesh/texture assets
+open a real problem space (billboarding, UV-mapped textures, arbitrary
+polycount) this project doesn't need to solve to answer the question that
+matters — can an agent hand a Presence actor something concrete to look
+like. Constraining input to one representation keeps that question
+answerable now instead of later.
+
 ## What's honestly unbuilt
 
 - Resolving something like "the red error banner" to actual screen

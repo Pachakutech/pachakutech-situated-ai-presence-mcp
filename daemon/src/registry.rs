@@ -1,20 +1,25 @@
-//! Where your architecture goes next. This is intentionally a thin stand-in
-//! for the real Perception/State/Presence actor registry — it proves the
-//! protocol and the Vulkan context are wired together, and logs what a real
-//! actor would do. Replace the bodies here with actual GPU work (import a
-//! dma_buf, write into a persistent splat buffer, etc.) as you build it.
+//! Where your architecture goes next. `highlight_region` is still a thin
+//! stand-in — it just proves the daemon received the proposal and has a
+//! live GPU to eventually draw with. Presence/artifact bookkeeping now runs
+//! through the real Control/Presence actor split (`actors::`) instead of a
+//! flat set of ids, matching docs/architecture.md. This struct is
+//! deliberately thin: it wires the socket protocol to those actors and
+//! owns nothing itself. The actual GPU work — importing a dma_buf, writing
+//! into a persistent splat buffer, applying skinning on the device — is
+//! still all TODO inside the actors it delegates to.
 
+use crate::actors::{ControlActor, PresenceActor, SceneMemory};
 use crate::vulkan::VulkanContext;
-use std::collections::HashSet;
 
 pub struct Registry {
-    live_presences: HashSet<String>,
-    live_artifacts: HashSet<String>,
+    memory: SceneMemory,
+    control: ControlActor,
+    presence: PresenceActor,
 }
 
 impl Registry {
     pub fn new() -> Self {
-        Self { live_presences: HashSet::new(), live_artifacts: HashSet::new() }
+        Self { memory: SceneMemory::new(), control: ControlActor::new(), presence: PresenceActor::new() }
     }
 
     pub fn highlight_region(&self, vk: &VulkanContext, description: &str, duration_secs: u32) {
@@ -34,38 +39,22 @@ impl Registry {
         style_hint: Option<&str>,
         artifact_id: Option<&str>,
     ) {
-        self.live_presences.insert(presence_id.to_string());
-        println!(
-            "[registry] spawnPresence {presence_id} from \"{source_context}\" (style={style_hint:?}, artifact={artifact_id:?})"
-        );
+        self.presence.spawn(&self.memory, presence_id, source_context, style_hint, artifact_id);
     }
 
-    pub fn animate_presence(&self, presence_id: &str, text: &str) -> Result<(), String> {
-        if !self.live_presences.contains(presence_id) {
-            return Err(format!("no live presence with id {presence_id}"));
-        }
-        println!("[registry] animatePresence {presence_id}: \"{text}\"");
-        Ok(())
+    pub fn animate_presence(&mut self, presence_id: &str, text: &str) -> Result<(), String> {
+        self.presence.animate(presence_id, text)
     }
 
     pub fn retire_presence(&mut self, presence_id: &str) -> Result<(), String> {
-        if !self.live_presences.remove(presence_id) {
-            return Err(format!("no live presence with id {presence_id}"));
-        }
-        println!("[registry] retirePresence {presence_id}");
-        Ok(())
+        self.presence.retire(presence_id)
     }
 
     pub fn add_artifact(&mut self, artifact_id: &str, description: &str, source_uri: Option<&str>) {
-        self.live_artifacts.insert(artifact_id.to_string());
-        println!("[registry] addArtifact {artifact_id}: \"{description}\" ({source_uri:?})");
+        self.control.ingest_artifact(&mut self.memory, artifact_id, description, source_uri);
     }
 
     pub fn retire_artifact(&mut self, artifact_id: &str) -> Result<(), String> {
-        if !self.live_artifacts.remove(artifact_id) {
-            return Err(format!("no held artifact with id {artifact_id}"));
-        }
-        println!("[registry] retireArtifact {artifact_id}");
-        Ok(())
+        self.control.retire_artifact(&mut self.memory, artifact_id)
     }
 }

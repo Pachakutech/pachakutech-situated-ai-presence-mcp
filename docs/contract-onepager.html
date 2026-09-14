@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Pachakutech Presence — The Contract</title>
+<style>
+  @page { size: letter; margin: 0.55in; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: Georgia, 'Times New Roman', serif;
+    color: #1a1a1a;
+    max-width: 7.9in;
+    margin: 0 auto;
+    padding: 0.3in 0.1in;
+    font-size: 10.3px;
+    line-height: 1.42;
+  }
+  h1 { font-size: 19px; margin: 0 0 2px 0; font-weight: 700; }
+  .subtitle { font-family: -apple-system, Helvetica, Arial, sans-serif; font-size: 11.5px; color: #555; margin: 0 0 12px 0; }
+  h2 {
+    font-family: -apple-system, Helvetica, Arial, sans-serif;
+    font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.04em;
+    color: #8a3b1f; border-bottom: 1.5px solid #8a3b1f; padding-bottom: 3px;
+    margin: 14px 0 6px 0;
+  }
+  p { margin: 4px 0; }
+  code, pre { font-family: 'SF Mono', Menlo, Consolas, monospace; }
+  code { background: #f2ede6; padding: 0 3px; border-radius: 2px; font-size: 9.5px; }
+  pre {
+    background: #f2ede6; border-left: 3px solid #8a3b1f; padding: 6px 9px;
+    font-size: 9px; line-height: 1.35; overflow-x: auto; margin: 4px 0 8px 0; border-radius: 0 3px 3px 0;
+  }
+  table { width: 100%; border-collapse: collapse; font-family: -apple-system, Helvetica, Arial, sans-serif; font-size: 9.5px; margin: 4px 0 10px 0; }
+  th { text-align: left; background: #efe4d8; padding: 4px 6px; font-weight: 700; }
+  td { padding: 4px 6px; border-bottom: 1px solid #e5ddd2; vertical-align: top; }
+  tr:nth-child(even) td { background: #faf8f5; }
+  .diagram {
+    font-family: 'SF Mono', Menlo, Consolas, monospace; font-size: 9px; background: #f2ede6;
+    border-left: 3px solid #8a3b1f; padding: 8px 10px; white-space: pre; line-height: 1.5; border-radius: 0 3px 3px 0;
+  }
+  .cols { display: flex; gap: 16px; }
+  .col { flex: 1; }
+  .status { font-family: -apple-system, Helvetica, Arial, sans-serif; font-size: 9px; color: #666; margin-top: 14px; border-top: 1px solid #ddd; padding-top: 6px; }
+  .real { color: #1a6b3a; font-weight: 700; }
+  .stub { color: #a05a00; font-weight: 700; }
+  .footer { font-family: -apple-system, Helvetica, Arial, sans-serif; font-size: 8.5px; color: #999; margin-top: 8px; text-align: center; }
+</style>
+</head>
+<body>
+
+<h1>Pachakutech Presence — the Contract</h1>
+<p class="subtitle">An MCP Binding for a Presence Layer: six typed actions through which an agent puts something into the user's actual space, instead of only describing it in text. This is the piece we think is worth reviewing first — not the pitch, the schema.</p>
+
+<h2>The two-process split</h2>
+<div class="diagram">agent CLI (Claude Code, Codex, ...)
+    │  MCP over stdio
+    ▼
+MCP Binding (Node)     — policy gate, typed tools, one process per agent session
+    │  Unix domain socket, one JSON line per message
+    ▼
+Presence Daemon (Rust) — Vulkan device + live registry, ONE persistent process
+    │                     shared by every MCP Binding connected to it
+    ▼
+GPU: dma_buf-imported webcam/screen frames, wlr-layer-shell output</div>
+<p>Node has no mature way to hold a <code>VkDevice</code>, so the daemon is a separate Rust process. That separation is also what makes multi-agent sharing real rather than asserted: MCP servers are spawned per agent session, so if GPU state lived inside that process, every agent would get its own private, disconnected copy. One persistent daemon, reachable by however many agents connect, is what lets two agents (or two instances of one) act on the <em>same</em> live presences — no privileged "agent in the middle" owns the substrate.</p>
+
+<h2>The six tools</h2>
+<table>
+<tr><th>Tool</th><th>Pattern</th><th>Contract</th></tr>
+<tr><td><code>manifestHighlight</code></td><td>ephemeral</td><td>description, durationSeconds (1–30) → fires once, resolves, done</td></tr>
+<tr><td><code>spawnPresence</code></td><td>instanced 1/3</td><td>sourceContext, styleHint?, artifactId? → presenceId</td></tr>
+<tr><td><code>animatePresence</code></td><td>instanced 2/3</td><td>presenceId, text → feeds new content to a live presence</td></tr>
+<tr><td><code>retirePresence</code></td><td>instanced 3/3</td><td>presenceId → ends it, frees the slot (max 3 concurrent)</td></tr>
+<tr><td><code>addArtifact</code></td><td>instanced 1/2</td><td>description, sourceUri? → artifactId (held, not rendered)</td></tr>
+<tr><td><code>retireArtifact</code></td><td>instanced 2/2</td><td>artifactId → frees the slot (max 20 held)</td></tr>
+</table>
+
+<h2>Every call passes a Policy Gate before it touches the substrate</h2>
+<div class="cols">
+<div class="col">
+<p><b>Rate limit:</b> 1.5s minimum between calls to the same tool.<br>
+<b>Presence cap:</b> 3 concurrent — spawning a 4th is refused until one retires.<br>
+<b>Artifact cap:</b> 20 held — same refusal pattern, separate registry.</p>
+</div>
+<div class="col">
+<p>Presences and artifacts are capped <em>independently</em>: an artifact is inert content sitting in the substrate; a presence is something actively rendered. Different risk classes, reasoned about separately even though the lifecycle shape (add → use → retire) is the same.</p>
+</div>
+</div>
+
+<h2>The wire protocol (MCP Binding ↔ daemon)</h2>
+<div class="cols">
+<div class="col">
+<p><b>Request</b></p>
+<pre>{ "kind": "spawnPresence",
+  "proposalId": "a1b2",
+  "presenceId": "p-x7q2",
+  "sourceContext": "the diagram on screen",
+  "styleHint": "minimal, line-art",
+  "artifactId": null }</pre>
+</div>
+<div class="col">
+<p><b>Response</b></p>
+<pre>{ "proposalId": "a1b2",
+  "status": "ok",
+  "detail": { "presenceId": "p-x7q2" } }</pre>
+<p>On failure: <code>{"status":"error","error":"..."}</code> — e.g. capacity refusal, unknown id.</p>
+</div>
+</div>
+<p>One JSON line per message, nothing dense crosses this boundary — no buffers, no pixels. Every MCP tool has a matching Rust <code>Proposal</code> variant, kept in lockstep by hand at six tools; regenerating one from the other becomes worth it past that.</p>
+
+<div class="status">
+<b>Status, plainly:</b> <span class="real">Real today</span> — MCP server, Policy Gate, CLI, and the daemon's Vulkan device init (verified compiling and running, including graceful failure with no GPU present) all independently build and run. <span class="stub">Stubbed today</span> — the MCP Binding still talks to a notify-send + JSONL stand-in, not the daemon above; webcam/screen ingress and compositor output are scoped (<code>docs/architecture.md</code>) but not yet built. The contract is the part that's finished; the rendering behind it is the part that's next.
+</div>
+
+<div class="footer">pachakutech-presence · MIT licensed · github.com/Pachakutech/pachakutech-situated-ai-presence-mcp</div>
+
+</body>
+</html>

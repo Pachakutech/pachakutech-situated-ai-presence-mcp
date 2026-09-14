@@ -1,3 +1,4 @@
+mod actors;
 mod protocol;
 mod registry;
 mod socket;

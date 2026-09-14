@@ -52,13 +52,15 @@ server.registerTool("spawnPresence", {
 server.registerTool("addArtifact", {
     title: "Add a reference artifact",
     description: "Instanced Manifestation, step 1 of 2 (add / retire). Adds a Gaussian splat " +
-        "artifact (or other content asset) to the substrate as reference material — " +
-        "it is held, not rendered. Use this to give spawnPresence something concrete " +
-        "to build from (e.g. 'this is what I want the presence to look like') rather " +
-        "than describing appearance in prose. Returns an artifactId.",
+        "cloud to the substrate as reference material — it is held, not rendered. " +
+        "Use this to give spawnPresence something concrete to build from (e.g. " +
+        "'this is what I want the presence to look like') rather than describing " +
+        "appearance in prose. Splat clouds only for now — no mesh/texture formats " +
+        "(glTF, etc.); converting those is a separate, unbuilt concern. Returns an " +
+        "artifactId.",
     inputSchema: {
-        description: z.string().describe("What this artifact is/depicts"),
-        sourceUri: z.string().optional().describe("Where the content came from, if applicable"),
+        description: z.string().describe("What this splat cloud is/depicts"),
+        sourceUri: z.string().optional().describe("Where the splat data came from, if applicable"),
     },
 }, async ({ description, sourceUri }) => {
     policy.assertAllowed("addArtifact");

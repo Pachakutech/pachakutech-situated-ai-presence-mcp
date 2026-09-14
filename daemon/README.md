@@ -49,7 +49,12 @@ GPU's name and dma_buf support, and start listening on the socket.
    rendered into with the Vulkan device already set up here.
 4. **Replace `src/registry.rs`'s print statements** with real actor logic as
    each of the above lands — the protocol boundary shouldn't need to change
-   for any of this.
+   for any of this. Concretely, per `../docs/architecture.md`: a Control
+   actor that ingests an `addArtifact` splat cloud into sparse Scene Memory,
+   and a Presence actor that maps `animatePresence`'s text to a compact
+   pose/expression code and applies it to the canonical cloud via linear
+   blend or dual-quaternion skinning — not full per-frame regeneration; see
+   the architecture doc for why.
 5. **Wire the MCP Binding to this instead of the stub**: swap
    `../src/daemonStub.ts` for a real `daemonClient.ts` that connects to this
    socket. Not done yet on purpose — worth doing once there's something on
