@@ -1,0 +1,6 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "pachakutech-presence",
+  "version": "0.1.0",
+  "description": "A Presence Layer: lets an agent manifest what it's doing directly into your space instead of only describing it in text."
+}

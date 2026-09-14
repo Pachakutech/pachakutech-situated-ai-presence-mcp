@@ -1,0 +1,22 @@
+{
+  "name": "@pachakutech/presence-mcp",
+  "version": "0.1.0",
+  "description": "MCP Binding for the Pachakutech Presence Layer",
+  "type": "module",
+  "bin": {
+    "presence": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.11.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "@types/node": "^20.0.0"
+  },
+  "license": "MIT"
+}
