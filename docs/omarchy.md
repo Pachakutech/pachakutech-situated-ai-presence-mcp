@@ -18,10 +18,20 @@ act on the same shared perceptual state, not compete for it.
 
 ## Install
 
+Once this is published to npm:
+
 ```
-omarchy-mise-install github:pachakutech/presence-mcp presence
+omarchy-mise-install npm:@pachakutech/presence-mcp presence
 presence setup claude   # wires the skill + registers the MCP server
 ```
+
+**Not verified yet, and not npm-published yet either** — the line above is
+the intended shape once a package exists to point mise's `npm:` backend at.
+`omarchy-mise-install`'s `github:` form is for prebuilt release binaries,
+not a TypeScript source tree needing `npm install && npm run build`, so it
+won't work against this repo directly without either a real npm publish or
+a GitHub Release with a built `dist/`. Until then, install with the
+clone-and-build steps in the main [`README.md`](../README.md#setup).
 
 `presence setup claude` runs the equivalent of:
 

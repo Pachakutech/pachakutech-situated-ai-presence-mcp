@@ -6,6 +6,13 @@
   "bin": {
     "presence": "./dist/cli.js"
   },
+  "files": [
+    "dist"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Pachakutech/pachakutech-situated-ai-presence.git"
+  },
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js"

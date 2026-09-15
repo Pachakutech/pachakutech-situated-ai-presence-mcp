@@ -47,15 +47,30 @@ This is two things that need different environments, not one:
 
 ### MCP Binding — any OS with Node
 
+Not yet published to npm — clone and build until it is:
+
+```
+git clone https://github.com/Pachakutech/pachakutech-situated-ai-presence.git
+cd pachakutech-situated-ai-presence
+npm install
+npm run build
+npm link          # puts `presence` on your PATH from this checkout
+presence setup claude
+```
+
+`presence setup claude` runs `claude mcp add presence -- presence mcp` for
+you. For Codex, `presence setup codex` does the equivalent. Once this is
+published, the same setup becomes:
+
 ```
 npm install -g @pachakutech/presence-mcp
 presence setup claude
 ```
 
-`presence setup claude` runs `claude mcp add presence -- presence mcp` for
-you. For Codex, `presence setup codex` does the equivalent. On Omarchy
-specifically, see [`docs/omarchy.md`](docs/omarchy.md) for a one-line install
-via `omarchy-mise-install`.
+On Omarchy specifically, see [`docs/omarchy.md`](docs/omarchy.md) for the
+planned one-line install via `omarchy-mise-install` — that path needs this
+published to npm first (or a GitHub Release with a built `dist/`); it's not
+verified to work yet, so clone-and-build is the reliable path until then.
 
 Run `presence doctor` any time to check what this machine can support —
 today that's informational only (see below), but it's the same check the
