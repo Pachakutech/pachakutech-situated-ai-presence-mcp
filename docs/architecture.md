@@ -2,7 +2,8 @@
 
 ## Why two processes
 
-Our design is two-tiered for portability and :
+MCP's TypeScript SDK runs on Node. There's no mature way to hold a `VkDevice`
+or import a `dma_buf` fd directly from Node. So the design is a split:
 
 - **MCP Binding** (`src/`, TypeScript) — the typed front door. Owns the tool
   schema and the Policy Gate. Speaks MCP over stdio to whichever agent CLI

@@ -50,8 +50,8 @@ This is two things that need different environments, not one:
 Not yet published to npm — clone and build until it is:
 
 ```
-git clone https://github.com/Pachakutech/pachakutech-situated-ai-presence.git
-cd pachakutech-situated-ai-presence
+git clone https://github.com/Pachakutech/pachakutech-situated-ai-presence-mcp.git
+cd pachakutech-situated-ai-presence-mcp
 npm install
 npm run build
 npm link          # puts `presence` on your PATH from this checkout
@@ -59,8 +59,8 @@ presence setup claude
 ```
 
 `presence setup claude` runs `claude mcp add presence -- presence mcp` for
-you. For Codex, `presence setup codex` does the equivalent. Once this is
-published, the same setup becomes:
+you. `presence setup codex` and `presence setup grok` do the equivalent for
+Codex and Grok CLI. Once this is published, the same setup becomes:
 
 ```
 npm install -g @pachakutech/presence-mcp
@@ -171,4 +171,4 @@ multimodal presence layer, starting on Linux. See
 where this is headed if local models keep closing the gap with cloud ones.
 
 MIT licensed. Contributions and forks welcome, at
-[github.com/Pachakutech/pachakutech-situated-ai-presence](https://github.com/Pachakutech/pachakutech-situated-ai-presence).
+[github.com/Pachakutech/pachakutech-situated-ai-presence-mcp](https://github.com/Pachakutech/pachakutech-situated-ai-presence-mcp).

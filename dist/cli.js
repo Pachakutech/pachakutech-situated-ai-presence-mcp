@@ -17,6 +17,7 @@ function usage() {
         "  mcp             Run the Presence MCP server on stdio (what agents spawn)",
         "  setup claude    Register this server with Claude Code",
         "  setup codex     Register this server with Codex CLI",
+        "  setup grok      Register this server with Grok CLI",
         "  doctor          Check that this machine can actually run the daemon later",
     ].join("\n"));
     process.exit(1);
@@ -25,11 +26,23 @@ async function runServer() {
     // Reuses index.ts's own main() — this process *becomes* the MCP server.
     await import(SERVER_ENTRY);
 }
+// Wraps execFileSync so a missing agent CLI fails with one clear line
+// instead of a raw Node ENOENT stack trace.
+function runAgentCommand(cliName, args) {
+    try {
+        execFileSync(cliName, args, { stdio: "inherit" });
+    }
+    catch (error) {
+        if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+            console.error(`\n'${cliName}' isn't on your PATH — install it first, then rerun this.`);
+            process.exit(1);
+        }
+        throw error;
+    }
+}
 function setupClaude() {
     console.log("Registering with Claude Code...");
-    execFileSync("claude", ["mcp", "add", "presence", "--", "presence", "mcp"], {
-        stdio: "inherit",
-    });
+    runAgentCommand("claude", ["mcp", "add", "presence", "--", "presence", "mcp"]);
     console.log("\nDone. The skill at skills/presence/SKILL.md is not auto-installed — " +
         "Claude Code's skill install path varies by version. If your Claude Code " +
         "supports plugin installs, point it at this repo's plugin.json directly; " +
@@ -37,9 +50,14 @@ function setupClaude() {
 }
 function setupCodex() {
     console.log("Registering with Codex CLI...");
-    execFileSync("codex", ["mcp", "add", "presence", "--command", "presence", "--args", "mcp"], {
-        stdio: "inherit",
-    });
+    runAgentCommand("codex", ["mcp", "add", "presence", "--command", "presence", "--args", "mcp"]);
+}
+function setupGrok() {
+    console.log("Registering with Grok CLI...");
+    // Same shape as Claude Code: `grok mcp add <name> -- <command> <args...>`,
+    // written to ~/.grok/config.toml under [mcp_servers.presence]. See
+    // https://docs.x.ai/build/features/mcp-servers.
+    runAgentCommand("grok", ["mcp", "add", "presence", "--", "presence", "mcp"]);
 }
 function canAccess(path) {
     try {
@@ -87,6 +105,8 @@ switch (command) {
             setupClaude();
         else if (sub === "codex")
             setupCodex();
+        else if (sub === "grok")
+            setupGrok();
         else
             usage();
         break;
