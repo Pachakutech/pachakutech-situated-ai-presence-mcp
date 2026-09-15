@@ -1,6 +1,6 @@
 # Pachakutech Presence — an MCP Binding for the Presence Layer
 
-Not another agent harness. A **Presence Layer**: a small, typed, policy-gated
+Not another agent harness! A **Presence Layer**: a small, typed, policy-gated
 set of actions — Manifestations — through which an agent can put sensory
 stimuli directly into your UI instead of only describing it in text. This
 package is the MCP Binding: the same substrate also binds to AppFunctions on
@@ -31,7 +31,21 @@ stays wide open is in [`skills/presence/SKILL.md`](skills/presence/SKILL.md).
 A one-page version of this contract, formatted for printing/sharing, is in
 [`docs/contract-onepager.html`](docs/contract-onepager.html).
 
-## Install
+## Setup
+
+This is two things that need different environments, not one:
+
+- **The MCP Binding** (`src/`) is plain Node/TypeScript — it runs on Linux,
+  macOS, or WSL, anywhere your agent CLI does. This is the half you install
+  today.
+- **The Presence Daemon** (`daemon/`) is Linux-only by design — it needs a
+  real Vulkan device and, once ingress/output land, a Wayland compositor
+  speaking `wlr-screencopy`/`wlr-layer-shell` (Hyprland is the reference
+  target; see [`docs/architecture.md`](docs/architecture.md)). It's not
+  wired to the MCP Binding yet, so you don't need it to try the tools today
+  — only to build toward real rendering.
+
+### MCP Binding — any OS with Node
 
 ```
 npm install -g @pachakutech/presence-mcp
@@ -46,6 +60,28 @@ via `omarchy-mise-install`.
 Run `presence doctor` any time to check what this machine can support —
 today that's informational only (see below), but it's the same check the
 native daemon will depend on once it exists.
+
+### Presence Daemon — Linux, with a Vulkan driver installed
+
+Only needed if you're building toward the real renderer rather than just
+using the MCP tools against the stub. Requires a Rust toolchain
+([rustup.rs](https://rustup.rs)) and a working Vulkan install:
+
+```
+# Arch/Omarchy: vulkan-icd-loader plus your GPU vendor's driver package
+# (vulkan-radeon, vulkan-intel, or nvidia-utils) — presence doctor tells
+# you if one's missing.
+cd daemon
+cargo build
+./target/debug/presence-daemon
+```
+
+On a machine with no Vulkan driver, it prints a clear error and exits
+instead of crashing — that's expected outside a real Linux desktop session,
+not a bug. On one with a working install, it reports your GPU's name and
+whether it supports the zero-copy `dma_buf` import path the ingress design
+depends on, then starts listening on its socket. See
+[`daemon/README.md`](daemon/README.md) for what's built versus what's next.
 
 ## Where this runs, and what it needs access to
 
@@ -119,4 +155,5 @@ multimodal presence layer, starting on Linux. See
 [`docs/vision.md`](docs/vision.md) for the fuller version of why, including
 where this is headed if local models keep closing the gap with cloud ones.
 
-MIT licensed. Contributions and forks welcome.
+MIT licensed. Contributions and forks welcome, at
+[github.com/Pachakutech/pachakutech-situated-ai-presence](https://github.com/Pachakutech/pachakutech-situated-ai-presence).
