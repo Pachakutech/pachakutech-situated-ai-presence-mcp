@@ -5,7 +5,7 @@ set of actions — Manifestations — through which an agent can put sensory
 stimuli directly into your UI instead of only describing it in text. This
 package is the MCP Binding: the same substrate also binds to AppFunctions on
 Android and App Intents on iOS, but this is the one that runs on your
-desktop, today, against whatever agent you're already running.
+desktop against whatever agent you're already running.
 
 ## The contract
 
@@ -27,13 +27,13 @@ sitting in the substrate).
 Full schemas are in [`src/index.ts`](src/index.ts); the reasoning behind the
 ephemeral/instanced split, why artifacts are a separate registry from
 presences, and why the tool *list* stays fixed while what each tool generates
-stays wide open is in [`skills/presence/SKILL.md`](skills/presence/SKILL.md).
+remains versatile is in [`skills/presence/SKILL.md`](skills/presence/SKILL.md).
 A one-page version of this contract, formatted for printing/sharing, is in
 [`docs/contract-onepager.html`](docs/contract-onepager.html).
 
 ## Setup
 
-This is two things that need different environments, not one:
+This is two components in different environments:
 
 - **The MCP Binding** (`src/`) is plain Node/TypeScript — it runs on Linux,
   macOS, or WSL, anywhere your agent CLI does. This is the half you install
