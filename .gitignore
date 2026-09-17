@@ -1,0 +1,43 @@
+gitignore
+# --- Rust / Cargo ---
+# The target directory is the main cause of your 850MB bloat
+**/target/
+# Remove if you want to force specific dependency versions,
+# but usually kept for servers to ensure reproducible builds.
+# Cargo.lock
+
+# --- Node.js ---
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+dist/
+build/
+
+# --- Agent / MCP Specific ---
+# Secret keys for LLM providers (OpenAI, Anthropic, etc.)
+.env
+.env.local
+.env.*.local
+
+# Database / Storage (if your agent uses local vector DBs or SQLite)
+*.db
+*.db-journal
+*.sqlite
+.data/
+.chroma/
+.qdrant/
+
+# --- OS / IDE Noise ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.bak
+
+# --- Linux / System ---
+core
+*.out
+*.log
