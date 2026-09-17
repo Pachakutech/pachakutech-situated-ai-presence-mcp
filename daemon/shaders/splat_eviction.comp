@@ -1,0 +1,68 @@
+#version 450
+// Adapted from the XR content layer's LRU eviction shader. One real
+// compile bug fixed (confirmed via glslangValidator): `EvictionUniforms`
+// was declared `layout (std430, ...) uniform` — std430 is only a legal
+// layout qualifier on `buffer` blocks; a `uniform` block needs std140 (or
+// no explicit layout). Changed to std140 below; harmless here since all
+// three members are plain uints with identical alignment either way, but
+// it wouldn't compile as originally written. Also named the eviction-list
+// bound instead of the original's bare `256u` magic number.
+layout (local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+struct AnimatedSplat {
+    vec4 position_and_confidence;
+    vec4 rotation;
+    vec4 color;
+    uvec4 joint_ids;
+    vec4 weights;
+    uint owner_id;
+    uint last_visible_frame;
+    uint flags;
+    uint padding;
+};
+
+layout (std140, set = 0, binding = 0) uniform EvictionUniforms {
+    uint total_capacity;      // Max size of the DynamicSplatBuffer (1M)
+    uint current_frame;       // Passed from Flutter
+    uint absolute_max_age;    // e.g., 600 frames (~10 seconds unseen) -> complete eviction
+} config;
+
+layout (std430, set = 0, binding = 1) buffer DynamicSplatBuffer {
+    AnimatedSplat splats[];
+} input_buf;
+
+// Named instead of the original's bare `256u` in the bounds check below —
+// same value, but now there's one place to change it if the CPU-side
+// eviction-list buffer capacity ever changes.
+const uint MAX_EVICTIONS_PER_FRAME = 256u;
+
+layout (std430, set = 0, binding = 2) buffer EvictedTextures {
+    uint count;               // Atomic tracker of how many were evicted this frame
+    uint layer_indices[];     // Array of indices to recycle on the CPU side
+} evictionList;
+
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    if (id >= config.total_capacity) return;
+
+    uint currentFlags = input_buf.splats[id].flags;
+    bool isActive = (currentFlags & 1u) != 0u;
+    if (!isActive) return;
+
+    uint age = config.current_frame - input_buf.splats[id].last_visible_frame;
+
+    if (age >= config.absolute_max_age) {
+        bool isBillboard = (currentFlags & 2u) != 0u;
+
+        if (isBillboard) {
+            uint textureLayerIndex = (input_buf.splats[id].padding >> 16u) & 0xFFFFu;
+            uint writeIndex = atomicAdd(evictionList.count, 1u);
+            if (writeIndex < MAX_EVICTIONS_PER_FRAME) {
+                evictionList.layer_indices[writeIndex] = textureLayerIndex;
+            }
+        }
+
+        input_buf.splats[id].flags = 0u;
+        input_buf.splats[id].padding = 0u;
+    }
+}

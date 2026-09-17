@@ -1,0 +1,148 @@
+// =============================================
+// Dual Quaternion Math Utilities
+// =============================================
+// Adapted from the XR content layer's math_utils.comp. Two real bugs fixed
+// here (both confirmed against glslangValidator, not just read by eye —
+// see daemon/docs/gpu-splat-pipeline.md for the compile transcripts):
+//
+//   1. `multiply_dq`'s dual part was missing two cross-term contributions
+//      (b.dual.w * a.real.xyz and a.dual.w * b.real.xyz). Composing two
+//      dual quaternions with the original formula silently produced a
+//      wrong translation whenever a dual quaternion's `dual.w` component
+//      is nonzero — which it generally is (dual.w = -0.5*dot(t, real.xyz)
+//      for any translation not perpendicular to the rotation axis).
+//
+//   2. `multiply_dq_scalar` and `add_dq` were called by the projection
+//      shader's skinning blend but never defined anywhere in the provided
+//      math_utils.comp — a straight compile error. Added below, plus the
+//      "shortest path" sign fix DQB needs (see blend_bones() note).
+
+struct DualQuat {
+    vec4 real;  // Rotation quaternion (w, x, y, z)
+    vec4 dual;  // Translation + rotation coupling
+};
+
+// Normalize a dual quaternion. Only enforces |real| == 1; a fully unit
+// dual quaternion also needs dot(real, dual) == 0, which this doesn't
+// restore. That second constraint drifts much more slowly and is commonly
+// left unenforced in real-time skinning — worth knowing about, not
+// necessarily worth paying for every frame.
+DualQuat normalize_dq(DualQuat dq) {
+    float len = length(dq.real);
+    if (len < 1e-6) return dq; // avoid div by zero
+    dq.real /= len;
+    dq.dual /= len;
+    return dq;
+}
+
+// Transform a point using a Dual Quaternion. Unchanged from the original —
+// checked this one by hand against the standard t = 2*(dual * conj(real))
+// derivation and it's correct as given.
+vec3 transform_point_dq(DualQuat dq, vec3 p) {
+    vec3 q = dq.real.xyz;
+    float w = dq.real.w;
+
+    vec3 t = 2.0 * (dq.dual.xyz * w - dq.dual.w * q - cross(dq.dual.xyz, q));
+
+    vec3 tmp = cross(q, p) + w * p;
+    vec3 rotated = p + 2.0 * cross(q, tmp);
+
+    return rotated + t;
+}
+
+// Multiply two dual quaternions (a * b). Fixed: dual.xyz now includes the
+// two terms the original dropped (b.dual.w * a.real.xyz and
+// a.dual.w * b.real.xyz).
+DualQuat multiply_dq(DualQuat a, DualQuat b) {
+    DualQuat result;
+
+    result.real.w = a.real.w * b.real.w - dot(a.real.xyz, b.real.xyz);
+    result.real.xyz = a.real.w * b.real.xyz + b.real.w * a.real.xyz + cross(a.real.xyz, b.real.xyz);
+
+    result.dual.w = a.real.w * b.dual.w + a.dual.w * b.real.w
+                  - dot(a.real.xyz, b.dual.xyz) - dot(a.dual.xyz, b.real.xyz);
+
+    result.dual.xyz = a.real.w * b.dual.xyz + b.dual.w * a.real.xyz
+                     + b.real.w * a.dual.xyz + a.dual.w * b.real.xyz
+                     + cross(a.real.xyz, b.dual.xyz) + cross(a.dual.xyz, b.real.xyz);
+
+    return normalize_dq(result); // Drift prevention
+}
+
+// Scale both parts of a dual quaternion by a scalar weight — needed for
+// dual quaternion *linear blending* (DQB), where a skinned pose is a
+// weighted sum of bone dual quaternions rather than a single multiply.
+DualQuat multiply_dq_scalar(DualQuat a, float s) {
+    DualQuat result;
+    result.real = a.real * s;
+    result.dual = a.dual * s;
+    return result;
+}
+
+// Componentwise add — the other half of DQB.
+DualQuat add_dq(DualQuat a, DualQuat b) {
+    DualQuat result;
+    result.real = a.real + b.real;
+    result.dual = a.dual + b.dual;
+    return result;
+}
+
+// Blends up to 4 bone dual quaternions by weight (DQB), with the sign
+// correction DQB needs to avoid "candy-wrapper" artifacts: q and -q
+// represent the identical rotation, but a naive weighted sum of them
+// doesn't know that and can partially cancel instead of add. The fix is
+// to flip any bone whose real part points away from a reference (here,
+// the first bone) before summing. The projection shader's inline blend
+// didn't do this — worth pulling into one shared function so every
+// skinning call site gets it for free instead of relying on each call
+// site remembering to.
+DualQuat blend_bones(DualQuat b0, DualQuat b1, DualQuat b2, DualQuat b3, vec4 weights) {
+    if (dot(b1.real, b0.real) < 0.0) b1 = multiply_dq_scalar(b1, -1.0);
+    if (dot(b2.real, b0.real) < 0.0) b2 = multiply_dq_scalar(b2, -1.0);
+    if (dot(b3.real, b0.real) < 0.0) b3 = multiply_dq_scalar(b3, -1.0);
+
+    DualQuat blended = multiply_dq_scalar(b0, weights.x);
+    blended = add_dq(blended, multiply_dq_scalar(b1, weights.y));
+    blended = add_dq(blended, multiply_dq_scalar(b2, weights.z));
+    blended = add_dq(blended, multiply_dq_scalar(b3, weights.w));
+    return normalize_dq(blended);
+}
+
+// Extract 3x3 rotation matrix from DualQuat (useful for covariance /
+// normals / billboard axes). Unchanged — matches the Rust-side
+// quaternion-to-matrix derivation in daemon/src/actors/splat_io.rs exactly,
+// which is a good cross-check that both sides agree.
+mat3 extract_rotation_dq(DualQuat dq) {
+    vec4 q = dq.real;
+    float x = q.x, y = q.y, z = q.z, w = q.w;
+
+    return mat3(
+    1.0 - 2.0*(y*y + z*z),  2.0*(x*y - w*z),      2.0*(x*z + w*y),
+    2.0*(x*y + w*z),        1.0 - 2.0*(x*x + z*z), 2.0*(y*z - w*x),
+    2.0*(x*z - w*y),        2.0*(y*z + w*x),      1.0 - 2.0*(x*x + y*y)
+    );
+}
+
+// Conjugate of a Dual Quaternion (useful for inversion). Unchanged.
+DualQuat conjugate_dq(DualQuat dq) {
+    DualQuat res;
+    res.real = vec4(-dq.real.xyz, dq.real.w);
+    res.dual = vec4(-dq.dual.xyz, dq.dual.w);
+    return res;
+}
+
+// Inverse of a Dual Quaternion. For a normalized DQ, the inverse is just
+// the conjugate. Unchanged.
+DualQuat inverse_dq(DualQuat dq) {
+    return conjugate_dq(dq);
+}
+
+// Create a Dual Quaternion from a rotation quat and a translation vector.
+// Unchanged.
+DualQuat create_dq(vec4 rotation, vec3 translation) {
+    DualQuat dq;
+    dq.real = rotation;
+    dq.dual.w = -0.5 * dot(translation, rotation.xyz);
+    dq.dual.xyz = 0.5 * (rotation.w * translation + cross(translation, rotation.xyz));
+    return dq;
+}

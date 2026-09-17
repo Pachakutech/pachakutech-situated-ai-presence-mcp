@@ -1,0 +1,20 @@
+[package]
+name = "pachakutech-presence-daemon"
+version = "0.1.0"
+edition = "2021"
+description = "Native Presence Daemon: owns the GPU. Talks to the MCP Binding over a local Unix socket."
+license = "MIT"
+
+[dependencies]
+# `loaded` (default) feature dynamically loads libvulkan.so at runtime via
+# libloading — this crate compiles fine on a machine with no Vulkan SDK
+# installed, and only fails, with a clear error, when actually run on one
+# with no driver present. That's the right failure mode for something meant
+# to be built and reviewed on machines that don't all have a GPU handy.
+ash = { version = "0.38", default-features = false, features = ["loaded", "debug"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[[bin]]
+name = "presence-daemon"
+path = "src/main.rs"

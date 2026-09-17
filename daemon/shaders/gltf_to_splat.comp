@@ -1,0 +1,167 @@
+#version 450
+// Adapted from the sketch of a glTF-mesh -> splat-cloud converter. Two real
+// compile bugs fixed (confirmed via glslangValidator):
+//
+//   1. `config.globalBufferSlotOffset` was read but never declared in
+//      `ConverterUniforms` — added below.
+//   2. The output `input.splats[...]` (the DynamicSplatBuffer SSBO) was
+//      written to but never given a binding declaration in the snippet —
+//      added at set 0, binding 4, matching the projection/eviction
+//      shaders' set-0 slots for the same buffer (0=uniforms, 1=bones,
+//      2=dynamic splats, 3=projected output in the projection shader; this
+//      converter doesn't need bones/projected-output, so its own binding
+//      numbering is independent — just needs to point at the same
+//      underlying buffer at the API/descriptor-set level).
+//
+// This is a genuinely good fit for what "wrap a glTF in a splat cloud"
+// needs: barycentric-scattering a mesh's vertices and area-weighting the
+// splat radius by triangle size is a standard, real-time-safe way to turn
+// a textured mesh into an approximate Gaussian cloud (see
+// docs/gpu-splat-pipeline.md for the fuller answer to "is this the right
+// way to animate a splat cloud"). The one thing worth calling out: this
+// produces a reasonable *preview*-quality splat cloud, not the
+// photometric-optimization quality of a trained 3DGS scene — that's the
+// right tradeoff for an instant, no-training conversion path.
+
+layout (local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+struct AnimatedSplat {
+    vec4 position_and_confidence;
+    vec4 rotation;
+    vec4 color;
+    uvec4 joint_ids;
+    vec4 weights;
+    uint owner_id;
+    uint last_visible_frame;
+    uint flags;
+    uint padding;
+};
+
+// The data shape coming from the glTF parser
+struct MeshVertex {
+    vec4 position;     // xyz = position
+    vec4 normal;       // xyz = normal
+    vec2 uv;
+    uvec4 joint_ids;   // Preserved for AnimatedSplat — this is exactly
+                        // glTF's JOINTS_0 attribute, carried straight
+                        // through onto the generated splats.
+    vec4 weights;       // glTF's WEIGHTS_0, likewise.
+};
+
+layout (std430, set = 1, binding = 0) readonly buffer VertexBuffer {
+    MeshVertex vertices[];
+} mesh;
+
+layout (std430, set = 1, binding = 1) readonly buffer IndexBuffer {
+    uint indices[];
+} meshIndices;
+
+layout (set = 1, binding = 2) uniform sampler2D baseColorTexture;
+
+layout (set = 1, binding = 3) uniform ConverterUniforms {
+    uint totalTriangles;
+    uint totalTargetSplats;     // The strict budget (e.g., 5000 for sparse, 45000 for dense)
+    uint owner_id;              // The artifact ID
+    uint current_frame;
+    uint isSparseMode;          // 0 = false, 1 = true
+    uint globalBufferSlotOffset; // Was read below but never declared — added.
+} config;
+
+// Output: the same DynamicSplatBuffer the projection/eviction shaders
+// read and write — was referenced as `input.splats[...]` below with no
+// binding declared in the original sketch; added here.
+layout (std430, set = 1, binding = 4) buffer DynamicSplatBuffer {
+    AnimatedSplat splats[];
+} output_buf;
+
+// Simple, fast PCG hash for high-quality structured scattering distribution
+uint pcg_hash(uint input_val) {
+    uint state = input_val * 747796405u + 289133645u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+vec2 get_barycentric(uint seed) {
+    uint h1 = pcg_hash(seed);
+    uint h2 = pcg_hash(h1);
+    float u = float(h1) / 4294967295.0;
+    float v = float(h2) / 4294967295.0;
+
+    if (u + v > 1.0) {
+        u = 1.0 - u;
+        v = 1.0 - v;
+    }
+    return vec2(u, v);
+}
+
+// Convert a normal vector to a rotation quaternion flattening the splat to the surface
+vec4 normal_to_quaternion(vec3 normal) {
+    vec3 up = vec3(0.0, 0.0, 1.0);
+    float dot_prod = dot(up, normal);
+
+    if (dot_prod > 0.9999) return vec4(0.0, 0.0, 0.0, 1.0);
+    if (dot_prod < -0.9999) return vec4(1.0, 0.0, 0.0, 0.0);
+
+    vec3 axis = normalize(cross(up, normal));
+    float angle = acos(dot_prod);
+
+    float s = sin(angle * 0.5);
+    return vec4(axis * s, cos(angle * 0.5));
+}
+
+void main() {
+    uint splatId = gl_GlobalInvocationID.x;
+    if (splatId >= config.totalTargetSplats) return;
+
+    // 1. STOCHASTIC TRIANGLE DISTRIBUTION
+    float stepFactor = float(config.totalTriangles) / float(config.totalTargetSplats);
+    float virtualTriangleIndex = float(splatId) * stepFactor;
+    uint triangleIndex = uint(floor(virtualTriangleIndex)) % config.totalTriangles;
+
+    uint vertexOffset = triangleIndex * 3;
+
+    uint i0 = meshIndices.indices[vertexOffset];
+    uint i1 = meshIndices.indices[vertexOffset + 1];
+    uint i2 = meshIndices.indices[vertexOffset + 2];
+
+    MeshVertex v0 = mesh.vertices[i0];
+    MeshVertex v1 = mesh.vertices[i1];
+    MeshVertex v2 = mesh.vertices[i2];
+
+    // 2. BARYCENTRIC SCATTERING
+    vec2 bary = get_barycentric(splatId);
+    float w0 = 1.0 - bary.x - bary.y;
+    float w1 = bary.x;
+    float w2 = bary.y;
+
+    vec3 position = v0.position.xyz * w0 + v1.position.xyz * w1 + v2.position.xyz * w2;
+    vec3 normal   = normalize(v0.normal.xyz * w0 + v1.normal.xyz * w1 + v2.normal.xyz * w2);
+    vec2 uv       = v0.uv * w0 + v1.uv * w1 + v2.uv * w2;
+
+    // 3. SPARSE SCALE MULTIPLIER
+    float triArea = length(cross(v1.position.xyz - v0.position.xyz, v2.position.xyz - v0.position.xyz)) * 0.5;
+    float splatRadius = sqrt(triArea / (float(config.totalTargetSplats) / float(config.totalTriangles)));
+
+    if (config.isSparseMode == 1u) {
+        splatRadius *= 1.75;
+    }
+
+    // 4. WRITE OUT TO GLOBAL DYNAMIC SPLAT BUFFER
+    uint globalDestinationId = config.globalBufferSlotOffset + splatId;
+
+    output_buf.splats[globalDestinationId].position_and_confidence = vec4(position, splatRadius);
+    output_buf.splats[globalDestinationId].rotation = normal_to_quaternion(normal);
+    output_buf.splats[globalDestinationId].color = texture(baseColorTexture, uv);
+
+    uint initialFlags = 1u; // ACTIVE
+    if (config.isSparseMode == 1u) {
+        initialFlags |= 4u; // Bit 2 = USE_SOFT_GAUSSIAN_FALLOFF
+    }
+
+    output_buf.splats[globalDestinationId].joint_ids = (w0 > w1 && w0 > w2) ? v0.joint_ids : ((w1 > w2) ? v1.joint_ids : v2.joint_ids);
+    output_buf.splats[globalDestinationId].weights = v0.weights * w0 + v1.weights * w1 + v2.weights * w2;
+    output_buf.splats[globalDestinationId].owner_id = config.owner_id;
+    output_buf.splats[globalDestinationId].last_visible_frame = config.current_frame;
+    output_buf.splats[globalDestinationId].flags = initialFlags;
+    output_buf.splats[globalDestinationId].padding = 255u; // Fully dense starting alpha
+}

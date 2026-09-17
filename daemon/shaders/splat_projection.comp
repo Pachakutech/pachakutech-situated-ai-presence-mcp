@@ -1,0 +1,195 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "math_utils.comp"
+
+// Adapted from the XR content layer's projection shader. One real bug
+// fixed (confirmed by compiling both the broken and fixed versions with
+// glslangValidator — see daemon/docs/gpu-splat-pipeline.md):
+//
+//   `radius_px` was declared twice in the same scope — once for an early
+//   coarse frustum cull, again (uninitialized, no shadowing block between
+//   them) right before the billboard/non-billboard branch. GLSL doesn't
+//   allow redeclaring a variable in the same scope, so this failed to
+//   compile as written. Renamed the first one `coarse_radius_px`.
+//
+// One design point flagged, not changed: for a *non*-billboard splat, the
+// footprint is `radius_px = base_splat_scale * focal.x * inv_z` — a single
+// scalar, so every plain splat renders as an isotropic circle regardless
+// of its actual per-axis scale/rotation. Rotation is only used for the
+// billboard branch's camRight/camUp axes. A "true" Gaussian-splat
+// renderer would instead project the 3D covariance into a 2D screen-space
+// covariance (Σ' = J·W·Σ·Wᵗ·Jᵗ, the standard EWA splatting Jacobian) and
+// rasterize an anisotropic ellipse with a Gaussian falloff, not a flat
+// circle. That's a bigger change (ProjectedSplat would need to carry a 2D
+// covariance instead of one radius float, and the actual per-pixel
+// Gaussian evaluation would move to the rasterization stage) — worth
+// deciding deliberately rather than me changing it unilaterally, since
+// "point-cloud-with-color" circles may be entirely fine for a sensory
+// tensor an agent queries rather than a photoreal renderer.
+
+layout (local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+struct ProjectedSplat {
+    vec2 screen_center;
+    float radius_pixels;
+    float depth;
+    uint splat_id;
+    vec4 color;
+};
+
+struct AnimatedSplat {
+    vec4 position_and_confidence;
+    vec4 rotation;
+    vec4 color;
+    uvec4 joint_ids;
+    vec4 weights;
+    uint owner_id;
+    uint last_visible_frame;
+    uint flags;
+    uint padding;
+};
+
+layout (set = 0, binding = 0) uniform ProjectionUniforms {
+    DualQuat world_to_camera_dq;
+    vec2 focal;
+    vec2 principal;
+    vec2 screen_size;
+    float base_splat_scale;
+    uint total_capacity; // Max size of the dynamic buffer
+    uint current_frame;  // Passed from Flutter for LRU management
+} proj;
+
+// Bone Palette: Set globally per frame or per-object
+layout (std430, set = 0, binding = 1) readonly buffer BonePalette {
+    DualQuat bones[];
+} anim;
+
+layout (std430, set = 0, binding = 2) buffer DynamicSplatBuffer {
+    AnimatedSplat splats[];
+} input_buf;
+
+layout (std430, set = 0, binding = 3) writeonly buffer ProjectedOutput {
+    ProjectedSplat projected[];
+} output_buf;
+
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    if (id >= proj.total_capacity) return;
+
+    AnimatedSplat s = input_buf.splats[id];
+
+    // 1. LIFECYCLE & DENSITY CONTROL
+    bool isActive = (s.flags & 1u) != 0u;
+    if (!isActive) return;
+
+    float artifactDensity = float(s.padding & 0xFFu) / 255.0;
+    float stabilityHash = fract(sin(float(id) * 12.9898) * 43758.5453);
+    if (stabilityHash > artifactDensity) {
+        return; // "Thinned out" to save budget
+    }
+
+    uint age = proj.current_frame - s.last_visible_frame;
+    const uint DEPRIORITY_THRESHOLD = 300;
+
+    if (age > DEPRIORITY_THRESHOLD) {
+        float hash = fract(sin(float(id) * 12.9898 + float(age) * 78.233) * 43758.5453);
+        float survivalProbability = exp(- float(age - DEPRIORITY_THRESHOLD) * 0.01);
+        if (hash > survivalProbability) {
+            return;
+        }
+    }
+
+    // 2. DUAL QUATERNION LINEAR BLENDING (DQB), with sign-corrected blend
+    // (see math_utils.comp's blend_bones — the original inline version
+    // here didn't correct for antipodal quaternion signs, which can cause
+    // "candy-wrapper" pinching wherever two influencing bones disagree in
+    // sign).
+    DualQuat skinned_dq = blend_bones(
+        anim.bones[s.joint_ids.x], anim.bones[s.joint_ids.y],
+        anim.bones[s.joint_ids.z], anim.bones[s.joint_ids.w],
+        s.weights
+    );
+
+    // 3. TRANSFORM
+    DualQuat full_dq = multiply_dq(proj.world_to_camera_dq, skinned_dq);
+    vec3 cam_pos = transform_point_dq(full_dq, s.position_and_confidence.xyz);
+
+    // 4. PROJECTION
+    if (cam_pos.z < 0.1) return; // Near clip
+
+    float inv_z = 1.0 / cam_pos.z;
+    vec2 screen_pos = vec2(
+    proj.focal.x * cam_pos.x * inv_z + proj.principal.x,
+    proj.focal.y * cam_pos.y * inv_z + proj.principal.y
+    );
+
+    // Coarse frustum cull using an assumed isotropic radius, before we know
+    // whether this is a billboard (which needs its own, larger radius).
+    // Renamed from the original's `radius_px` to fix the redeclaration.
+    float coarse_radius_px = proj.base_splat_scale * proj.focal.x * inv_z;
+    if (screen_pos.x + coarse_radius_px < 0.0 || screen_pos.x - coarse_radius_px > proj.screen_size.x ||
+    screen_pos.y + coarse_radius_px < 0.0 || screen_pos.y - coarse_radius_px > proj.screen_size.y) {
+        return;
+    }
+
+    bool isTexturedBillboard = (s.flags & 2u) != 0u;
+
+    float radius_px;
+    vec4 packedMatrixPayload = s.color; // Default fallback to original color
+
+    if (isTexturedBillboard) {
+        // s.position_and_confidence.w = physical width (meters); the
+        // aspect ratio is smuggled into color.w by whatever ingested this
+        // billboard (see docs/gpu-splat-pipeline.md — this is how a
+        // webcam/screen frame becomes a splat).
+        float physicalWidth = s.position_and_confidence.w;
+        float aspectRatio = s.color.w;
+        float physicalHeight = physicalWidth / aspectRatio;
+
+        float maxHalfDimension = max(physicalWidth, physicalHeight) * 0.5;
+        radius_px = maxHalfDimension * proj.focal.x * inv_z;
+
+        mat3 R = extract_rotation_dq(full_dq);
+        vec3 camRight = R[0];
+        vec3 camUp    = R[1];
+
+        vec2 screenRight = (proj.focal.x / cam_pos.z) * camRight.xy;
+        vec2 screenUp    = (proj.focal.y / cam_pos.z) * camUp.xy;
+
+        screenRight *= (physicalWidth * 0.5);
+        screenUp    *= (physicalHeight * 0.5);
+
+        float det = screenRight.x * screenUp.y - screenRight.y * screenUp.x;
+
+        if (abs(det) > 1e-6) {
+            float invDet = 1.0 / det;
+            packedMatrixPayload.x =  screenUp.y    * invDet;
+            packedMatrixPayload.y = -screenUp.x    * invDet;
+            packedMatrixPayload.z = -screenRight.y * invDet;
+            packedMatrixPayload.w =  screenRight.x * invDet;
+        } else {
+            packedMatrixPayload = vec4(1.0, 0.0, 0.0, 1.0);
+        }
+    } else {
+        // Standard point cloud behavior — see the design note at top of
+        // file re: isotropic radius vs. true elliptical Gaussian footprint.
+        radius_px = proj.base_splat_scale * proj.focal.x * inv_z;
+    }
+
+    // Precise frustum cull against the real (billboard-aware) radius.
+    if (screen_pos.x + radius_px < 0.0 || screen_pos.x - radius_px > proj.screen_size.x ||
+    screen_pos.y + radius_px < 0.0 || screen_pos.y - radius_px > proj.screen_size.y) {
+        return;
+    }
+
+    // 5. UPDATE METADATA & OUTPUT
+    input_buf.splats[id].last_visible_frame = proj.current_frame;
+
+    output_buf.projected[id] = ProjectedSplat(
+    screen_pos,
+    radius_px,
+    cam_pos.z,
+    id,
+    packedMatrixPayload
+    );
+}

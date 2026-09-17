@@ -7,16 +7,31 @@
 
 use std::collections::HashMap;
 
-/// One Gaussian in a splat cloud: position, a flattened 3x3 covariance
-/// (upper triangle, 6 floats — the usual compressed form), and RGBA. This
-/// is deliberately the minimal shape a real parser should map *onto*, not
-/// whatever a specific splat file format happens to use on disk.
+/// One Gaussian in a splat cloud: position, per-axis linear scale (already
+/// exponentiated, i.e. a real standard deviation, not a stored log), a
+/// normalized rotation quaternion (w, x, y, z), and RGBA.
+///
+/// Splats are DQ-skinned (see `gpu_layout.rs`): skinning changes a
+/// splat's effective rotation every frame, so Σ = R·S·Sᵗ·Rᵗ has to be
+/// recomputed post-skinning, not baked in at load time. Scale+rotation is
+/// therefore the right thing to carry in Scene Memory; `covariance()` below
+/// is still there for the unskinned/rest-pose case (a quick CPU-side
+/// preview, say), computed on demand rather than stored.
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // fields are read once ingest_artifact/skinning apply are real
 pub struct GaussianSplat {
     pub position: [f32; 3],
-    pub covariance: [f32; 6],
+    pub scale: [f32; 3],
+    pub rotation: [f32; 4],
     pub color: [f32; 4],
+}
+
+impl GaussianSplat {
+    /// Rest-pose covariance, upper triangle [xx, xy, xz, yy, yz, zz].
+    /// See `gpu_layout` for the post-skinning equivalent computed on GPU.
+    pub fn covariance(&self) -> [f32; 6] {
+        super::splat_io::covariance_from_scale_rotation(self.scale, self.rotation)
+    }
 }
 
 /// Per-splat skinning weights against up to 4 bones — the same shape as

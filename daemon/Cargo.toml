@@ -15,6 +15,20 @@ ash = { version = "0.38", default-features = false, features = ["loaded", "debug
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# Same "dlopen at runtime, don't link at build time" pattern as `ash`
+# above — these compile on any machine, including this one with no
+# compositor or camera, and only fail (with a clear error) when actually
+# run on a machine missing the relevant library/device.
+wayland-client = { version = "0.31", features = ["dlopen"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+wayland-backend = { version = "0.3", features = ["client_system", "dlopen"] }
+# V4L2 needs no client library at all — it's raw ioctl(2) calls against a
+# /dev/videoN file descriptor — so the webcam backend is hand-written
+# against `libc` directly rather than pulling in the `v4l` crate, whose
+# `v4l2-sys` binding generator needs libclang (not installable in this
+# sandbox, and an unnecessary build dependency for something this small).
+libc = "0.2"
+
 [[bin]]
 name = "presence-daemon"
 path = "src/main.rs"
