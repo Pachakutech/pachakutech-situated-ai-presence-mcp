@@ -1,15 +1,32 @@
 #!/usr/bin/env node
 // The MCP Binding for the Pachakutech Presence Layer.
-// Four Manifestations: two ephemeral, two instanced (spawn/animate/retire
-// is one lifecycle). See README.md for the distinction and skills/presence/
-// SKILL.md for how an agent is meant to choose between them.
+// Six Manifestations: one ephemeral, one instanced presence lifecycle
+// (spawn/animate/retire), one instanced artifact lifecycle (add/retire).
+// See README.md and skills/presence/SKILL.md.
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { PolicyGate } from "./policyGate.js";
-import { daemonStub as daemon } from "./daemonStub.js";
+import { daemonStub } from "./daemonStub.js";
+import { tryConnectDaemon } from "./daemonClient.js";
 const policy = new PolicyGate();
 const server = new McpServer({ name: "pachakutech-presence", version: "0.1.0" });
+let daemon = daemonStub;
+let daemonReady = null;
+function getDaemon() {
+    if (!daemonReady) {
+        daemonReady = tryConnectDaemon()
+            .then((client) => {
+            daemon = client;
+            console.error("[presence] connected to presence-daemon");
+        })
+            .catch(() => {
+            daemon = daemonStub;
+            console.error("[presence] no presence-daemon socket; using notify-send stub");
+        });
+    }
+    return daemonReady.then(() => daemon);
+}
 server.registerTool("manifestHighlight", {
     title: "Highlight something on screen",
     description: "Ephemeral Manifestation. Draws a bounded, temporary highlight over the " +
@@ -21,7 +38,7 @@ server.registerTool("manifestHighlight", {
     },
 }, async ({ description, durationSeconds }) => {
     policy.assertAllowed("manifestHighlight");
-    const result = daemon.highlightRegion(description, durationSeconds);
+    const result = await (await getDaemon()).highlightRegion(description, durationSeconds);
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
 });
 server.registerTool("spawnPresence", {
@@ -46,7 +63,7 @@ server.registerTool("spawnPresence", {
         policy.assertArtifactExists(artifactId);
     const presenceId = `p-${Math.random().toString(36).slice(2, 8)}`;
     policy.registerInstance(presenceId);
-    daemon.spawnPresence(presenceId, sourceContext, styleHint, artifactId);
+    await (await getDaemon()).spawnPresence(presenceId, sourceContext, styleHint, artifactId);
     return { content: [{ type: "text", text: JSON.stringify({ presenceId }) }] };
 });
 server.registerTool("addArtifact", {
@@ -60,13 +77,16 @@ server.registerTool("addArtifact", {
         "artifactId.",
     inputSchema: {
         description: z.string().describe("What this splat cloud is/depicts"),
-        sourceUri: z.string().optional().describe("Where the splat data came from, if applicable"),
+        sourceUri: z
+            .string()
+            .optional()
+            .describe("Local filesystem path to a .splat or .ply Gaussian cloud. The daemon reads this file; it does not fetch URLs. Omit only if you have no file yet — that holds an empty cloud."),
     },
 }, async ({ description, sourceUri }) => {
     policy.assertAllowed("addArtifact");
     const artifactId = `a-${Math.random().toString(36).slice(2, 8)}`;
     policy.registerArtifact(artifactId);
-    daemon.addArtifact(artifactId, description, sourceUri);
+    await (await getDaemon()).addArtifact(artifactId, description, sourceUri);
     return { content: [{ type: "text", text: JSON.stringify({ artifactId }) }] };
 });
 server.registerTool("retireArtifact", {
@@ -76,7 +96,7 @@ server.registerTool("retireArtifact", {
 }, async ({ artifactId }) => {
     policy.assertAllowed("retireArtifact");
     policy.retireArtifact(artifactId);
-    daemon.retireArtifact(artifactId);
+    await (await getDaemon()).retireArtifact(artifactId);
     return { content: [{ type: "text", text: JSON.stringify({ status: "retired" }) }] };
 });
 server.registerTool("animatePresence", {
@@ -90,7 +110,7 @@ server.registerTool("animatePresence", {
 }, async ({ presenceId, text }) => {
     policy.assertAllowed("animatePresence");
     policy.assertInstanceExists(presenceId);
-    daemon.animatePresence(presenceId, text);
+    await (await getDaemon()).animatePresence(presenceId, text);
     return { content: [{ type: "text", text: JSON.stringify({ status: "ok" }) }] };
 });
 server.registerTool("retirePresence", {
@@ -102,7 +122,7 @@ server.registerTool("retirePresence", {
 }, async ({ presenceId }) => {
     policy.assertAllowed("retirePresence");
     policy.retireInstance(presenceId);
-    daemon.retirePresence(presenceId);
+    await (await getDaemon()).retirePresence(presenceId);
     return { content: [{ type: "text", text: JSON.stringify({ status: "retired" }) }] };
 });
 async function main() {

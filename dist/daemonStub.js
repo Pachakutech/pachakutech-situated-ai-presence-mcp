@@ -1,13 +1,13 @@
 // STAND-IN for the native Presence Daemon (Vulkan + V4L2/wlr-screencopy +
-// wlr-layer-shell — see docs/architecture.md). That daemon doesn't exist yet.
-// This stub proves the MCP surface end-to-end today, on any Linux box with
-// libnotify, by using a desktop notification as the visible side effect and
-// a JSONL log as the record of what the real daemon should render instead.
+// wlr-layer-shell — see docs/architecture.md). Used when the daemon isn't
+// listening on $XDG_RUNTIME_DIR/pachakutech/presence.sock. Desktop notification
+// plus a JSONL log stand in for whatever the daemon would render.
 //
-// Swap this file for a Unix-socket client to the real daemon and nothing
-// above this layer — the tool schemas, the Policy Gate — has to change.
-// That boundary is deliberate: it's the same "propose, don't carry the
-// buffer" split the whole substrate is built on.
+// `connectDaemon` in daemon.ts prefers the Unix-socket client and falls back
+// here. Nothing above this layer — the tool schemas, the Policy Gate — has
+// to change when the stub is swapped out. That boundary is deliberate: it's
+// the same "propose, don't carry the buffer" split the whole substrate is
+// built on.
 import { spawnSync } from "node:child_process";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
@@ -28,32 +28,34 @@ function notify(title, body) {
     }
 }
 export const daemonStub = {
-    highlightRegion(description, durationSeconds) {
+    async highlightRegion(description, durationSeconds) {
         const regionId = `r-${Math.random().toString(36).slice(2, 8)}`;
         record({ kind: "highlightRegion", description, durationSeconds, regionId });
         notify("Presence: highlight", `${description} (${durationSeconds}s)`);
         return { regionId, resolvedBounds: null };
     },
-    spawnPresence(presenceId, sourceContext, styleHint, artifactId) {
+    async spawnPresence(presenceId, sourceContext, styleHint, artifactId) {
         record({ kind: "spawnPresence", presenceId, sourceContext, styleHint, artifactId });
         notify("Presence: spawned", `${presenceId} from "${sourceContext}"`);
     },
-    animatePresence(presenceId, text) {
+    async animatePresence(presenceId, text) {
         record({ kind: "animatePresence", presenceId, text });
         notify(`Presence ${presenceId}`, text);
     },
-    retirePresence(presenceId) {
+    async retirePresence(presenceId) {
         record({ kind: "retirePresence", presenceId });
         notify("Presence: retired", presenceId);
     },
     // Artifacts are held, not shown — no notify() here. They're reference
     // material (e.g. "this is what a spawned character should look like"),
     // logged so the eventual daemon can pick them up when spawnPresence
-    // references an artifactId.
-    addArtifact(artifactId, description, sourceUri) {
+    // references an artifactId. sourceUri, if present, must be a local
+    // .splat/.ply path the daemon can read — a description-only add holds
+    // an empty cloud.
+    async addArtifact(artifactId, description, sourceUri) {
         record({ kind: "addArtifact", artifactId, description, sourceUri });
     },
-    retireArtifact(artifactId) {
+    async retireArtifact(artifactId) {
         record({ kind: "retireArtifact", artifactId });
     },
 };

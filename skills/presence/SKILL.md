@@ -22,7 +22,10 @@ instances are capped.
 `spawnPresence` something concrete to build from (e.g. "this is what the
 presence should look like") instead of describing appearance in prose.
 Artifacts are held, not shown — nothing renders until a presence references
-one.
+one. `sourceUri` is a **local** `.splat` or `.ply` path the daemon will
+read from disk; it does not fetch http(s). Write the file first, then pass
+the path. A description-only `addArtifact` (no `sourceUri`) holds an empty
+cloud — that succeeds as a slot, not as appearance.
 
 Don't invent capabilities beyond these six. If a task needs something this
 Presence Layer doesn't expose yet, say so plainly rather than approximating

@@ -13,7 +13,12 @@ export class PolicyGate {
     static MIN_INTERVAL_MS = 1500;
     static MAX_CONCURRENT_PRESENCES = 3;
     static MAX_CONCURRENT_ARTIFACTS = 20;
+    // Teardown must never be trapped by the interval — a presence that can't
+    // be retired burns a capped slot until the process dies.
+    static UNLIMITED = new Set(["retirePresence", "retireArtifact"]);
     assertAllowed(action) {
+        if (PolicyGate.UNLIMITED.has(action))
+            return;
         const last = this.lastCallAt.get(action) ?? 0;
         const now = Date.now();
         if (now - last < PolicyGate.MIN_INTERVAL_MS) {
