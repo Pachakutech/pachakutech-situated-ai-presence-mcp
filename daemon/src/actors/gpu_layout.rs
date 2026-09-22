@@ -64,13 +64,14 @@ pub fn to_gpu_splat(
     current_frame: u32,
     density: u8,
 ) -> AnimatedSplatGpu {
+    let clamp_bone = |id: u32| id.min(MAX_BONES.saturating_sub(1));
     let (joint_ids, weights) = match skin {
         Some(s) => (
             [
-                s.bone_indices[0] as u32,
-                s.bone_indices[1] as u32,
-                s.bone_indices[2] as u32,
-                s.bone_indices[3] as u32,
+                clamp_bone(s.bone_indices[0] as u32),
+                clamp_bone(s.bone_indices[1] as u32),
+                clamp_bone(s.bone_indices[2] as u32),
+                clamp_bone(s.bone_indices[3] as u32),
             ],
             s.bone_weights,
         ),
@@ -294,5 +295,21 @@ mod animated_splat_tests {
         let gpu = to_gpu_splat(&splat, Some(&skin), 1, 0, 255);
         assert_eq!(gpu.joint_ids, [3, 7, 0, 0]);
         assert_eq!(gpu.weights, [0.6, 0.4, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn clamps_bone_indices_to_palette_size() {
+        let splat = GaussianSplat {
+            position: [0.0, 0.0, 0.0],
+            scale: [1.0, 1.0, 1.0],
+            rotation: [1.0, 0.0, 0.0, 0.0],
+            color: [1.0, 1.0, 1.0, 1.0],
+        };
+        let skin = SkinningWeights {
+            bone_indices: [u16::MAX, 64, 63, 0],
+            bone_weights: [0.25, 0.25, 0.25, 0.25],
+        };
+        let gpu = to_gpu_splat(&splat, Some(&skin), 1, 0, 255);
+        assert_eq!(gpu.joint_ids, [MAX_BONES - 1, MAX_BONES - 1, 63, 0]);
     }
 }
