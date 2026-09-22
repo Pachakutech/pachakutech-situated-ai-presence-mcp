@@ -130,3 +130,53 @@ estimation, to get an actual point-cloud region instead of a plane) is a
 strict superset of this and can be layered on later without changing the
 buffer shape — it would just mean an ingress actor emitting many small
 plain (non-billboard) splats instead of one billboard.
+
+## The ingress code that's actually now in the repo
+
+`daemon/src/actors/ingress/`:
+
+- **`mod.rs`** — `frame_to_billboard()` (frame → `AnimatedSplatGpu`,
+  aspect ratio computed from real pixel dimensions, packed per the
+  convention above) and `IngressActor` (one named slot per source,
+  `last_visible_frame` refreshed every call so a live feed is never
+  reclaimed by LRU eviction). Pure data transforms, no OS dependency —
+  fully unit tested in this sandbox.
+- **`screen_wlr.rs`** — real `wlr-screencopy-unstable-v1` client:
+  binds `wl_output`/`wl_shm`/`zwlr_screencopy_manager_v1`, requests a
+  capture, allocates a matching shm buffer, copies out the pixels. Built
+  against `wayland-client`/`wayland-protocols-wlr` with the `dlopen`
+  feature — same "compiles everywhere, only fails at runtime if the
+  library/compositor is actually missing" posture as `ash`'s Vulkan
+  loading.
+- **`webcam_v4l2.rs`** — real V4L2 capture via raw `ioctl(2)`, no client
+  library at all (V4L2 needs none). Struct layouts and ioctl request
+  codes were taken from this sandbox's own `/usr/include/linux/
+  videodev2.h`, not memory, specifically because a subtly wrong FFI
+  struct here means silent memory corruption, not a compile error.
+
+**Honest limits, stated plainly:** this sandbox has no Wayland compositor
+and no `/dev/video0`. Both backends have been verified to *compile*
+against the real crates/headers, and `webcam_v4l2.rs`'s struct layouts
+were independently cross-checked against `sizeof()` output from a tiny C
+program compiled with the actual kernel header — but neither has ever
+opened a real display connection or camera. That check is what it's
+worth: it caught one real bug before this ever reached hardware.
+`V4l2Format`'s C union has 8-byte alignment (a variant we don't use,
+`v4l2_window`, contains a pointer), which hand-computed Rust layout math
+initially missed — producing 204 bytes instead of the real 208. If this
+had shipped un-checked, an ioctl call would have told the kernel the
+wrong struct size, and the kernel would have written past the end of a
+too-small buffer. Fixed with `#[repr(C, align(8))]` on the union; both
+the size *and* all eight ioctl request codes now assert against real
+`gcc`-derived values in `webcam_v4l2.rs`'s tests, not just re-derived Rust
+arithmetic checking itself.
+
+Neither backend is called from `main.rs` yet — there's no
+compute-dispatch/ingress-tick loop to call them from, since the actual
+Vulkan pipeline (buffer allocation, the compiled `splat_projection.comp`
+SPIR-V, a per-frame dispatch) doesn't exist yet either. That's the
+natural next layer down: an ingress tick loop that calls `next_frame()`
+on whichever backend(s) are configured, feeds it through
+`IngressActor::update_slot`, and uploads the result into a real
+`DynamicSplatBuffer` — at which point "the screen becomes a splat" stops
+being a design claim and starts being an observable one.

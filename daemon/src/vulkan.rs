@@ -13,6 +13,14 @@ pub struct VulkanContext {
     pub physical_device: vk::PhysicalDevice,
     pub device: ash::Device,
     pub graphics_queue_family: u32,
+    /// The one queue this daemon uses for everything, compute included —
+    /// a queue from a `GRAPHICS`-capable family always supports `COMPUTE`
+    /// too (the spec guarantees `GRAPHICS` implies `COMPUTE`), so there's
+    /// no need for a second, separate compute queue family lookup yet. A
+    /// dedicated async-compute queue would be the thing to add if the
+    /// projection/eviction dispatches ever need to run concurrently with
+    /// real rendering work instead of just before it.
+    pub graphics_queue: vk::Queue,
     pub supports_dma_buf_import: bool,
     pub device_name: String,
 }
@@ -92,6 +100,7 @@ impl VulkanContext {
 
         let device = unsafe { instance.create_device(physical_device, &device_create_info, None) }
             .map_err(|e| format!("vkCreateDevice failed: {e:?}"))?;
+        let graphics_queue = unsafe { device.get_device_queue(graphics_queue_family, 0) };
 
         Ok(Self {
             entry,
@@ -99,6 +108,7 @@ impl VulkanContext {
             physical_device,
             device,
             graphics_queue_family,
+            graphics_queue,
             supports_dma_buf_import,
             device_name,
         })

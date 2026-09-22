@@ -29,6 +29,12 @@ wayland-backend = { version = "0.3", features = ["client_system", "dlopen"] }
 # sandbox, and an unnecessary build dependency for something this small).
 libc = "0.2"
 
+[dev-dependencies]
+# Used only in tests, to assert real struct field offsets (`offset_of!`)
+# against hand-computed std140/std430 layout math, the same rigor as the
+# V4L2 ABI checks in ingress/webcam_v4l2.rs.
+memoffset = "0.9"
+
 [[bin]]
 name = "presence-daemon"
 path = "src/main.rs"
