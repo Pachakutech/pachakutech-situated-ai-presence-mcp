@@ -23,10 +23,25 @@ pub struct VulkanContext {
     pub graphics_queue: vk::Queue,
     pub supports_dma_buf_import: bool,
     pub device_name: String,
+    /// Presentable Wayland `VkSurfaceKHR` when the overlay is up. Destroyed
+    /// in `Drop` before the instance.
+    pub surface: Option<vk::SurfaceKHR>,
+    pub surface_loader: Option<ash::khr::surface::Instance>,
 }
 
 impl VulkanContext {
     pub fn init() -> Result<Self, String> {
+        Self::init_inner(None)
+    }
+
+    pub fn init_for_wayland(
+        display: *mut vk::wl_display,
+        surface: *mut vk::wl_surface,
+    ) -> Result<Self, String> {
+        Self::init_inner(Some((display, surface)))
+    }
+
+    fn init_inner(wayland: Option<(*mut vk::wl_display, *mut vk::wl_surface)>) -> Result<Self, String> {
         // SAFETY: `Entry::load` dynamically loads the system Vulkan loader.
         // This is the one place in the whole daemon where "no GPU/driver
         // present" is expected and handled, rather than a bug.
@@ -37,19 +52,48 @@ impl VulkanContext {
             .application_name(c"pachakutech-presence-daemon")
             .api_version(vk::API_VERSION_1_1); // AHardwareBuffer/dma_buf import needs >= 1.1
 
-        let create_info = vk::InstanceCreateInfo::default().application_info(&app_info);
+        let mut instance_exts: Vec<*const i8> = Vec::new();
+        if wayland.is_some() {
+            instance_exts.push(ash::khr::surface::NAME.as_ptr());
+            instance_exts.push(ash::khr::wayland_surface::NAME.as_ptr());
+        }
+        let create_info = vk::InstanceCreateInfo::default()
+            .application_info(&app_info)
+            .enabled_extension_names(&instance_exts);
         let instance = unsafe { entry.create_instance(&create_info, None) }
             .map_err(|e| format!("vkCreateInstance failed: {e:?}"))?;
+
+        let (surface, surface_loader) = if let Some((display, wl_surface)) = wayland {
+            let surface_loader = ash::khr::surface::Instance::new(&entry, &instance);
+            let wayland_loader = ash::khr::wayland_surface::Instance::new(&entry, &instance);
+            let info = vk::WaylandSurfaceCreateInfoKHR::default()
+                .display(display)
+                .surface(wl_surface);
+            let surface = unsafe { wayland_loader.create_wayland_surface(&info, None) }
+                .map_err(|e| format!("vkCreateWaylandSurfaceKHR failed: {e:?}"))?;
+            (Some(surface), Some(surface_loader))
+        } else {
+            (None, None)
+        };
 
         let physical_devices = unsafe { instance.enumerate_physical_devices() }
             .map_err(|e| format!("failed to enumerate physical devices: {e:?}"))?;
         if physical_devices.is_empty() {
-            unsafe { instance.destroy_instance(None) };
+            unsafe {
+                if let (Some(s), Some(l)) = (surface, surface_loader.as_ref()) {
+                    l.destroy_surface(s, None);
+                }
+                instance.destroy_instance(None);
+            };
             return Err("no Vulkan-capable physical devices found".into());
         }
 
-        let (physical_device, graphics_queue_family, device_name) =
-            pick_physical_device(&instance, &physical_devices)?;
+        let (physical_device, graphics_queue_family, device_name) = pick_physical_device(
+            &instance,
+            &physical_devices,
+            surface_loader.as_ref(),
+            surface,
+        )?;
 
         let available_extensions =
             unsafe { instance.enumerate_device_extension_properties(physical_device) }
@@ -69,9 +113,11 @@ impl VulkanContext {
         let queue_create_infos = [queue_create_info];
 
         // Request the zero-copy extensions when present; fall back cleanly
-        // when they're not (e.g. running this in a VM or a sandbox with a
-        // software rasterizer) rather than refusing to start.
+        // when they're not. Swapchain is required when presenting to the overlay.
         let mut enabled_extensions: Vec<*const i8> = Vec::new();
+        if wayland.is_some() {
+            enabled_extensions.push(ash::khr::swapchain::NAME.as_ptr());
+        }
         if supports_dma_buf_import {
             enabled_extensions.push(ash::khr::external_memory_fd::NAME.as_ptr());
             enabled_extensions.push(ash::ext::external_memory_dma_buf::NAME.as_ptr());
@@ -94,6 +140,8 @@ impl VulkanContext {
             graphics_queue,
             supports_dma_buf_import,
             device_name,
+            surface,
+            surface_loader,
         })
     }
 }
@@ -104,6 +152,8 @@ impl VulkanContext {
 fn pick_physical_device(
     instance: &ash::Instance,
     devices: &[vk::PhysicalDevice],
+    surface_loader: Option<&ash::khr::surface::Instance>,
+    surface: Option<vk::SurfaceKHR>,
 ) -> Result<(vk::PhysicalDevice, u32, String), String> {
     let score = |ty: vk::PhysicalDeviceType| -> i32 {
         match ty {
@@ -131,6 +181,15 @@ fn pick_physical_device(
         else {
             continue;
         };
+        if let (Some(loader), Some(surf)) = (surface_loader, surface) {
+            let present = unsafe {
+                loader.get_physical_device_surface_support(physical_device, graphics_queue_family, surf)
+            }
+            .unwrap_or(false);
+            if !present {
+                continue;
+            }
+        }
         let s = score(props.device_type);
         if best.as_ref().map(|(best_s, ..)| s > *best_s).unwrap_or(true) {
             best = Some((s, physical_device, graphics_queue_family, device_name));
@@ -144,6 +203,9 @@ impl Drop for VulkanContext {
     fn drop(&mut self) {
         unsafe {
             self.device.destroy_device(None);
+            if let (Some(surface), Some(loader)) = (self.surface.take(), self.surface_loader.as_ref()) {
+                loader.destroy_surface(surface, None);
+            }
             self.instance.destroy_instance(None);
         }
     }

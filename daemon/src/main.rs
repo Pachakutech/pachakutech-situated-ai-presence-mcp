@@ -1,10 +1,12 @@
 mod actors;
+mod overlay;
 mod pipeline;
 mod protocol;
 mod registry;
 mod socket;
 mod vulkan;
 
+use overlay::{Overlay, OverlayGpu};
 use pipeline::SplatPipeline;
 use std::path::PathBuf;
 use vulkan::VulkanContext;
@@ -19,7 +21,21 @@ fn socket_path() -> PathBuf {
 fn main() {
     println!("pachakutech-presence-daemon starting...");
 
-    let vk = match VulkanContext::init() {
+    let mut overlay = match Overlay::connect() {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("[overlay] {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let vk = match VulkanContext::init_for_wayland(overlay.display_ptr(), match overlay.surface_ptr() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("[overlay] {e}");
+            std::process::exit(1);
+        }
+    }) {
         Ok(vk) => {
             println!(
                 "[vulkan] device: {} | zero-copy dma_buf import: {}",
@@ -35,6 +51,14 @@ fn main() {
                  sandboxed dev environments). The daemon needs a real Vulkan-capable machine \
                  to run past this point — see README.md."
             );
+            std::process::exit(1);
+        }
+    };
+
+    let mut gpu = match OverlayGpu::new(&vk, overlay.extent()) {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("[overlay] gpu: {e}");
             std::process::exit(1);
         }
     };
@@ -55,8 +79,10 @@ fn main() {
     }
 
     let path = socket_path();
-    if let Err(e) = socket::serve(&path, &vk, &pipeline) {
-        eprintln!("[socket] fatal: {e}");
+    let result = overlay::run(&mut overlay, &mut gpu, &vk, &pipeline, &path);
+    gpu.destroy(&vk);
+    if let Err(e) = result {
+        eprintln!("[overlay] {e}");
         std::process::exit(1);
     }
 }

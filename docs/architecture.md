@@ -100,13 +100,16 @@ What it does **not** do: rasterize, present, or stay alive for actors.
 Smoke constructs, ticks, destroys. A process-lifetime pipeline plus a
 `wlr-layer-shell` surface is the next compositing step.
 
-## Composing the overlay (planned, not yet built)
+## Composing the overlay
 
-A `wlr-layer-shell-unstable-v1` surface — Wayland's purpose-built mechanism
-for bars, notifications, and overlays that float above windows without being
-reparented into them. The natural home for a fragment pass that consumes
-`ProjectedSplat`. A `VkDevice` plus a projected-output buffer is not an
-overlay.
+A `wlr-layer-shell-unstable-v1` surface covering the output, with
+`exclusive_zone = -1` (does not reserve space) and an **empty input
+region** (clicks and keyboard fall through to whatever is underneath).
+That is the Presence default: visible, not modal.
+
+As of 2026-09-22 this is live: a 200×200 premultiplied-alpha quad in the
+center of a fullscreen transparent overlay (`daemon/src/overlay.rs`). The
+hyperbubble / splat raster comes next and draws into this same surface.
 
 ## Scope: is this the runtime, or a client of the runtime?
 

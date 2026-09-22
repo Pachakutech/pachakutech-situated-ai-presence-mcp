@@ -15,7 +15,11 @@ for how the two talk to each other.
   needs `glslangValidator` on `PATH`) and embedded. On startup the daemon
   creates a process-lifetime pipeline, smokes one splat, then keeps the
   buffer for Control ingest (`addArtifact` uploads `.splat`/`.ply` clouds).
-  `Drop` tears GPU objects down. No raster / Wayland surface yet.
+  `Drop` tears GPU objects down.
+- `src/overlay.rs` — `wlr-layer-shell` overlay on the focused output
+  (`exclusive_zone = -1`, empty input region so clicks fall through). Draws a
+  200×200 premultiplied cyan quad in the center as the first visible pixels.
+  Hyperbubble shader is next.
 - `src/protocol.rs` / `src/socket.rs` — JSONL over
   `$XDG_RUNTIME_DIR/pachakutech/presence.sock`. One connection at a time.
 - `src/registry.rs` + `src/actors/` — Control (ingest `.splat`/`.ply` into
@@ -40,8 +44,8 @@ it listens on the socket until killed.
 
 ## What's next, in rough order
 
-1. **Compositing:** `wlr-layer-shell-unstable-v1` + a raster pass over
-   `ProjectedSplat`. A quad is enough to prove pixels.
+1. **Hyperbubble** on the existing layer-shell surface (fisheye of
+   screen/camera as the un-artifacted default). Then raster `ProjectedSplat`.
 3. **Tick ingress:** the V4L2 and `wlr-screencopy` (SHM) clients already
    compile; feed `IngressActor::update_slot` into the live buffer. dma_buf
    import is probed and present here, but the working capture path is SHM.

@@ -6,74 +6,108 @@ use crate::protocol::{Proposal, ProposalResult};
 use crate::registry::Registry;
 use crate::vulkan::VulkanContext;
 use serde_json::json;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{self, Read, Write};
+use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::Mutex;
 
-pub fn serve(socket_path: &Path, vk: &VulkanContext, pipeline: &SplatPipeline) -> std::io::Result<()> {
-    if socket_path.exists() {
-        std::fs::remove_file(socket_path)?;
-    }
-    if let Some(parent) = socket_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    let listener = UnixListener::bind(socket_path)?;
-    println!("[socket] listening on {}", socket_path.display());
-
-    let registry = Mutex::new(Registry::new());
-
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => handle_connection(stream, vk, pipeline, &registry),
-            Err(e) => eprintln!("[socket] connection error: {e}"),
-        }
-    }
-    Ok(())
+struct Client {
+    stream: UnixStream,
+    buf: Vec<u8>,
 }
 
-fn handle_connection(
-    stream: UnixStream,
+/// Non-blocking Unix JSONL server, pumped from the overlay event loop.
+pub struct SocketServer {
+    listener: UnixListener,
+    clients: Vec<Client>,
+    registry: Mutex<Registry>,
+}
+
+impl SocketServer {
+    pub fn bind(socket_path: &Path) -> io::Result<Self> {
+        if socket_path.exists() {
+            std::fs::remove_file(socket_path)?;
+        }
+        if let Some(parent) = socket_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let listener = UnixListener::bind(socket_path)?;
+        listener.set_nonblocking(true)?;
+        Ok(Self { listener, clients: Vec::new(), registry: Mutex::new(Registry::new()) })
+    }
+
+    pub fn listener_fd(&self) -> RawFd {
+        self.listener.as_raw_fd()
+    }
+
+    pub fn client_fds(&self) -> impl Iterator<Item = RawFd> + '_ {
+        self.clients.iter().map(|c| c.stream.as_raw_fd())
+    }
+
+    pub fn pump(&mut self, vk: &VulkanContext, pipeline: &SplatPipeline) -> io::Result<()> {
+        loop {
+            match self.listener.accept() {
+                Ok((stream, _)) => {
+                    stream.set_nonblocking(true)?;
+                    self.clients.push(Client { stream, buf: Vec::new() });
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                Err(e) => return Err(e),
+            }
+        }
+
+        let mut i = 0;
+        while i < self.clients.len() {
+            match read_client(&mut self.clients[i], vk, pipeline, &self.registry) {
+                Ok(true) => i += 1,
+                Ok(false) | Err(_) => {
+                    self.clients.remove(i);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Returns Ok(true) to keep the client, Ok(false) if it closed.
+fn read_client(
+    client: &mut Client,
     vk: &VulkanContext,
     pipeline: &SplatPipeline,
     registry: &Mutex<Registry>,
-) {
-    let mut writer = match stream.try_clone() {
-        Ok(w) => w,
-        Err(e) => {
-            eprintln!("[socket] failed to clone stream: {e}");
-            return;
+) -> io::Result<bool> {
+    let mut tmp = [0u8; 4096];
+    loop {
+        match client.stream.read(&mut tmp) {
+            Ok(0) => return Ok(false),
+            Ok(n) => client.buf.extend_from_slice(&tmp[..n]),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+            Err(e) => return Err(e),
         }
-    };
-    let reader = BufReader::new(stream);
-
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) if !l.trim().is_empty() => l,
-            Ok(_) => continue,
-            Err(e) => {
-                eprintln!("[socket] read error: {e}");
-                break;
-            }
-        };
-
-        let result = match serde_json::from_str::<Proposal>(&line) {
+    }
+    while let Some(pos) = client.buf.iter().position(|&b| b == b'\n') {
+        let line = client.buf.drain(..=pos).collect::<Vec<_>>();
+        let line = String::from_utf8_lossy(&line);
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let result = match serde_json::from_str::<Proposal>(line) {
             Ok(proposal) => dispatch(proposal, vk, pipeline, registry),
             Err(e) => {
                 eprintln!("[socket] malformed proposal: {e}");
                 ProposalResult::err("unknown", format!("malformed proposal: {e}"))
             }
         };
-
         let response = serde_json::to_string(&result).unwrap_or_else(|_| {
             json!({ "status": "error", "error": "failed to serialize result" }).to_string()
         });
-        if let Err(e) = writeln!(writer, "{response}") {
-            eprintln!("[socket] write error: {e}");
-            break;
+        if writeln!(client.stream, "{response}").is_err() {
+            return Ok(false);
         }
     }
+    Ok(true)
 }
 
 fn dispatch(

@@ -37,7 +37,13 @@ fn main() {
     let out_dir = std::env::var("OUT_DIR").unwrap();
     // math_utils.comp is #include-only (no #version/main). gltf_to_splat.comp
     // is not dispatched yet, but compiling it here stops it rotting.
-    for shader in ["splat_projection.comp", "splat_eviction.comp", "gltf_to_splat.comp"] {
+    for shader in [
+        "splat_projection.comp",
+        "splat_eviction.comp",
+        "gltf_to_splat.comp",
+        "overlay_quad.vert",
+        "overlay_quad.frag",
+    ] {
         compile(shader, &out_dir);
     }
     println!("cargo:rerun-if-changed=shaders/math_utils.comp");
