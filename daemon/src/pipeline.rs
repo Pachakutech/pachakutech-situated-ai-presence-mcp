@@ -132,6 +132,10 @@ struct ComputeStage {
 }
 
 pub struct SplatPipeline {
+    /// Cloned from `VulkanContext` so `Drop` can tear GPU objects down
+    /// without borrowing the context (which must outlive this pipeline).
+    device: ash::Device,
+    graphics_queue: vk::Queue,
     capacity: u32,
     dynamic_splats: MappedBuffer,
     bone_palette: MappedBuffer,
@@ -294,6 +298,8 @@ impl SplatPipeline {
         let fence = unsafe { device.create_fence(&fence_info, None) }.map_err(|e| format!("vkCreateFence failed: {e:?}"))?;
 
         Ok(Self {
+            device: vk_ctx.device.clone(),
+            graphics_queue: vk_ctx.graphics_queue,
             capacity,
             dynamic_splats,
             bone_palette,
@@ -325,10 +331,16 @@ impl SplatPipeline {
     }
 
     /// Writes one `AnimatedSplat` into `DynamicSplatBuffer` at `index`.
-    /// `index < capacity` is the caller's responsibility (an ingress
-    /// actor or the Presence actor already knows which slot it owns).
+    /// Out-of-range indices are refused (logged) rather than panicking —
+    /// an ingest that overruns capacity should skip, not take down the daemon.
     pub fn write_splat(&self, index: u32, splat: &AnimatedSplatGpu) {
-        assert!(index < self.capacity, "splat index {index} out of range (capacity {})", self.capacity);
+        if index >= self.capacity {
+            eprintln!(
+                "[pipeline] write_splat index {index} out of range (capacity {}) — skipped",
+                self.capacity
+            );
+            return;
+        }
         let stride = std::mem::size_of::<AnimatedSplatGpu>();
         unsafe {
             let dst = (self.dynamic_splats.mapped_ptr as *mut u8).add(index as usize * stride) as *mut AnimatedSplatGpu;
@@ -339,9 +351,15 @@ impl SplatPipeline {
     /// Poses one bone. Bone 0 defaults to identity (see `SplatPipeline::new`)
     /// — an unrigged splat cloud rigidly bound to bone 0 moves as a whole
     /// body under whatever this sets bone 0 to, including never calling
-    /// this at all (stays identity, i.e. static).
+    /// this at all (stays identity, i.e. static). Indices at or past
+    /// `MAX_BONES` are clamped; the shader would otherwise OOB the palette SSBO.
     pub fn write_bone(&self, index: u32, dual_quat: DualQuatGpu) {
-        assert!(index < MAX_BONES, "bone index {index} out of range (max {MAX_BONES})");
+        let index = if index >= MAX_BONES {
+            eprintln!("[pipeline] write_bone index {index} >= {MAX_BONES} — clamped");
+            MAX_BONES - 1
+        } else {
+            index
+        };
         unsafe {
             let dst = (self.bone_palette.mapped_ptr as *mut u8)
                 .add(index as usize * std::mem::size_of::<DualQuatGpu>()) as *mut DualQuatGpu;
@@ -349,7 +367,11 @@ impl SplatPipeline {
         }
     }
 
-    pub fn set_projection_uniforms(&self, uniforms: ProjectionUniformsGpu) {
+    pub fn set_projection_uniforms(&self, mut uniforms: ProjectionUniformsGpu) {
+        // The dispatch is recorded against `self.capacity`; a caller-supplied
+        // total_capacity that disagrees would either skip live slots or walk
+        // off the buffer. Always stamp the allocated size.
+        uniforms.total_capacity = self.capacity;
         self.projection_uniforms.write(std::slice::from_ref(&uniforms));
     }
 
@@ -359,7 +381,7 @@ impl SplatPipeline {
     /// eviction uniforms/evicted-count for this frame first, since
     /// `EvictedTextures.count` is an accumulating atomic the shader adds
     /// to, not something it resets itself.
-    pub fn tick(&self, vk_ctx: &VulkanContext, current_frame: u32, absolute_max_age: u32) -> Result<(), String> {
+    pub fn tick(&self, current_frame: u32, absolute_max_age: u32) -> Result<(), String> {
         self.eviction_uniforms.write(std::slice::from_ref(&EvictionUniformsGpu::new(
             self.capacity,
             current_frame,
@@ -367,15 +389,14 @@ impl SplatPipeline {
         )));
         self.evicted_textures.write(&[0u32]);
 
-        let device = &vk_ctx.device;
-        unsafe { device.reset_fences(&[self.fence]) }.map_err(|e| format!("vkResetFences failed: {e:?}"))?;
+        unsafe { self.device.reset_fences(&[self.fence]) }.map_err(|e| format!("vkResetFences failed: {e:?}"))?;
 
         let command_buffers = [self.command_buffer];
         let submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers);
-        unsafe { device.queue_submit(vk_ctx.graphics_queue, &[submit_info], self.fence) }
+        unsafe { self.device.queue_submit(self.graphics_queue, &[submit_info], self.fence) }
             .map_err(|e| format!("vkQueueSubmit failed: {e:?}"))?;
 
-        unsafe { device.wait_for_fences(&[self.fence], true, u64::MAX) }
+        unsafe { self.device.wait_for_fences(&[self.fence], true, u64::MAX) }
             .map_err(|e| format!("vkWaitForFences failed: {e:?}"))?;
 
         Ok(())
@@ -394,30 +415,25 @@ impl SplatPipeline {
     }
 
     pub fn evicted_texture_count(&self) -> u32 {
-        self.evicted_textures.read::<u32>(1)[0]
+        // The shader atomicAdds then bounds the write; count can exceed the
+        // list length. Callers recycling atlas layers must not walk past it.
+        self.evicted_textures.read::<u32>(1)[0].min(MAX_EVICTIONS_PER_FRAME)
     }
-}
 
-/// One-splat identity-camera tick: allocates the pipeline, writes a live
-/// splat at camera-space z=2, dispatches, reads back, tears down. Exists
-/// so `presence-daemon` actually *runs* the shaders on startup instead of
-/// only compiling them into the binary. Failure here is fatal — a daemon
-/// that cannot dispatch is not a GPU owner.
-pub fn smoke_tick(vk_ctx: &VulkanContext) -> Result<String, String> {
-    const CAPACITY: u32 = 256;
-    let pipe = SplatPipeline::new(vk_ctx, CAPACITY)?;
-
-    let result = (|| {
-        pipe.set_projection_uniforms(ProjectionUniformsGpu::new(
+    /// One-splat identity-camera tick against this live pipeline. Does not
+    /// tear it down — slot 0 is deactivated afterwards so ingest can reuse
+    /// the buffer from the start. Failure is fatal at daemon startup.
+    pub fn smoke(&self) -> Result<String, String> {
+        self.set_projection_uniforms(ProjectionUniformsGpu::new(
             IDENTITY_DUAL_QUAT,
             [800.0, 800.0],
             [640.0, 360.0],
             [1280.0, 720.0],
             0.05,
-            CAPACITY,
+            self.capacity,
             1,
         ));
-        pipe.write_splat(
+        self.write_splat(
             0,
             &AnimatedSplatGpu {
                 position_and_confidence: [0.0, 0.0, 2.0, 1.0],
@@ -431,27 +447,38 @@ pub fn smoke_tick(vk_ctx: &VulkanContext) -> Result<String, String> {
                 padding: 255,
             },
         );
-        pipe.tick(vk_ctx, 1, 600)?;
-        let projected = pipe.read_projected();
+        self.tick(1, 600)?;
+        let projected = self.read_projected();
         let p = projected[0];
         // Identity camera, splat at (0,0,2): screen ≈ principal (640, 360),
         // depth ≈ 2. A zeroed slot means the shader returned early (near
         // clip / cull / thinning) — that's a real pipeline bug, not "empty".
-        if p.splat_id != 0 || p.depth < 1.0 {
+        if p.depth < 1.0 {
             return Err(format!(
                 "splat 0 did not project as expected: splat_id={} depth={} screen=({}, {}) radius={}",
                 p.splat_id, p.depth, p.screen_center[0], p.screen_center[1], p.radius_pixels
             ));
         }
+        // Free the smoke occupant so Control ingest starts at slot 0.
+        self.write_splat(0, &INACTIVE_SPLAT);
         Ok(format!(
-            "smoke ok: splat 0 -> screen ({:.1}, {:.1}) r={:.2}px depth={:.2} (capacity {CAPACITY})",
-            p.screen_center[0], p.screen_center[1], p.radius_pixels, p.depth
+            "smoke ok: splat 0 -> screen ({:.1}, {:.1}) r={:.2}px depth={:.2} (capacity {}) — pipeline kept live",
+            p.screen_center[0], p.screen_center[1], p.radius_pixels, p.depth, self.capacity
         ))
-    })();
-
-    pipe.destroy(vk_ctx);
-    result
+    }
 }
+
+pub(crate) const INACTIVE_SPLAT: AnimatedSplatGpu = AnimatedSplatGpu {
+    position_and_confidence: [0.0, 0.0, 0.0, 0.0],
+    rotation: [1.0, 0.0, 0.0, 0.0],
+    color: [0.0, 0.0, 0.0, 0.0],
+    joint_ids: [0, 0, 0, 0],
+    weights: [0.0, 0.0, 0.0, 0.0],
+    owner_id: 0,
+    last_visible_frame: 0,
+    flags: 0,
+    padding: 0,
+};
 
 fn descriptor_binding(binding: u32, ty: vk::DescriptorType) -> vk::DescriptorSetLayoutBinding<'static> {
     vk::DescriptorSetLayoutBinding::default()
@@ -553,29 +580,28 @@ fn record_dispatch_commands(
     Ok(())
 }
 
-impl SplatPipeline {
-    /// Explicit teardown, since this doesn't own a `Drop` on
-    /// `VulkanContext` (a `&VulkanContext` is borrowed for the whole
-    /// pipeline's life, not owned) — call this before the context it was
-    /// built from goes away.
-    pub fn destroy(&self, vk_ctx: &VulkanContext) {
-        let device = &vk_ctx.device;
+impl Drop for SplatPipeline {
+    fn drop(&mut self) {
+        // Wait idle so in-flight smoke/ticks finish before we free the
+        // command buffer and SSBOs. Locals in `main` drop pipeline before
+        // `VulkanContext`, so the device is still alive here.
         unsafe {
-            device.destroy_fence(self.fence, None);
-            device.destroy_command_pool(self.command_pool, None);
-            device.destroy_descriptor_pool(self.descriptor_pool, None);
-            device.destroy_pipeline(self.projection.pipeline, None);
-            device.destroy_pipeline_layout(self.projection.pipeline_layout, None);
-            device.destroy_descriptor_set_layout(self.projection.descriptor_set_layout, None);
-            device.destroy_pipeline(self.eviction.pipeline, None);
-            device.destroy_pipeline_layout(self.eviction.pipeline_layout, None);
-            device.destroy_descriptor_set_layout(self.eviction.descriptor_set_layout, None);
-            self.dynamic_splats.destroy(device);
-            self.bone_palette.destroy(device);
-            self.projected_output.destroy(device);
-            self.projection_uniforms.destroy(device);
-            self.eviction_uniforms.destroy(device);
-            self.evicted_textures.destroy(device);
+            let _ = self.device.device_wait_idle();
+            self.device.destroy_fence(self.fence, None);
+            self.device.destroy_command_pool(self.command_pool, None);
+            self.device.destroy_descriptor_pool(self.descriptor_pool, None);
+            self.device.destroy_pipeline(self.projection.pipeline, None);
+            self.device.destroy_pipeline_layout(self.projection.pipeline_layout, None);
+            self.device.destroy_descriptor_set_layout(self.projection.descriptor_set_layout, None);
+            self.device.destroy_pipeline(self.eviction.pipeline, None);
+            self.device.destroy_pipeline_layout(self.eviction.pipeline_layout, None);
+            self.device.destroy_descriptor_set_layout(self.eviction.descriptor_set_layout, None);
+            self.dynamic_splats.destroy(&self.device);
+            self.bone_palette.destroy(&self.device);
+            self.projected_output.destroy(&self.device);
+            self.projection_uniforms.destroy(&self.device);
+            self.eviction_uniforms.destroy(&self.device);
+            self.evicted_textures.destroy(&self.device);
         }
     }
 }

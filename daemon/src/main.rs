@@ -5,8 +5,11 @@ mod registry;
 mod socket;
 mod vulkan;
 
+use pipeline::SplatPipeline;
 use std::path::PathBuf;
 use vulkan::VulkanContext;
+
+const PIPELINE_CAPACITY: u32 = 256;
 
 fn socket_path() -> PathBuf {
     let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
@@ -36,7 +39,14 @@ fn main() {
         }
     };
 
-    match pipeline::smoke_tick(&vk) {
+    let pipeline = match SplatPipeline::new(&vk, PIPELINE_CAPACITY) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("[pipeline] failed to create: {e}");
+            std::process::exit(1);
+        }
+    };
+    match pipeline.smoke() {
         Ok(summary) => println!("[pipeline] {summary}"),
         Err(e) => {
             eprintln!("[pipeline] smoke tick failed: {e}");
@@ -45,7 +55,7 @@ fn main() {
     }
 
     let path = socket_path();
-    if let Err(e) = socket::serve(&path, vk) {
+    if let Err(e) = socket::serve(&path, &vk, &pipeline) {
         eprintln!("[socket] fatal: {e}");
         std::process::exit(1);
     }

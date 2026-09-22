@@ -13,8 +13,9 @@ for how the two talk to each other.
 - `src/pipeline.rs` — compute dispatch for `splat_projection.comp` and
   `splat_eviction.comp`. SPIR-V is compiled at **build** time (`build.rs`,
   needs `glslangValidator` on `PATH`) and embedded. On startup the daemon
-  runs a one-splat smoke tick and exits if dispatch fails. The pipeline is
-  then torn down; actors do not yet write a live buffer.
+  creates a process-lifetime pipeline, smokes one splat, then keeps the
+  buffer for Control ingest (`addArtifact` uploads `.splat`/`.ply` clouds).
+  `Drop` tears GPU objects down. No raster / Wayland surface yet.
 - `src/protocol.rs` / `src/socket.rs` — JSONL over
   `$XDG_RUNTIME_DIR/pachakutech/presence.sock`. One connection at a time.
 - `src/registry.rs` + `src/actors/` — Control (ingest `.splat`/`.ply` into
@@ -39,9 +40,7 @@ it listens on the socket until killed.
 
 ## What's next, in rough order
 
-1. **Keep `SplatPipeline` alive** for the process and `write_splat` from
-   Control/Presence instead of destroying it after smoke.
-2. **Compositing:** `wlr-layer-shell-unstable-v1` + a raster pass over
+1. **Compositing:** `wlr-layer-shell-unstable-v1` + a raster pass over
    `ProjectedSplat`. A quad is enough to prove pixels.
 3. **Tick ingress:** the V4L2 and `wlr-screencopy` (SHM) clients already
    compile; feed `IngressActor::update_slot` into the live buffer. dma_buf

@@ -48,25 +48,8 @@ impl VulkanContext {
             return Err("no Vulkan-capable physical devices found".into());
         }
 
-        // Pick the first device with a graphics-capable queue family. A real
-        // build should prefer discrete GPUs and check for the extensions
-        // below explicitly rather than just picking [0], but this is enough
-        // to prove the pipeline end to end.
-        let physical_device = physical_devices[0];
-
-        let props = unsafe { instance.get_physical_device_properties(physical_device) };
-        let device_name = unsafe { CStr::from_ptr(props.device_name.as_ptr()) }
-            .to_string_lossy()
-            .into_owned();
-
-        let queue_families =
-            unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
-        let graphics_queue_family = queue_families
-            .iter()
-            .enumerate()
-            .find(|(_, qf)| qf.queue_flags.contains(vk::QueueFlags::GRAPHICS))
-            .map(|(i, _)| i as u32)
-            .ok_or("selected physical device has no graphics queue family")?;
+        let (physical_device, graphics_queue_family, device_name) =
+            pick_physical_device(&instance, &physical_devices)?;
 
         let available_extensions =
             unsafe { instance.enumerate_device_extension_properties(physical_device) }
@@ -113,6 +96,48 @@ impl VulkanContext {
             device_name,
         })
     }
+}
+
+/// Prefer a discrete GPU with a graphics queue; fall back to integrated,
+/// virtual, then anything else that can actually draw. `[0]` is often an
+/// iGPU even when a dGPU is present.
+fn pick_physical_device(
+    instance: &ash::Instance,
+    devices: &[vk::PhysicalDevice],
+) -> Result<(vk::PhysicalDevice, u32, String), String> {
+    let score = |ty: vk::PhysicalDeviceType| -> i32 {
+        match ty {
+            vk::PhysicalDeviceType::DISCRETE_GPU => 4,
+            vk::PhysicalDeviceType::INTEGRATED_GPU => 3,
+            vk::PhysicalDeviceType::VIRTUAL_GPU => 2,
+            vk::PhysicalDeviceType::CPU => 1,
+            _ => 0,
+        }
+    };
+
+    let mut best: Option<(i32, vk::PhysicalDevice, u32, String)> = None;
+    for &physical_device in devices {
+        let props = unsafe { instance.get_physical_device_properties(physical_device) };
+        let device_name = unsafe { CStr::from_ptr(props.device_name.as_ptr()) }
+            .to_string_lossy()
+            .into_owned();
+        let queue_families =
+            unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
+        let Some(graphics_queue_family) = queue_families
+            .iter()
+            .enumerate()
+            .find(|(_, qf)| qf.queue_flags.contains(vk::QueueFlags::GRAPHICS))
+            .map(|(i, _)| i as u32)
+        else {
+            continue;
+        };
+        let s = score(props.device_type);
+        if best.as_ref().map(|(best_s, ..)| s > *best_s).unwrap_or(true) {
+            best = Some((s, physical_device, graphics_queue_family, device_name));
+        }
+    }
+    best.map(|(_, dev, family, name)| (dev, family, name))
+        .ok_or_else(|| "no Vulkan physical device with a graphics queue family".into())
 }
 
 impl Drop for VulkanContext {

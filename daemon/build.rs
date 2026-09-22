@@ -35,11 +35,9 @@ fn compile(shader_name: &str, out_dir: &str) {
 
 fn main() {
     let out_dir = std::env::var("OUT_DIR").unwrap();
-    // math_utils.comp is #include-only (no #version/main, see its own doc
-    // comment) and gltf_to_splat.comp is a separate future tool this
-    // daemon doesn't run yet — only the two shaders the dispatch loop
-    // actually submits get compiled here.
-    for shader in ["splat_projection.comp", "splat_eviction.comp"] {
+    // math_utils.comp is #include-only (no #version/main). gltf_to_splat.comp
+    // is not dispatched yet, but compiling it here stops it rotting.
+    for shader in ["splat_projection.comp", "splat_eviction.comp", "gltf_to_splat.comp"] {
         compile(shader, &out_dir);
     }
     println!("cargo:rerun-if-changed=shaders/math_utils.comp");
