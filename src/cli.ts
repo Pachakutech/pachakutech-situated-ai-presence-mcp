@@ -110,8 +110,8 @@ function doctor() {
     console.log(`  ${ok ? "ok  " : "warn"}  ${label}${ok ? "" : `  — ${note}`}`);
   }
   console.log(
-    "\nNone of the 'warn' items block the MCP server itself (it runs today via the " +
-      "stub daemon). They matter once the native Vulkan/Wayland daemon replaces the stub.",
+    "\nNone of the 'warn' items block the MCP server itself (it falls back to notify-send " +
+      "if presence-daemon isn't running). They matter for the native daemon.",
   );
 }
 

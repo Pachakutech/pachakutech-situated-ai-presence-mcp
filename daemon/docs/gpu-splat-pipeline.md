@@ -1,12 +1,11 @@
 # The GPU splat pipeline: fixes, and how ingress feeds it
 
-This documents the compute shaders in `daemon/shaders/` — the DQ-skinned,
-LRU-managed `AnimatedSplat` runtime buffer that Scene Memory (CPU) feeds
-and that a future rasterization pass would read from. None of this is
-wired into `main.rs`/`vulkan.rs` yet; it's the next layer down from the
-splat file loaders in `daemon/src/actors/splat_io.rs`, captured here so
-the eventual pipeline-building work has a real, compile-checked starting
-point instead of a sketch.
+This documents the compute shaders in `daemon/shaders/` and the dispatch
+layer in `daemon/src/pipeline.rs`. Canonical copy: [`../../docs/gpu-splat-pipeline.md`](../../docs/gpu-splat-pipeline.md).
+
+**As of 2026-09-22:** the pipeline allocates buffers, embeds SPIR-V, and
+smokes a one-splat tick on daemon start. It is then destroyed; actors do
+not write a live buffer, and nothing is presented to Wayland.
 
 ## What changed on the Rust side, and why
 
@@ -171,12 +170,6 @@ the size *and* all eight ioctl request codes now assert against real
 `gcc`-derived values in `webcam_v4l2.rs`'s tests, not just re-derived Rust
 arithmetic checking itself.
 
-Neither backend is called from `main.rs` yet — there's no
-compute-dispatch/ingress-tick loop to call them from, since the actual
-Vulkan pipeline (buffer allocation, the compiled `splat_projection.comp`
-SPIR-V, a per-frame dispatch) doesn't exist yet either. That's the
-natural next layer down: an ingress tick loop that calls `next_frame()`
-on whichever backend(s) are configured, feeds it through
-`IngressActor::update_slot`, and uploads the result into a real
-`DynamicSplatBuffer` — at which point "the screen becomes a splat" stops
-being a design claim and starts being an observable one.
+Neither backend is called from `main.rs` yet. The compute pipeline exists
+and smokes; it is not kept alive for ingress. Next: own the pipeline for
+the process and tick capture into `SplatPipeline::write_splat`.

@@ -6,56 +6,50 @@ for how the two talk to each other.
 
 ## What's here today
 
-- `src/vulkan.rs` — creates a real `Instance` and logical `Device`, picks a
-  physical device, and reports whether it supports the zero-copy `dma_buf`
-  import path (`VK_KHR_external_memory_fd` + `VK_EXT_external_memory_dma_buf`)
-  the whole ingress design depends on. Uses `Entry::load()` (dynamic loading),
-  not `Entry::linked()` — this crate builds and type-checks on any machine,
-  Vulkan driver present or not, and only fails at run time, with a clear
-  message, on one with no GPU.
-- `src/protocol.rs` — the typed proposal/result messages exchanged with the
-  MCP Binding, matching its `daemonStub.ts` shape field-for-field.
-- `src/socket.rs` — a Unix socket server at
-  `$XDG_RUNTIME_DIR/pachakutech/presence.sock`, one line of JSON in, one line
-  of JSON out.
-- `src/registry.rs` — **the part that's actually yours to build.** Right now
-  it just tracks which presence/artifact IDs are live and prints what a real
-  actor would do. This is where the Perception/State/Presence actors from
-  the architecture doc go.
+- `src/vulkan.rs` — `Instance` + logical `Device`, graphics queue, dma_buf
+  import probe (`VK_KHR_external_memory_fd` + `VK_EXT_external_memory_dma_buf`).
+  `Entry::load()` so the crate type-checks without a driver and fails clearly
+  at run time if none is present.
+- `src/pipeline.rs` — compute dispatch for `splat_projection.comp` and
+  `splat_eviction.comp`. SPIR-V is compiled at **build** time (`build.rs`,
+  needs `glslangValidator` on `PATH`) and embedded. On startup the daemon
+  runs a one-splat smoke tick and exits if dispatch fails. The pipeline is
+  then torn down; actors do not yet write a live buffer.
+- `src/protocol.rs` / `src/socket.rs` — JSONL over
+  `$XDG_RUNTIME_DIR/pachakutech/presence.sock`. One connection at a time.
+- `src/registry.rs` + `src/actors/` — Control (ingest `.splat`/`.ply` into
+  Scene Memory), Presence (live ids, stub `text_to_pose_code`), GPU layout
+  types, V4L2 and `wlr-screencopy` (SHM) ingress clients that are not ticked.
+
+Last run on this Omarchy box (2026-09-22): Intel Iris Xe (TGL GT2), dma_buf
+import yes, smoke projected splat 0 to screen (640.0, 360.0), depth 2.00.
 
 ## Build and run
 
+Not on `PATH`. From this directory:
+
 ```
+# Arch/Omarchy: pacman -S glslang   # build-time, shader compile
 cargo build
 ./target/debug/presence-daemon
 ```
 
-On a machine with no Vulkan driver, it prints a clear error and exits — that
-was verified during development rather than assumed. On a real Linux desktop
-with a working Vulkan install, it should get past that line, report your
-GPU's name and dma_buf support, and start listening on the socket.
+No Vulkan driver → clear error, exit 1. Smoke tick fail → exit 1. Otherwise
+it listens on the socket until killed.
 
 ## What's next, in rough order
 
-1. **Webcam ingress**: V4L2 capture with `V4L2_MEMORY_DMABUF` + `VIDIOC_EXPBUF`
-   to get a `dma_buf` fd, imported via `VK_EXT_external_memory_dma_buf`
-   (sketch in `../docs/architecture.md`). No existing well-maintained Rust
-   crate does this end to end as of this writing — expect to wrap the raw
-   ioctls yourself, similarly to the C sketch in the architecture doc.
-2. **Screen ingress**: `wlr-screencopy-unstable-v1` via a Wayland client
-   library (`wayland-client` + generated protocol bindings, or
-   `smithay-client-toolkit`).
-3. **Compositing the output**: a `wlr-layer-shell-unstable-v1` surface,
-   rendered into with the Vulkan device already set up here.
-4. **Replace `src/registry.rs`'s print statements** with real actor logic as
-   each of the above lands — the protocol boundary shouldn't need to change
-   for any of this. Concretely, per `../docs/architecture.md`: a Control
-   actor that ingests an `addArtifact` splat cloud into sparse Scene Memory,
-   and a Presence actor that maps `animatePresence`'s text to a compact
-   pose/expression code and applies it to the canonical cloud via linear
-   blend or dual-quaternion skinning — not full per-frame regeneration; see
-   the architecture doc for why.
-5. **Wire the MCP Binding to this instead of the stub**: swap
-   `../src/daemonStub.ts` for a real `daemonClient.ts` that connects to this
-   socket. Not done yet on purpose — worth doing once there's something on
-   the other end worth connecting to.
+1. **Keep `SplatPipeline` alive** for the process and `write_splat` from
+   Control/Presence instead of destroying it after smoke.
+2. **Compositing:** `wlr-layer-shell-unstable-v1` + a raster pass over
+   `ProjectedSplat`. A quad is enough to prove pixels.
+3. **Tick ingress:** the V4L2 and `wlr-screencopy` (SHM) clients already
+   compile; feed `IngressActor::update_slot` into the live buffer. dma_buf
+   import is probed and present here, but the working capture path is SHM.
+4. **Placeholder pose table** so `animatePresence` moves bone 0 without
+   waiting on the research text-to-pose model.
+5. Concurrent socket clients, and move caps/ids into this process so two
+   MCP sessions share one substrate.
+
+The MCP Binding already speaks this socket (`../src/daemonClient.ts`) and
+falls back to notify-send if you aren't running.

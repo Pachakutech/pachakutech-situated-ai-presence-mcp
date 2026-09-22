@@ -7,10 +7,13 @@ or import a `dma_buf` fd directly from Node. So the design is a split:
 
 - **MCP Binding** (`src/`, TypeScript) — the typed front door. Owns the tool
   schema and the Policy Gate. Speaks MCP over stdio to whichever agent CLI
-  invoked it. Knows nothing about Vulkan.
+  invoked it. Knows nothing about Vulkan. Connects to the daemon over the
+  Unix socket (`src/daemonClient.ts`) and falls back to the notify-send stub
+  if nothing is listening.
 - **Presence Daemon** (`daemon/`, Rust) — owns the GPU. Holds the Vulkan
-  device, will eventually import webcam/screen frames as `dma_buf`, and runs
-  the actor registry. Knows nothing about MCP.
+  device, runs a compute splat pipeline (projection + LRU eviction), and
+  serves the actor registry over the socket. Knows nothing about MCP.
+  Webcam/screen ingress clients exist as modules and are not ticked yet.
 
 They talk over a local Unix socket, one line of JSON per message, proposal
 in, result out. Nothing dense — no buffers, no pixels — crosses that
@@ -25,10 +28,10 @@ desktop instead of a CPU/GPU boundary on a phone.
  MCP Binding (Node)  ── policy gate, typed tools ──
         │  Unix socket, JSON lines
         ▼
- Presence Daemon (Rust) ── Vulkan device, actor registry ──
+ Presence Daemon (Rust) ── Vulkan device, compute pipeline, actor registry ──
         │
         ▼
- GPU: dma_buf-imported webcam/screen frames, wlr-layer-shell output
+ GPU: projected splat buffer (compute). Overlay / dma_buf ingress not yet.
 ```
 
 ## The socket protocol
@@ -56,9 +59,21 @@ Every tool in `src/index.ts` has a matching `Proposal` variant in
 for now. If this grows much further, generating one from the other becomes
 worth it; at six, it isn't yet.
 
-## Zero-copy ingress (planned, not yet built)
+## Ingress (written, not ticked)
 
-Webcam, via V4L2's `DMABUF` export path:
+Two capture backends live under `daemon/src/actors/ingress/` and compile
+into the daemon. Neither is called from `main.rs` yet — there is no frame
+loop feeding `SplatPipeline::write_splat`.
+
+- **Screen, v0:** `wlr-screencopy-unstable-v1` copying into `wl_shm`, then
+  `frame_to_billboard` (one textured-billboard `AnimatedSplat`). This is a
+  copy path, not dma_buf.
+- **Webcam, v0:** raw V4L2 `ioctl(2)` (layouts checked against kernel
+  headers). Same billboard conversion.
+
+The **eventual** zero-copy path is still the one `vulkan.rs` probes for on
+startup (`VK_KHR_external_memory_fd` + `VK_EXT_external_memory_dma_buf`,
+confirmed present on the Intel Xe this was last run on):
 
 ```c
 struct v4l2_requestbuffers req = { .count = 4, .type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
@@ -69,21 +84,29 @@ struct v4l2_exportbuffer expbuf = { .type = V4L2_BUF_TYPE_VIDEO_CAPTURE, .index 
 ioctl(fd, VIDIOC_EXPBUF, &expbuf);   // expbuf.fd is now a dma_buf handle
 ```
 
-Screen, via Hyprland's Wayland compositor (`wlr-screencopy-unstable-v1`): the
-compositor hands back a `wl_buffer` that is itself `dma_buf`-backed,
-importable through the same path.
+Hyprland can also hand back a dma_buf-backed `wl_buffer`. Both import with
+`VkImportMemoryFdInfoKHR` / `VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT`.
+Do not conflate that with the SHM client that exists today.
 
-Both import into Vulkan the same way — `VkImportMemoryFdInfoKHR` with
-`VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT` — which is exactly what
-`daemon/src/vulkan.rs` checks device support for today, ahead of either
-ingress path existing.
+## Compute pipeline (built and smoked)
+
+`daemon/src/pipeline.rs` allocates the dynamic splat SSBO, bone palette,
+projected-output SSBO, and eviction list; embeds SPIR-V compiled at build
+time from `splat_projection.comp` and `splat_eviction.comp`; dispatches
+both in one command buffer. On daemon start it runs a one-splat smoke tick
+and refuses to serve if dispatch fails.
+
+What it does **not** do: rasterize, present, or stay alive for actors.
+Smoke constructs, ticks, destroys. A process-lifetime pipeline plus a
+`wlr-layer-shell` surface is the next compositing step.
 
 ## Composing the overlay (planned, not yet built)
 
 A `wlr-layer-shell-unstable-v1` surface — Wayland's purpose-built mechanism
 for bars, notifications, and overlays that float above windows without being
-reparented into them. The natural home for whatever a Presence Actor
-eventually renders.
+reparented into them. The natural home for a fragment pass that consumes
+`ProjectedSplat`. A `VkDevice` plus a projected-output buffer is not an
+overlay.
 
 ## Scope: is this the runtime, or a client of the runtime?
 
@@ -145,13 +168,22 @@ like.
 
 ## What's honestly unbuilt
 
+- A process-lifetime `SplatPipeline` that Control/Presence/Ingress write
+  into (smoke currently tears it down before the socket accepts).
+- Raster + `wlr-layer-shell` presentation of `ProjectedSplat`.
+- Ticking the V4L2 / wlr-screencopy backends into the splat buffer.
+- `text_to_pose_code` — still returns a zero pose.
 - Resolving something like "the red error banner" to actual screen
   coordinates is a real perception problem — a vision model over the
   captured frame. No shortcut exists for this; it lives inside the daemon's
   registry once built.
-- `wlr-screencopy` and `wlr-layer-shell` are wlroots-protocol-based; Hyprland
-  implements them independently now (it dropped its wlroots dependency in
-  2024) but still speaks the same protocols, so this still applies. A
-  GNOME/KDE port would need portal-based screen capture
-  (`xdg-desktop-portal` ScreenCast) and a different overlay mechanism
-  instead.
+- Concurrent socket clients (today: one connection at a time) and moving
+  presence/artifact caps out of the per-MCP-process Policy Gate so the
+  shared-substrate claim is true in the process graph.
+- Microphone / audio clock (named in `docs/vision.md`, no code).
+
+`wlr-screencopy` and `wlr-layer-shell` are wlroots-protocol-based; Hyprland
+implements them independently now (it dropped its wlroots dependency in
+2024) but still speaks the same protocols. A GNOME/KDE port would need
+portal-based screen capture (`xdg-desktop-portal` ScreenCast) and a
+different overlay mechanism instead.

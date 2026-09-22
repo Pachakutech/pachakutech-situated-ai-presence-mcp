@@ -19,7 +19,8 @@ desktop against whatever agent you're already running.
 | `retireArtifact` | instanced (2/2) | Removes a held artifact and frees its slot |
 
 Every call passes a Policy Gate first: a 1.5s minimum interval between calls
-to the same tool, a cap of 3 concurrent presences, a cap of 20 held
+to the same tool (except `retirePresence` / `retireArtifact`, which are
+never rate-limited), a cap of 3 concurrent presences, a cap of 20 held
 artifacts — presences and artifacts are capped independently since they're
 different risk classes (one is actively rendered, the other is inert content
 sitting in the substrate).
@@ -39,11 +40,12 @@ This is two components in different environments:
   macOS, or WSL, anywhere your agent CLI does. This is the half you install
   today.
 - **The Presence Daemon** (`daemon/`) is Linux-only by design — it needs a
-  real Vulkan device and, once ingress/output land, a Wayland compositor
-  speaking `wlr-screencopy`/`wlr-layer-shell` (Hyprland is the reference
-  target; see [`docs/architecture.md`](docs/architecture.md)). It's not
-  wired to the MCP Binding yet, so you don't need it to try the tools today
-  — only to build toward real rendering.
+  real Vulkan device and, once overlay lands, a Wayland compositor speaking
+  `wlr-screencopy`/`wlr-layer-shell` (Hyprland is the reference target; see
+  [`docs/architecture.md`](docs/architecture.md)). The MCP Binding connects
+  to it when it's running and falls back to the stub when it isn't, so you
+  can try the tools today without the daemon — you need the daemon to get
+  past notify-send.
 
 ### MCP Binding — any OS with Node
 
@@ -73,30 +75,30 @@ published to npm first (or a GitHub Release with a built `dist/`); it's not
 verified to work yet, so clone-and-build is the reliable path until then.
 
 Run `presence doctor` any time to check what this machine can support —
-today that's informational only (see below), but it's the same check the
-native daemon will depend on once it exists.
+Node, `WAYLAND_DISPLAY`, `/dev/dri/renderD128`, `/dev/video0`. Those
+matter for the daemon, not for the stub.
 
 ### Presence Daemon — Linux, with a Vulkan driver installed
 
-Only needed if you're building toward the real renderer rather than just
-using the MCP tools against the stub. Requires a Rust toolchain
-([rustup.rs](https://rustup.rs)) and a working Vulkan install:
+Required for anything past notify-send. Needs a Rust toolchain, `glslang`
+(shader compile at **build** time), and a working Vulkan ICD at **run**
+time. The binary is not installed on `PATH`:
 
 ```
-# Arch/Omarchy: vulkan-icd-loader plus your GPU vendor's driver package
-# (vulkan-radeon, vulkan-intel, or nvidia-utils) — presence doctor tells
-# you if one's missing.
+# Arch/Omarchy: glslang + vulkan-icd-loader + vendor driver
+# (vulkan-radeon, vulkan-intel, or nvidia-utils)
 cd daemon
 cargo build
 ./target/debug/presence-daemon
 ```
 
-On a machine with no Vulkan driver, it prints a clear error and exits
-instead of crashing — that's expected outside a real Linux desktop session,
-not a bug. On one with a working install, it reports your GPU's name and
-whether it supports the zero-copy `dma_buf` import path the ingress design
-depends on, then starts listening on its socket. See
-[`daemon/README.md`](daemon/README.md) for what's built versus what's next.
+On a machine with no Vulkan driver, it prints a clear error and exits.
+On a working desktop it reports the GPU name and dma_buf support, runs a
+one-splat compute smoke tick (fatal if dispatch fails), then listens on
+`$XDG_RUNTIME_DIR/pachakutech/presence.sock`. Last checked on Intel Iris
+Xe (TGL GT2): dma_buf import yes; smoke projected splat 0 to (640, 360).
+See [`daemon/README.md`](daemon/README.md) for what's built versus what's
+next.
 
 ## Where this runs, and what it needs access to
 
@@ -110,13 +112,13 @@ the MCP server it spawns inherits that session's environment automatically —
 separate setup step, unlike a systemd service, which would need its
 environment imported explicitly.
 
-**Today**, none of that matters yet — `src/daemonStub.ts` only calls
+**Today**, if the daemon isn't running, `src/daemonStub.ts` only calls
 `notify-send` and appends to a log file, so the only real dependency is
-Node.
+Node. If the daemon *is* running, the Binding talks to it over the Unix
+socket and those session variables matter.
 
-**Once the native daemon exists** (see `docs/architecture.md`), it will need
-two more things, both standard on a modern desktop session and checked by
-`presence doctor`:
+**The daemon** needs two more things, both standard on a modern desktop
+session and checked by `presence doctor`:
 - **GPU access**, via the DRM render node (`/dev/dri/renderD128`) — for
   Vulkan. On most current distros this is granted automatically to whoever
   is logged in at the console, through `systemd-logind`'s dynamic ACLs, not
@@ -138,17 +140,16 @@ the same way.
 
 ## What's real vs. stubbed right now
 
-The MCP surface — schemas, the Policy Gate, tool registration, and now the
-`presence` CLI itself — is real and runnable today, on any machine with
-Node. The rendering underneath each Manifestation is currently a stand-in
-(`src/daemonStub.ts`): a desktop notification plus a structured log, standing
-in for a native Vulkan daemon that doesn't exist yet. That daemon —
-zero-copy webcam/screen ingress via `dma_buf`, output composited through
-`wlr-layer-shell` — is a small, separate build, described in
-`docs/architecture.md`. The boundary between the two is deliberate: the
-daemon owns the GPU, the MCP layer owns the contract, and they talk over a
-small, typed protocol rather than sharing buffers directly. Swapping the
-stub for the real daemon changes nothing above that boundary.
+The MCP surface — schemas, Policy Gate, CLI, and the Unix-socket client —
+is real. With `presence-daemon` up, tool calls hit the Rust registry; without
+it, they hit `notify-send` plus `~/.local/state/pachakutech-presence/log.jsonl`.
+The daemon owns a Vulkan device and a compute splat pipeline that smokes on
+startup. It does **not** yet present to Hyprland, keep that pipeline alive
+for actors, or tick webcam/screen capture. `addArtifact`'s `sourceUri` is a
+local `.splat`/`.ply` path the daemon reads from disk — description-only
+holds an empty cloud. The boundary is deliberate: the daemon owns the GPU,
+the MCP layer owns the contract, and they talk over a small, typed protocol
+rather than sharing buffers. See [`docs/architecture.md`](docs/architecture.md).
 
 ## Why this exists
 

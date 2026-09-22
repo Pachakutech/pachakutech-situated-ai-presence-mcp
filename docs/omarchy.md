@@ -47,22 +47,32 @@ them, per the Model Context Protocol).
 
 ## What you'll see today
 
-All six Manifestations (`manifestHighlight`, `spawnPresence` /
-`animatePresence` / `retirePresence`, `addArtifact` / `retireArtifact`) are
-real and callable, but the rendering underneath is currently a stand-in:
-`notify-send` and a JSONL log (`~/.local/state/pachakutech-presence/log.jsonl`),
-not yet a Hyprland overlay. A native Vulkan daemon exists alongside it
-(`../daemon/`) — it initializes a real GPU device and checks for zero-copy
-`dma_buf` support, but isn't wired to the MCP server yet, and doesn't render
-anything either. Both gaps are deliberate scoping, not hidden limitations —
-see [`../docs/architecture.md`](../docs/architecture.md) for the full
-two-process design and what's left to connect.
+All six Manifestations are callable. If `presence-daemon` is running, the
+MCP Binding talks to it over `$XDG_RUNTIME_DIR/pachakutech/presence.sock`;
+if not, it falls back to `notify-send` plus a JSONL log
+(`~/.local/state/pachakutech-presence/log.jsonl`). The daemon initializes
+Vulkan, probes dma_buf import, runs a one-splat compute smoke tick, then
+serves the socket. Nothing is composited onto Hyprland yet — no
+`wlr-layer-shell` surface, no raster pass. That gap is scoping, not a
+hidden limitation; see [`../docs/architecture.md`](../docs/architecture.md).
+
+Build the daemon with a Rust toolchain and `glslang` (`pacman -S glslang`;
+already present on this Omarchy install). It is not on `PATH`:
+
+```
+cd daemon
+cargo build
+./target/debug/presence-daemon
+```
+
+Last verified on Intel Iris Xe (TGL GT2) with dma_buf import available and
+the smoke tick projecting splat 0 to screen (640, 360).
 
 ## Why start here
 
 Omarchy already ingests screen and window context indirectly through its
-agents; a webcam and full Wayland screen-capture pipeline are the two
-Ingress Actors this plugin will add next (via `wlr-screencopy` and V4L2's
-`DMABUF` export path — both zero-copy, both native to a wlroots compositor).
-Hyprland's `wlr-layer-shell` is the natural home for whatever this eventually
-renders — an overlay surface, not a window.
+agents. Screen and webcam **clients** now exist in the daemon (`wlr-screencopy`
+via SHM, V4L2 via raw ioctl) but are not ticked into the splat buffer.
+dma_buf import is probed and present on this GPU; using it instead of SHM
+is still ahead. Hyprland's `wlr-layer-shell` is the natural home for
+whatever this eventually presents — an overlay surface, not a window.

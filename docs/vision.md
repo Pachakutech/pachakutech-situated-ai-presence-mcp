@@ -79,10 +79,12 @@ and store feedback.
 
 **Where the code is today:** the daemon's registry
 (`daemon/src/registry.rs`) is the one place this shared state is meant to
-live, since it's a single persistent process reachable over one socket no
-matter how many agents connect. The MCP Binding doesn't talk to it yet — it
-still uses `daemonStub.ts`, which keeps its own bookkeeping per spawned
-process. So the multi-agent claim above is the architecture's destination,
-verified in the design, not yet something you can point two agents at and
-watch happen. We are currrently wiring the MCP Binding to the real daemon
-(the last item in `daemon/README.md`'s "what's next").
+live, since it's a single persistent process reachable over one socket.
+The MCP Binding *does* connect to that socket when `presence-daemon` is
+running (`src/daemonClient.ts`), and falls back to `daemonStub.ts`
+otherwise. Caps and live IDs still live in the per-session Policy Gate,
+and the socket still accepts one connection at a time, so the multi-agent
+claim is not yet something you can point two agents at and watch happen.
+The daemon also runs a compute splat pipeline on startup (verified on
+Intel Iris Xe, dma_buf import present) but does not yet present pixels
+or keep that pipeline alive for actors.

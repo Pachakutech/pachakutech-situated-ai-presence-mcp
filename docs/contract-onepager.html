@@ -109,7 +109,7 @@ GPU: dma_buf-imported webcam/screen frames, wlr-layer-shell output</div>
 <p>One JSON line per message, nothing dense crosses this boundary — no buffers, no pixels. Every MCP tool has a matching Rust <code>Proposal</code> variant, kept in lockstep by hand at six tools; regenerating one from the other becomes worth it past that.</p>
 
 <div class="status">
-<b>Status:</b> <span class="real">As of today</span> — MCP server, Policy Gate, CLI, and the daemon's Vulkan device init (verified compiling and running, including graceful failure with no GPU present) all independently build and run. <span class="stub">Stubbed today</span> — the MCP Binding still talks to a notify-send + JSONL stand-in, not the daemon above; webcam/screen ingress and compositor output are scoped (<code>docs/architecture.md</code>) but not yet built. The contract is the part that's finished; the rendering behind it is the part that's next.
+<b>Status:</b> <span class="real">As of 2026-09-22</span> — MCP server, Policy Gate, CLI, Unix-socket client (falls back to notify-send if the daemon isn't up), Vulkan device init, and a compute splat pipeline that smokes on daemon start (Intel Iris Xe: projected splat at screen 640×360). <span class="stub">Not yet</span> — process-lifetime pipeline for actors, Hyprland overlay / raster, ticking webcam/screen into the buffer, text-to-pose, concurrent socket clients. The contract is finished; pixels on the compositor are next.
 </div>
 
 <div class="footer">pachakutech-presence · MIT licensed · github.com/Pachakutech/pachakutech-situated-ai-presence-mcp</div>

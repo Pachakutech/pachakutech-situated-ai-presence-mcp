@@ -1,11 +1,8 @@
 //! The std430 layout `DynamicSplatBuffer` expects on the GPU side (the
 //! `AnimatedSplat` struct in the projection/eviction/converter compute
 //! shaders). This is the seam between Scene Memory (CPU, canonical,
-//! rest-pose) and the presence runtime's actual render buffer (GPU,
-//! animated, lifecycle-managed) — nothing here runs on GPU yet, but the
-//! byte layout is real and tested so the eventual upload code has a
-//! single source of truth instead of two independently-hand-written
-//! structs drifting apart.
+//! rest-pose) and `SplatPipeline`'s mapped SSBOs. Layout is tested; the
+//! dispatch layer uploads these structs as-is.
 //!
 //! Flag bits (kept in one place on purpose — the shaders currently
 //! duplicate this convention across three files):
