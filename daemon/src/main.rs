@@ -1,4 +1,5 @@
 mod actors;
+mod pipeline;
 mod protocol;
 mod registry;
 mod socket;
@@ -34,6 +35,14 @@ fn main() {
             std::process::exit(1);
         }
     };
+
+    match pipeline::smoke_tick(&vk) {
+        Ok(summary) => println!("[pipeline] {summary}"),
+        Err(e) => {
+            eprintln!("[pipeline] smoke tick failed: {e}");
+            std::process::exit(1);
+        }
+    }
 
     let path = socket_path();
     if let Err(e) = socket::serve(&path, vk) {

@@ -18,8 +18,8 @@
 //! staging transfers instead.
 
 use crate::actors::gpu_layout::{
-    AnimatedSplatGpu, EvictionUniformsGpu, ProjectedSplatGpu, ProjectionUniformsGpu,
-    DualQuatGpu, IDENTITY_DUAL_QUAT, MAX_BONES, MAX_EVICTIONS_PER_FRAME,
+    AnimatedSplatGpu, DualQuatGpu, EvictionUniformsGpu, ProjectedSplatGpu, ProjectionUniformsGpu,
+    FLAG_ACTIVE, IDENTITY_DUAL_QUAT, MAX_BONES, MAX_EVICTIONS_PER_FRAME,
 };
 use crate::vulkan::VulkanContext;
 use ash::vk;
@@ -396,6 +396,61 @@ impl SplatPipeline {
     pub fn evicted_texture_count(&self) -> u32 {
         self.evicted_textures.read::<u32>(1)[0]
     }
+}
+
+/// One-splat identity-camera tick: allocates the pipeline, writes a live
+/// splat at camera-space z=2, dispatches, reads back, tears down. Exists
+/// so `presence-daemon` actually *runs* the shaders on startup instead of
+/// only compiling them into the binary. Failure here is fatal — a daemon
+/// that cannot dispatch is not a GPU owner.
+pub fn smoke_tick(vk_ctx: &VulkanContext) -> Result<String, String> {
+    const CAPACITY: u32 = 256;
+    let pipe = SplatPipeline::new(vk_ctx, CAPACITY)?;
+
+    let result = (|| {
+        pipe.set_projection_uniforms(ProjectionUniformsGpu::new(
+            IDENTITY_DUAL_QUAT,
+            [800.0, 800.0],
+            [640.0, 360.0],
+            [1280.0, 720.0],
+            0.05,
+            CAPACITY,
+            1,
+        ));
+        pipe.write_splat(
+            0,
+            &AnimatedSplatGpu {
+                position_and_confidence: [0.0, 0.0, 2.0, 1.0],
+                rotation: [1.0, 0.0, 0.0, 0.0],
+                color: [1.0, 0.0, 0.0, 1.0],
+                joint_ids: [0, 0, 0, 0],
+                weights: [1.0, 0.0, 0.0, 0.0],
+                owner_id: 1,
+                last_visible_frame: 1,
+                flags: FLAG_ACTIVE,
+                padding: 255,
+            },
+        );
+        pipe.tick(vk_ctx, 1, 600)?;
+        let projected = pipe.read_projected();
+        let p = projected[0];
+        // Identity camera, splat at (0,0,2): screen ≈ principal (640, 360),
+        // depth ≈ 2. A zeroed slot means the shader returned early (near
+        // clip / cull / thinning) — that's a real pipeline bug, not "empty".
+        if p.splat_id != 0 || p.depth < 1.0 {
+            return Err(format!(
+                "splat 0 did not project as expected: splat_id={} depth={} screen=({}, {}) radius={}",
+                p.splat_id, p.depth, p.screen_center[0], p.screen_center[1], p.radius_pixels
+            ));
+        }
+        Ok(format!(
+            "smoke ok: splat 0 -> screen ({:.1}, {:.1}) r={:.2}px depth={:.2} (capacity {CAPACITY})",
+            p.screen_center[0], p.screen_center[1], p.radius_pixels, p.depth
+        ))
+    })();
+
+    pipe.destroy(vk_ctx);
+    result
 }
 
 fn descriptor_binding(binding: u32, ty: vk::DescriptorType) -> vk::DescriptorSetLayoutBinding<'static> {
