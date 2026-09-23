@@ -136,6 +136,7 @@ dependencies = [
  "serde_json",
  "wayland-backend",
  "wayland-client",
+ "wayland-protocols",
  "wayland-protocols-wlr",
 ]
 

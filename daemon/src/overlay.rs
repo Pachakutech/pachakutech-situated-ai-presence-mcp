@@ -1,8 +1,13 @@
-//! Hyprland overlay: a `wlr-layer-shell` surface covering the output, with
-//! an empty input region (clicks fall through) and `exclusive_zone = -1`
-//! (does not shove windows). Draws one premultiplied-alpha quad in the
-//! center — the first visible Presence pixels. Hyperbubble comes next.
+//! Present vs ingress are split:
+//! - **Present:** a *movable* disc-sized layer-shell surface (compositor
+//!   damage is the bubble, not the output). Empty input, exclusive_zone=-1.
+//! - **Ingress:** one reused shm of the *full* output at ≤10 fps, overlay
+//!   parked off-screen for the copy. Actors (and the glass) see that frame.
+//!   1080p RGBA is ~8MiB overwritten in place — the OOM was new shm +
+//!   60fps fullscreen *present*, not "the GPU cannot sample 1080p".
 
+use crate::actors::ingress::screen_wlr::WlrScreenSource;
+use crate::actors::ingress::{FrameSource, IngressFrame};
 use crate::pipeline::SplatPipeline;
 use crate::socket::SocketServer;
 use crate::vulkan::VulkanContext;
@@ -10,12 +15,22 @@ use ash::{khr, vk};
 use std::io;
 use std::os::fd::{AsFd, AsRawFd};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use wayland_client::protocol::{
-    wl_compositor, wl_output, wl_region, wl_registry, wl_surface,
+    wl_buffer, wl_compositor, wl_output, wl_region, wl_registry, wl_shm, wl_shm_pool, wl_surface,
 };
-use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle};
+use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum};
 use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_shell_v1, zwlr_layer_surface_v1,
+};
+use wayland_client::protocol::wl_seat;
+use wayland_protocols::ext::idle_notify::v1::client::{
+    ext_idle_notification_v1, ext_idle_notifier_v1,
+};
+use wayland_protocols_wlr::screencopy::v1::client::{
+    zwlr_screencopy_frame_v1, zwlr_screencopy_manager_v1,
 };
 
 const OVERLAY_VERT_SPV: &[u8] =
@@ -23,14 +38,25 @@ const OVERLAY_VERT_SPV: &[u8] =
 const OVERLAY_FRAG_SPV: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/overlay_quad.frag.spv"));
 
-/// Visible marker size in pixels. Small enough not to dominate a 1080p
-/// screen, large enough to prove the overlay is actually compositing.
-const QUAD_PX: f32 = 200.0;
+/// Looking-glass diameter in pixels. Small enough not to dominate 1080p,
+/// large enough to read the refraction.
+const BUBBLE_PX: u32 = 220;
+/// Capture/present ceiling. The OOM was a 16ms fullscreen copy+present spin.
+const CAPTURE_INTERVAL: Duration = Duration::from_millis(100);
+/// Hide before Omarchy's 150s screensaver so we are not painted over it.
+const IDLE_HIDE_MS: u32 = 120_000;
 
 pub struct Overlay {
     conn: Connection,
     event_queue: EventQueue<OverlayState>,
     state: OverlayState,
+    /// One memfd reused for every full-output copy — never a new shm per frame.
+    cap_fd: Option<std::os::fd::OwnedFd>,
+    cap_fd_size: usize,
+    /// Top-left of the disc in output pixels. Quiescence / highlight actors
+    /// will write this; `set_bubble_pos` is the whole present API.
+    bubble_x: i32,
+    bubble_y: i32,
 }
 
 pub struct OverlayState {
@@ -38,6 +64,20 @@ pub struct OverlayState {
     layer_shell: Option<zwlr_layer_shell_v1::ZwlrLayerShellV1>,
     surface: Option<wl_surface::WlSurface>,
     layer_surface: Option<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1>,
+    output: Option<wl_output::WlOutput>,
+    shm: Option<wl_shm::WlShm>,
+    screencopy: Option<zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1>,
+    capture_spec: Option<(u32, u32, u32, wl_shm::Format)>,
+    capture_dmabuf: bool,
+    capture_done: bool,
+    capture_ready: bool,
+    capture_failed: bool,
+    capture_y_invert: bool,
+    output_width: u32,
+    output_height: u32,
+    seat: Option<wl_seat::WlSeat>,
+    idle_notifier: Option<ext_idle_notifier_v1::ExtIdleNotifierV1>,
+    idle: bool,
     width: u32,
     height: u32,
     configured: bool,
@@ -59,6 +99,20 @@ impl Overlay {
             layer_shell: None,
             surface: None,
             layer_surface: None,
+            output: None,
+            shm: None,
+            screencopy: None,
+            capture_spec: None,
+            capture_dmabuf: false,
+            capture_done: false,
+            capture_ready: false,
+            capture_failed: false,
+            capture_y_invert: false,
+            output_width: 0,
+            output_height: 0,
+            seat: None,
+            idle_notifier: None,
+            idle: false,
             width: 0,
             height: 0,
             configured: false,
@@ -68,6 +122,14 @@ impl Overlay {
         event_queue
             .roundtrip(&mut state)
             .map_err(|e| format!("wayland registry roundtrip: {e}"))?;
+        // Output mode arrives as a follow-up event.
+        event_queue
+            .roundtrip(&mut state)
+            .map_err(|e| format!("wayland output roundtrip: {e}"))?;
+        if state.output_width == 0 || state.output_height == 0 {
+            state.output_width = 1920;
+            state.output_height = 1080;
+        }
 
         let compositor = state
             .compositor
@@ -85,25 +147,30 @@ impl Overlay {
         surface.set_input_region(Some(&region));
         surface.set_opaque_region(Some(&region));
 
+        if let (Some(notifier), Some(seat)) = (state.idle_notifier.clone(), state.seat.clone()) {
+            let _notification = notifier.get_idle_notification(IDLE_HIDE_MS, &seat, &qh, ());
+            // Kept alive by the server as long as we don't destroy it; Dispatch
+            // on OverlayState receives idled/resumed.
+            std::mem::forget(_notification);
+        }
+
         let layer_surface = layer_shell.get_layer_surface(
             &surface,
-            None,
+            state.output.as_ref(),
             zwlr_layer_shell_v1::Layer::Overlay,
             "pachakutech-presence".into(),
             &qh,
             (),
         );
-        layer_surface.set_anchor(
-            zwlr_layer_surface_v1::Anchor::Top
-                | zwlr_layer_surface_v1::Anchor::Bottom
-                | zwlr_layer_surface_v1::Anchor::Left
-                | zwlr_layer_surface_v1::Anchor::Right,
-        );
+        // Disc-sized, not fullscreen. Top|Left + margins to center.
+        layer_surface.set_anchor(zwlr_layer_surface_v1::Anchor::Top | zwlr_layer_surface_v1::Anchor::Left);
         layer_surface.set_exclusive_zone(-1);
         layer_surface.set_keyboard_interactivity(
             zwlr_layer_surface_v1::KeyboardInteractivity::None,
         );
-        layer_surface.set_size(0, 0);
+        layer_surface.set_size(BUBBLE_PX, BUBBLE_PX);
+        let (ml, mt) = center_margins(state.output_width, state.output_height);
+        layer_surface.set_margin(mt, 0, 0, ml);
         surface.commit();
 
         state.surface = Some(surface);
@@ -127,11 +194,20 @@ impl Overlay {
         }
 
         println!(
-            "[overlay] layer-shell {}x{} exclusive_zone=-1 input=pass-through",
-            state.width, state.height
+            "[overlay] layer-shell disc {BUBBLE_PX}x{BUBBLE_PX} on {}x{} exclusive_zone=-1 input=pass-through",
+            state.output_width, state.output_height
         );
 
-        Ok(Self { conn, event_queue, state })
+        let (bx, by) = disc_origin(state.output_width, state.output_height);
+        Ok(Self {
+            conn,
+            event_queue,
+            state,
+            cap_fd: None,
+            cap_fd_size: 0,
+            bubble_x: bx,
+            bubble_y: by,
+        })
     }
 
     pub fn display_ptr(&self) -> *mut vk::wl_display {
@@ -151,6 +227,26 @@ impl Overlay {
         vk::Extent2D { width: self.state.width, height: self.state.height }
     }
 
+    pub fn capture_extent(&self) -> vk::Extent2D {
+        vk::Extent2D {
+            width: self.state.output_width.max(1),
+            height: self.state.output_height.max(1),
+        }
+    }
+
+    /// Move the disc. Values are output-pixel top-left; clamped so the
+    /// bubble stays on-screen. This is what a quiescence/highlight actor
+    /// will call — the layer is not glued to the center.
+    pub fn set_bubble_pos(&mut self, x: i32, y: i32) {
+        let max_x = self.state.output_width.saturating_sub(BUBBLE_PX) as i32;
+        let max_y = self.state.output_height.saturating_sub(BUBBLE_PX) as i32;
+        self.bubble_x = x.clamp(0, max_x.max(0));
+        self.bubble_y = y.clamp(0, max_y.max(0));
+        if !self.state.idle {
+            self.unpark_at_bubble();
+        }
+    }
+
     pub fn closed(&self) -> bool {
         self.state.closed
     }
@@ -159,6 +255,118 @@ impl Overlay {
         let d = self.state.dirty;
         self.state.dirty = false;
         d
+    }
+
+    fn park_offscreen(&self) {
+        if let Some(ls) = &self.state.layer_surface {
+            ls.set_margin(-((BUBBLE_PX as i32) * 4), 0, 0, 0);
+            if let Some(s) = &self.state.surface {
+                s.commit();
+            }
+        }
+    }
+
+    fn unpark_at_bubble(&self) {
+        if let Some(ls) = &self.state.layer_surface {
+            ls.set_margin(self.bubble_y, 0, 0, self.bubble_x);
+            if let Some(s) = &self.state.surface {
+                s.commit();
+            }
+        }
+    }
+
+    fn should_hide(&self, locked: bool, sleeping: bool) -> bool {
+        self.state.idle || locked || sleeping
+    }
+
+    /// Full-output copy into the reused memfd. Caller parks the overlay
+    /// off-screen first so this frame does not include our pixels.
+    fn capture_full_output(&mut self) -> Result<Option<IngressFrame>, String> {
+        let qh = self.event_queue.handle();
+        let output = self.state.output.clone().ok_or("no wl_output")?;
+        let manager = self.state.screencopy.clone().ok_or("no wlr-screencopy")?;
+        let shm = self.state.shm.clone().ok_or("no wl_shm")?;
+
+        self.state.capture_spec = None;
+        self.state.capture_dmabuf = false;
+        self.state.capture_done = false;
+        self.state.capture_ready = false;
+        self.state.capture_failed = false;
+        self.state.capture_y_invert = false;
+
+        let frame = manager.capture_output(0, &output, &qh, ());
+        for _ in 0..32 {
+            self.event_queue
+                .roundtrip(&mut self.state)
+                .map_err(|e| format!("screencopy buffer roundtrip: {e}"))?;
+            if self.state.capture_failed {
+                eprintln!("[overlay] capture failed before buffer_done (shm={:?} dmabuf={})",
+                    self.state.capture_spec.is_some(), self.state.capture_dmabuf);
+                return Ok(None);
+            }
+            if self.state.capture_done {
+                break;
+            }
+        }
+        let (width, height, stride, format) = match self.state.capture_spec {
+            Some(s) => s,
+            None => {
+                eprintln!(
+                    "[overlay] capture: no wl_shm buffer advertised (dmabuf={} done={})",
+                    self.state.capture_dmabuf, self.state.capture_done
+                );
+                return Ok(None);
+            }
+        };
+
+        let size = stride as usize * height as usize;
+        let shm_fd = if self.cap_fd_size >= size {
+            self.cap_fd.as_ref().unwrap()
+        } else {
+            let fd = crate::actors::ingress::screen_wlr::create_anonymous_shm(size)?;
+            self.cap_fd = Some(fd);
+            self.cap_fd_size = size;
+            self.cap_fd.as_ref().unwrap()
+        };
+        let pool = shm.create_pool(shm_fd.as_fd(), size as i32, &qh, ());
+        let buffer = pool.create_buffer(0, width as i32, height as i32, stride as i32, format, &qh, ());
+        frame.copy(&buffer);
+
+        for _ in 0..24 {
+            self.event_queue
+                .roundtrip(&mut self.state)
+                .map_err(|e| format!("screencopy ready roundtrip: {e}"))?;
+            if self.state.capture_ready || self.state.capture_failed {
+                break;
+            }
+        }
+        if !self.state.capture_ready {
+            eprintln!(
+                "[overlay] capture: copy did not complete (failed={} shm={}x{} stride={})",
+                self.state.capture_failed, width, height, stride
+            );
+            return Ok(None);
+        }
+
+        let mmap = crate::actors::ingress::screen_wlr::map_shm_readonly(&shm_fd, size)?;
+        let mut rgba = vec![0u8; (width * height * 4) as usize];
+        let y_invert = self.state.capture_y_invert;
+        for yrow in 0..height as usize {
+            let src_y = if y_invert { height as usize - 1 - yrow } else { yrow };
+            let row_start = src_y * stride as usize;
+            for xcol in 0..width as usize {
+                let src = row_start + xcol * 4;
+                let dst = (yrow * width as usize + xcol) * 4;
+                rgba[dst] = mmap[src + 2];
+                rgba[dst + 1] = mmap[src + 1];
+                rgba[dst + 2] = mmap[src];
+                rgba[dst + 3] = match format {
+                    wl_shm::Format::Argb8888 => mmap[src + 3],
+                    _ => 255,
+                };
+            }
+        }
+        Ok(Some(IngressFrame { width, height, rgba }))
     }
 
     fn flush_and_dispatch(&mut self) -> Result<(), String> {
@@ -186,8 +394,23 @@ impl Dispatch<wl_registry::WlRegistry, ()> for OverlayState {
                 "wl_compositor" if state.compositor.is_none() => {
                     state.compositor = Some(registry.bind(name, version.min(4), qh, ()));
                 }
+                "wl_output" if state.output.is_none() => {
+                    state.output = Some(registry.bind(name, version.min(4), qh, ()));
+                }
+                "wl_shm" if state.shm.is_none() => {
+                    state.shm = Some(registry.bind(name, version.min(1), qh, ()));
+                }
                 "zwlr_layer_shell_v1" if state.layer_shell.is_none() => {
                     state.layer_shell = Some(registry.bind(name, version.min(4), qh, ()));
+                }
+                "zwlr_screencopy_manager_v1" if state.screencopy.is_none() => {
+                    state.screencopy = Some(registry.bind(name, version.min(3), qh, ()));
+                }
+                "wl_seat" if state.seat.is_none() => {
+                    state.seat = Some(registry.bind(name, version.min(7), qh, ()));
+                }
+                "ext_idle_notifier_v1" if state.idle_notifier.is_none() => {
+                    state.idle_notifier = Some(registry.bind(name, version.min(1), qh, ()));
                 }
                 _ => {}
             }
@@ -224,13 +447,89 @@ impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, ()> for OverlayState {
     }
 }
 
+impl Dispatch<zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1, ()> for OverlayState {
+    fn event(
+        state: &mut Self,
+        _frame: &zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1,
+        event: zwlr_screencopy_frame_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwlr_screencopy_frame_v1::Event::Buffer { format, width, height, stride } => {
+                let format = match format {
+                    WEnum::Value(f) => f,
+                    WEnum::Unknown(_) => wl_shm::Format::Argb8888,
+                };
+                state.capture_spec = Some((width, height, stride, format));
+            }
+            zwlr_screencopy_frame_v1::Event::LinuxDmabuf { .. } => state.capture_dmabuf = true,
+            zwlr_screencopy_frame_v1::Event::BufferDone => state.capture_done = true,
+            zwlr_screencopy_frame_v1::Event::Ready { .. } => state.capture_ready = true,
+            zwlr_screencopy_frame_v1::Event::Failed => state.capture_failed = true,
+            zwlr_screencopy_frame_v1::Event::Flags { flags } => {
+                if let WEnum::Value(f) = flags {
+                    state.capture_y_invert =
+                        f.contains(zwlr_screencopy_frame_v1::Flags::YInvert);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<wl_output::WlOutput, ()> for OverlayState {
+    fn event(
+        state: &mut Self,
+        _proxy: &wl_output::WlOutput,
+        event: wl_output::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        if let wl_output::Event::Mode { flags, width, height, .. } = event {
+            let current = match flags {
+                WEnum::Value(f) => f.contains(wl_output::Mode::Current),
+                _ => true,
+            };
+            if current && width > 0 && height > 0 {
+                state.output_width = width as u32;
+                state.output_height = height as u32;
+            }
+        }
+    }
+}
+
+impl Dispatch<ext_idle_notification_v1::ExtIdleNotificationV1, ()> for OverlayState {
+    fn event(
+        state: &mut Self,
+        _proxy: &ext_idle_notification_v1::ExtIdleNotificationV1,
+        event: ext_idle_notification_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        match event {
+            ext_idle_notification_v1::Event::Idled => state.idle = true,
+            ext_idle_notification_v1::Event::Resumed => state.idle = false,
+            _ => {}
+        }
+    }
+}
+
 wayland_client::delegate_noop!(OverlayState: ignore wl_compositor::WlCompositor);
 wayland_client::delegate_noop!(OverlayState: ignore wl_surface::WlSurface);
 wayland_client::delegate_noop!(OverlayState: ignore wl_region::WlRegion);
-wayland_client::delegate_noop!(OverlayState: ignore wl_output::WlOutput);
+wayland_client::delegate_noop!(OverlayState: ignore wl_seat::WlSeat);
+wayland_client::delegate_noop!(OverlayState: ignore ext_idle_notifier_v1::ExtIdleNotifierV1);
+wayland_client::delegate_noop!(OverlayState: ignore wl_shm::WlShm);
+wayland_client::delegate_noop!(OverlayState: ignore wl_shm_pool::WlShmPool);
+wayland_client::delegate_noop!(OverlayState: ignore wl_buffer::WlBuffer);
 wayland_client::delegate_noop!(OverlayState: ignore zwlr_layer_shell_v1::ZwlrLayerShellV1);
+wayland_client::delegate_noop!(OverlayState: ignore zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1);
 
-/// Swapchain + a one-quad graphics pipeline targeting the layer-shell surface.
+/// Swapchain + looking-glass pipeline targeting the layer-shell surface.
 pub struct OverlayGpu {
     swapchain_loader: khr::swapchain::Device,
     swapchain: vk::SwapchainKHR,
@@ -246,10 +545,30 @@ pub struct OverlayGpu {
     image_available: vk::Semaphore,
     render_finished: vk::Semaphore,
     in_flight: vk::Fence,
+    screen: ScreenFeed,
+    pending_copy: bool,
+}
+
+/// Host-visible staging buffer + sampled GPU image of the last screen capture.
+struct ScreenFeed {
+    image: vk::Image,
+    image_mem: vk::DeviceMemory,
+    view: vk::ImageView,
+    sampler: vk::Sampler,
+    staging: vk::Buffer,
+    staging_mem: vk::DeviceMemory,
+    staging_ptr: *mut u8,
+    staging_size: vk::DeviceSize,
+    width: u32,
+    height: u32,
+    descriptor_set_layout: vk::DescriptorSetLayout,
+    descriptor_pool: vk::DescriptorPool,
+    descriptor_set: vk::DescriptorSet,
+    image_layout: vk::ImageLayout,
 }
 
 impl OverlayGpu {
-    pub fn new(vk: &VulkanContext, extent: vk::Extent2D) -> Result<Self, String> {
+    pub fn new(vk: &VulkanContext, extent: vk::Extent2D, capture: vk::Extent2D) -> Result<Self, String> {
         let surface = vk.surface.ok_or("VulkanContext has no Wayland VkSurface")?;
         let surface_loader = vk.surface_loader.as_ref().ok_or("no KHR_surface loader")?;
         let swapchain_loader = khr::swapchain::Device::new(&vk.instance, &vk.device);
@@ -260,7 +579,9 @@ impl OverlayGpu {
         let image_views = create_image_views(&vk.device, format, &images)?;
         let render_pass = create_render_pass(&vk.device, format)?;
         let framebuffers = create_framebuffers(&vk.device, render_pass, extent, &image_views)?;
-        let (pipeline_layout, pipeline) = create_quad_pipeline(&vk.device, render_pass)?;
+        let screen = ScreenFeed::new(vk, capture.width.max(1), capture.height.max(1))?;
+        let (pipeline_layout, pipeline) =
+            create_quad_pipeline(&vk.device, render_pass, screen.descriptor_set_layout)?;
 
         let pool_info = vk::CommandPoolCreateInfo::default()
             .queue_family_index(vk.graphics_queue_family)
@@ -298,6 +619,8 @@ impl OverlayGpu {
             image_available,
             render_finished,
             in_flight,
+            screen,
+            pending_copy: true,
         })
     }
 
@@ -321,7 +644,8 @@ impl OverlayGpu {
         self.image_views = create_image_views(&vk.device, format, &images)?;
         self.render_pass = create_render_pass(&vk.device, format)?;
         self.framebuffers = create_framebuffers(&vk.device, self.render_pass, extent, &self.image_views)?;
-        let (layout, pipeline) = create_quad_pipeline(&vk.device, self.render_pass)?;
+        let (layout, pipeline) =
+            create_quad_pipeline(&vk.device, self.render_pass, self.screen.descriptor_set_layout)?;
         unsafe {
             vk.device.destroy_pipeline(self.pipeline, None);
             vk.device.destroy_pipeline_layout(self.pipeline_layout, None);
@@ -329,6 +653,13 @@ impl OverlayGpu {
         self.pipeline_layout = layout;
         self.pipeline = pipeline;
         Ok(())
+    }
+
+    /// CPU-side RGBA8 (top-left) → staging buffer. Copied to the sampled
+    /// image at the start of the next `draw`.
+    pub fn upload_screen(&mut self, frame: &IngressFrame) {
+        self.screen.write_rgba(frame);
+        self.pending_copy = true;
     }
 
     pub fn draw(&mut self, vk: &VulkanContext) -> Result<(), String> {
@@ -358,6 +689,11 @@ impl OverlayGpu {
         unsafe { vk.device.begin_command_buffer(self.command_buffer, &begin) }
             .map_err(|e| format!("overlay begin cmd: {e:?}"))?;
 
+        if self.pending_copy {
+            self.screen.record_upload(&vk.device, self.command_buffer);
+            self.pending_copy = false;
+        }
+
         let clear = vk::ClearValue { color: vk::ClearColorValue { float32: [0.0, 0.0, 0.0, 0.0] } };
         let render_area = vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent: self.extent };
         let rp_begin = vk::RenderPassBeginInfo::default()
@@ -376,6 +712,14 @@ impl OverlayGpu {
                 vk::PipelineBindPoint::GRAPHICS,
                 self.pipeline,
             );
+            vk.device.cmd_bind_descriptor_sets(
+                self.command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.pipeline_layout,
+                0,
+                &[self.screen.descriptor_set],
+                &[],
+            );
             let viewport = vk::Viewport {
                 x: 0.0,
                 y: 0.0,
@@ -386,7 +730,7 @@ impl OverlayGpu {
             };
             vk.device.cmd_set_viewport(self.command_buffer, 0, &[viewport]);
             vk.device.cmd_set_scissor(self.command_buffer, 0, &[render_area]);
-            let pc = [self.extent.width as f32, self.extent.height as f32, QUAD_PX, QUAD_PX];
+            let pc = [self.extent.width as f32, self.extent.height as f32, 0.0, 0.0];
             vk.device.cmd_push_constants(
                 self.command_buffer,
                 self.pipeline_layout,
@@ -401,7 +745,7 @@ impl OverlayGpu {
             .map_err(|e| format!("overlay end cmd: {e:?}"))?;
 
         let wait = [self.image_available];
-        let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
+        let wait_stages = [vk::PipelineStageFlags::TRANSFER | vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
         let cmds = [self.command_buffer];
         let signal = [self.render_finished];
         let submit = vk::SubmitInfo::default()
@@ -442,6 +786,7 @@ impl OverlayGpu {
             self.destroy_swapchain_resources(&vk.device);
             vk.device.destroy_pipeline(self.pipeline, None);
             vk.device.destroy_pipeline_layout(self.pipeline_layout, None);
+            self.screen.destroy(&vk.device);
             vk.device.destroy_command_pool(self.command_pool, None);
             vk.device.destroy_semaphore(self.image_available, None);
             vk.device.destroy_semaphore(self.render_finished, None);
@@ -449,6 +794,242 @@ impl OverlayGpu {
             self.swapchain_loader.destroy_swapchain(self.swapchain, None);
         }
     }
+}
+
+impl ScreenFeed {
+    fn new(vk: &VulkanContext, width: u32, height: u32) -> Result<Self, String> {
+        let device = &vk.device;
+        let width = width.max(1);
+        let height = height.max(1);
+        let image_info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(vk::Format::R8G8B8A8_UNORM)
+            .extent(vk::Extent3D { width, height, depth: 1 })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+        let image = unsafe { device.create_image(&image_info, None) }
+            .map_err(|e| format!("vkCreateImage (screen) failed: {e:?}"))?;
+        let img_req = unsafe { device.get_image_memory_requirements(image) };
+        let img_mem = alloc_memory(vk, img_req, vk::MemoryPropertyFlags::DEVICE_LOCAL)?;
+        unsafe { device.bind_image_memory(image, img_mem, 0) }
+            .map_err(|e| format!("vkBindImageMemory (screen) failed: {e:?}"))?;
+
+        let view_info = vk::ImageViewCreateInfo::default()
+            .image(image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(vk::Format::R8G8B8A8_UNORM)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            });
+        let view = unsafe { device.create_image_view(&view_info, None) }
+            .map_err(|e| format!("vkCreateImageView (screen) failed: {e:?}"))?;
+
+        let sampler_info = vk::SamplerCreateInfo::default()
+            .mag_filter(vk::Filter::LINEAR)
+            .min_filter(vk::Filter::LINEAR)
+            .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE);
+        let sampler = unsafe { device.create_sampler(&sampler_info, None) }
+            .map_err(|e| format!("vkCreateSampler failed: {e:?}"))?;
+
+        let staging_size = (width as vk::DeviceSize) * (height as vk::DeviceSize) * 4;
+        let buf_info = vk::BufferCreateInfo::default()
+            .size(staging_size)
+            .usage(vk::BufferUsageFlags::TRANSFER_SRC)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        let staging = unsafe { device.create_buffer(&buf_info, None) }
+            .map_err(|e| format!("vkCreateBuffer (screen staging) failed: {e:?}"))?;
+        let buf_req = unsafe { device.get_buffer_memory_requirements(staging) };
+        let staging_mem = alloc_memory(
+            vk,
+            buf_req,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        )?;
+        unsafe { device.bind_buffer_memory(staging, staging_mem, 0) }
+            .map_err(|e| format!("vkBindBufferMemory (screen staging) failed: {e:?}"))?;
+        let staging_ptr = unsafe {
+            device.map_memory(staging_mem, 0, staging_size, vk::MemoryMapFlags::empty())
+        }
+        .map_err(|e| format!("vkMapMemory (screen staging) failed: {e:?}"))? as *mut u8;
+
+        let binding = vk::DescriptorSetLayoutBinding::default()
+            .binding(0)
+            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::FRAGMENT);
+        let dsl_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(std::slice::from_ref(&binding));
+        let descriptor_set_layout = unsafe { device.create_descriptor_set_layout(&dsl_info, None) }
+            .map_err(|e| format!("vkCreateDescriptorSetLayout (screen) failed: {e:?}"))?;
+        let pool_size = vk::DescriptorPoolSize::default()
+            .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+            .descriptor_count(1);
+        let pool_info = vk::DescriptorPoolCreateInfo::default()
+            .max_sets(1)
+            .pool_sizes(std::slice::from_ref(&pool_size));
+        let descriptor_pool = unsafe { device.create_descriptor_pool(&pool_info, None) }
+            .map_err(|e| format!("vkCreateDescriptorPool (screen) failed: {e:?}"))?;
+        let alloc = vk::DescriptorSetAllocateInfo::default()
+            .descriptor_pool(descriptor_pool)
+            .set_layouts(std::slice::from_ref(&descriptor_set_layout));
+        let descriptor_set = unsafe { device.allocate_descriptor_sets(&alloc) }
+            .map_err(|e| format!("vkAllocateDescriptorSets (screen) failed: {e:?}"))?[0];
+
+        let image_info = vk::DescriptorImageInfo::default()
+            .sampler(sampler)
+            .image_view(view)
+            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+        let write = vk::WriteDescriptorSet::default()
+            .dst_set(descriptor_set)
+            .dst_binding(0)
+            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+            .image_info(std::slice::from_ref(&image_info));
+        unsafe { device.update_descriptor_sets(&[write], &[]) };
+
+        // Seed staging with opaque dark so the first draw isn't garbage.
+        unsafe { std::ptr::write_bytes(staging_ptr, 20, staging_size as usize) };
+
+        Ok(Self {
+            image,
+            image_mem: img_mem,
+            view,
+            sampler,
+            staging,
+            staging_mem,
+            staging_ptr,
+            staging_size,
+            width,
+            height,
+            descriptor_set_layout,
+            descriptor_pool,
+            descriptor_set,
+            image_layout: vk::ImageLayout::UNDEFINED,
+        })
+    }
+
+    fn write_rgba(&mut self, frame: &IngressFrame) {
+        let w = self.width.min(frame.width) as usize;
+        let h = self.height.min(frame.height) as usize;
+        let src_stride = frame.width as usize * 4;
+        let dst_stride = self.width as usize * 4;
+        unsafe {
+            for y in 0..h {
+                let src = frame.rgba.as_ptr().add(y * src_stride);
+                let dst = self.staging_ptr.add(y * dst_stride);
+                std::ptr::copy_nonoverlapping(src, dst, w * 4);
+            }
+        }
+    }
+
+    fn record_upload(&mut self, device: &ash::Device, cmd: vk::CommandBuffer) {
+        let sub = vk::ImageSubresourceRange {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            base_mip_level: 0,
+            level_count: 1,
+            base_array_layer: 0,
+            layer_count: 1,
+        };
+        let to_dst = vk::ImageMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::empty())
+            .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .old_layout(self.image_layout)
+            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .image(self.image)
+            .subresource_range(sub);
+        unsafe {
+            device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[to_dst],
+            );
+        }
+        let region = vk::BufferImageCopy::default()
+            .image_subresource(vk::ImageSubresourceLayers {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                mip_level: 0,
+                base_array_layer: 0,
+                layer_count: 1,
+            })
+            .image_extent(vk::Extent3D { width: self.width, height: self.height, depth: 1 });
+        unsafe {
+            device.cmd_copy_buffer_to_image(
+                cmd,
+                self.staging,
+                self.image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &[region],
+            );
+        }
+        let to_sample = vk::ImageMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .dst_access_mask(vk::AccessFlags::SHADER_READ)
+            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .image(self.image)
+            .subresource_range(sub);
+        unsafe {
+            device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[to_sample],
+            );
+        }
+        self.image_layout = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
+    }
+
+    fn destroy(&mut self, device: &ash::Device) {
+        unsafe {
+            device.destroy_descriptor_pool(self.descriptor_pool, None);
+            device.destroy_descriptor_set_layout(self.descriptor_set_layout, None);
+            device.destroy_sampler(self.sampler, None);
+            device.destroy_image_view(self.view, None);
+            device.destroy_image(self.image, None);
+            device.free_memory(self.image_mem, None);
+            device.unmap_memory(self.staging_mem);
+            device.destroy_buffer(self.staging, None);
+            device.free_memory(self.staging_mem, None);
+        }
+    }
+}
+
+fn alloc_memory(
+    vk: &VulkanContext,
+    req: vk::MemoryRequirements,
+    flags: vk::MemoryPropertyFlags,
+) -> Result<vk::DeviceMemory, String> {
+    let props = unsafe { vk.instance.get_physical_device_memory_properties(vk.physical_device) };
+    let mut type_index = None;
+    for i in 0..props.memory_type_count {
+        if req.memory_type_bits & (1 << i) != 0
+            && props.memory_types[i as usize].property_flags.contains(flags)
+        {
+            type_index = Some(i);
+            break;
+        }
+    }
+    let memory_type_index = type_index.ok_or("no matching memory type for screen feed")?;
+    let alloc = vk::MemoryAllocateInfo::default()
+        .allocation_size(req.size)
+        .memory_type_index(memory_type_index);
+    unsafe { vk.device.allocate_memory(&alloc, None) }
+        .map_err(|e| format!("vkAllocateMemory (screen) failed: {e:?}"))
 }
 
 fn create_swapchain(
@@ -600,6 +1181,7 @@ fn create_framebuffers(
 fn create_quad_pipeline(
     device: &ash::Device,
     render_pass: vk::RenderPass,
+    descriptor_set_layout: vk::DescriptorSetLayout,
 ) -> Result<(vk::PipelineLayout, vk::Pipeline), String> {
     let vert = create_shader_module(device, OVERLAY_VERT_SPV)?;
     let frag = create_shader_module(device, OVERLAY_FRAG_SPV)?;
@@ -644,7 +1226,10 @@ fn create_quad_pipeline(
         .stage_flags(vk::ShaderStageFlags::FRAGMENT)
         .offset(0)
         .size(16);
-    let layout_info = vk::PipelineLayoutCreateInfo::default().push_constant_ranges(std::slice::from_ref(&push));
+    let set_layouts = [descriptor_set_layout];
+    let layout_info = vk::PipelineLayoutCreateInfo::default()
+        .set_layouts(&set_layouts)
+        .push_constant_ranges(std::slice::from_ref(&push));
     let pipeline_layout = unsafe { device.create_pipeline_layout(&layout_info, None) }
         .map_err(|e| format!("vkCreatePipelineLayout (overlay) failed: {e:?}"))?;
 
@@ -678,6 +1263,71 @@ fn create_shader_module(device: &ash::Device, bytes: &[u8]) -> Result<vk::Shader
         .map_err(|e| format!("vkCreateShaderModule (overlay) failed: {e:?}"))
 }
 
+fn center_margins(output_w: u32, output_h: u32) -> (i32, i32) {
+    let w = output_w.max(BUBBLE_PX);
+    let h = output_h.max(BUBBLE_PX);
+    (((w - BUBBLE_PX) / 2) as i32, ((h - BUBBLE_PX) / 2) as i32)
+}
+
+fn disc_origin(output_w: u32, output_h: u32) -> (i32, i32) {
+    center_margins(output_w, output_h)
+}
+
+fn spawn_hypr_lock_watch(locked: Arc<AtomicBool>, screensaver: Arc<AtomicBool>) {
+    std::thread::Builder::new()
+        .name("presence-hypr-lock".into())
+        .spawn(move || {
+            let Ok(sig) = std::env::var("HYPRLAND_INSTANCE_SIGNATURE") else { return };
+            let runtime = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
+            let path = Path::new(&runtime).join("hypr").join(sig).join(".socket2.sock");
+            let Ok(stream) = std::os::unix::net::UnixStream::connect(path) else { return };
+            let reader = io::BufReader::new(stream);
+            for line in io::BufRead::lines(reader) {
+                let Ok(line) = line else { break };
+                if line.starts_with("lock") {
+                    locked.store(true, Ordering::Relaxed);
+                } else if line.starts_with("unlock") {
+                    locked.store(false, Ordering::Relaxed);
+                } else if line.contains("org.omarchy.screensaver") {
+                    if line.starts_with("openwindow") {
+                        screensaver.store(true, Ordering::Relaxed);
+                    } else if line.starts_with("closewindow") {
+                        screensaver.store(false, Ordering::Relaxed);
+                    }
+                }
+            }
+        })
+        .ok();
+}
+
+fn spawn_sleep_watch(sleeping: Arc<AtomicBool>) {
+    std::thread::Builder::new()
+        .name("presence-sleep".into())
+        .spawn(move || {
+            let child = std::process::Command::new("dbus-monitor")
+                .args([
+                    "--system",
+                    "type='signal',interface='org.freedesktop.login1.Manager',member='PrepareForSleep'",
+                ])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+            let Ok(mut child) = child else { return };
+            let Some(stdout) = child.stdout.take() else { return };
+            let reader = io::BufReader::new(stdout);
+            for line in io::BufRead::lines(reader) {
+                let Ok(line) = line else { break };
+                let l = line.to_ascii_lowercase();
+                if l.contains("boolean true") {
+                    sleeping.store(true, Ordering::Relaxed);
+                } else if l.contains("boolean false") {
+                    sleeping.store(false, Ordering::Relaxed);
+                }
+            }
+        })
+        .ok();
+}
+
 /// Combined Wayland + Unix-socket loop. One thread: pipeline is `!Send`.
 pub fn run(
     overlay: &mut Overlay,
@@ -689,8 +1339,41 @@ pub fn run(
     let mut server = SocketServer::bind(socket_path).map_err(|e| format!("socket bind: {e}"))?;
     println!("[socket] listening on {}", socket_path.display());
 
+    let locked = Arc::new(AtomicBool::new(false));
+    let screensaver = Arc::new(AtomicBool::new(false));
+    let sleeping = Arc::new(AtomicBool::new(false));
+    spawn_hypr_lock_watch(locked.clone(), screensaver.clone());
+    spawn_sleep_watch(sleeping.clone());
+
+    let mut last_capture = Instant::now() - CAPTURE_INTERVAL;
+    let mut parked = false;
+    let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel::<IngressFrame>(1);
+    std::thread::Builder::new()
+        .name("presence-screencopy".into())
+        .spawn(move || {
+            let mut src = match WlrScreenSource::connect() {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("[overlay] screencopy client: {e}");
+                    return;
+                }
+            };
+            loop {
+                match src.next_frame() {
+                    Ok(Some(frame)) => {
+                        let _ = frame_tx.send(frame);
+                    }
+                    Ok(None) => {}
+                    Err(e) => eprintln!("[overlay] screencopy: {e}"),
+                }
+                std::thread::sleep(CAPTURE_INTERVAL);
+            }
+        })
+        .map_err(|e| format!("screencopy thread: {e}"))?;
+    println!(
+        "[overlay] disc {BUBBLE_PX}px movable, full-output ingress ≤10fps on a second Wayland client"
+    );
     gpu.draw(vk)?;
-    println!("[overlay] drew {QUAD_PX}x{QUAD_PX} pass-through quad");
 
     let wl_fd = overlay.event_queue.as_fd().as_raw_fd();
     loop {
@@ -704,10 +1387,42 @@ pub fn run(
             if extent.width != gpu.extent.width || extent.height != gpu.extent.height {
                 gpu.recreate(vk, extent)?;
             }
-            gpu.draw(vk)?;
         }
 
         server.pump(vk, pipeline).map_err(|e| format!("socket pump: {e}"))?;
+
+        let hide = overlay.should_hide(
+            locked.load(Ordering::Relaxed) || screensaver.load(Ordering::Relaxed),
+            sleeping.load(Ordering::Relaxed),
+        );
+        if hide {
+            if !parked {
+                overlay.park_offscreen();
+                parked = true;
+                println!("[overlay] hidden (idle/lock/sleep)");
+            }
+        } else {
+            if parked {
+                overlay.unpark_at_bubble();
+                parked = false;
+            }
+            let mut got = false;
+            while let Ok(frame) = frame_rx.try_recv() {
+                static ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                if !ONCE.swap(true, Ordering::Relaxed) {
+                    println!(
+                        "[overlay] capture ok {}x{} ({} bytes)",
+                        frame.width, frame.height, frame.rgba.len()
+                    );
+                }
+                gpu.upload_screen(&frame);
+                got = true;
+            }
+            if got || last_capture.elapsed() >= CAPTURE_INTERVAL {
+                gpu.draw(vk)?;
+                last_capture = Instant::now();
+            }
+        }
 
         let mut fds = vec![
             libc::pollfd { fd: wl_fd, events: libc::POLLIN, revents: 0 },
@@ -719,7 +1434,7 @@ pub fn run(
 
         overlay.event_queue.flush().map_err(|e| format!("wayland flush: {e}"))?;
         let read_guard = overlay.event_queue.prepare_read();
-        let n = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, 250) };
+        let n = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, 100) };
         if n < 0 {
             let err = io::Error::last_os_error();
             if err.kind() == io::ErrorKind::Interrupted {

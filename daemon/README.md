@@ -16,10 +16,12 @@ for how the two talk to each other.
   creates a process-lifetime pipeline, smokes one splat, then keeps the
   buffer for Control ingest (`addArtifact` uploads `.splat`/`.ply` clouds).
   `Drop` tears GPU objects down.
-- `src/overlay.rs` — `wlr-layer-shell` overlay on the focused output
-  (`exclusive_zone = -1`, empty input region so clicks fall through). Draws a
-  200×200 premultiplied cyan quad in the center as the first visible pixels.
-  Hyperbubble shader is next.
+- `src/overlay.rs` — disc-sized `wlr-layer-shell` (220×220, not fullscreen),
+  empty input region, `exclusive_zone = -1`. Looking-glass samples a **region**
+  capture of the pixels under the disc (overlay parked off-screen for the
+  copy). One reused shm, ≤10 fps. Hidden on idle (120s), Hyprland lock, and
+  logind `PrepareForSleep`. Do not leave an older fullscreen-capture build
+  running; that OOMed Hyprland.
 - `src/protocol.rs` / `src/socket.rs` — JSONL over
   `$XDG_RUNTIME_DIR/pachakutech/presence.sock`. One connection at a time.
 - `src/registry.rs` + `src/actors/` — Control (ingest `.splat`/`.ply` into

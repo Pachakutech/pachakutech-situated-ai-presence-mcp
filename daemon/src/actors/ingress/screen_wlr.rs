@@ -19,18 +19,19 @@
 use super::{FrameSource, IngressFrame};
 use std::os::fd::AsFd;
 use wayland_client::protocol::{wl_buffer, wl_output, wl_registry, wl_shm, wl_shm_pool};
-use wayland_client::{delegate_noop, Connection, Dispatch, EventQueue, QueueHandle};
+use wayland_client::{delegate_noop, Connection, Dispatch, EventQueue, QueueHandle, WEnum};
 use wayland_protocols_wlr::screencopy::v1::client::{
     zwlr_screencopy_frame_v1, zwlr_screencopy_manager_v1,
 };
 
 /// What the compositor told us via the frame's `buffer` event: the exact
 /// shm format/geometry it wants us to allocate and copy into.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 struct BufferSpec {
     width: u32,
     height: u32,
     stride: u32,
+    format: wl_shm::Format,
 }
 
 #[derive(Default)]
@@ -39,6 +40,8 @@ struct CaptureState {
     shm: Option<wl_shm::WlShm>,
     screencopy_manager: Option<zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1>,
     buffer_spec: Option<BufferSpec>,
+    buffer_done: bool,
+    y_invert: bool,
     ready: bool,
     failed: bool,
 }
@@ -87,8 +90,20 @@ impl Dispatch<zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1, ()> for CaptureSt
         _qh: &QueueHandle<Self>,
     ) {
         match event {
-            zwlr_screencopy_frame_v1::Event::Buffer { format: _, width, height, stride } => {
-                state.buffer_spec = Some(BufferSpec { width, height, stride });
+            zwlr_screencopy_frame_v1::Event::Buffer { format, width, height, stride } => {
+                let format = match format {
+                    WEnum::Value(f) => f,
+                    WEnum::Unknown(_) => wl_shm::Format::Argb8888,
+                };
+                state.buffer_spec = Some(BufferSpec { width, height, stride, format });
+            }
+            zwlr_screencopy_frame_v1::Event::Flags { flags } => {
+                if let WEnum::Value(f) = flags {
+                    state.y_invert = f.contains(zwlr_screencopy_frame_v1::Flags::YInvert);
+                }
+            }
+            zwlr_screencopy_frame_v1::Event::BufferDone => {
+                state.buffer_done = true;
             }
             zwlr_screencopy_frame_v1::Event::Ready { .. } => {
                 state.ready = true;
@@ -163,16 +178,29 @@ impl FrameSource for WlrScreenSource {
         let manager = self.state.screencopy_manager.as_ref().unwrap().clone();
 
         self.state.buffer_spec = None;
+        self.state.buffer_done = false;
+        self.state.y_invert = false;
         self.state.ready = false;
         self.state.failed = false;
 
         let frame = manager.capture_output(0, &output, &qh, ());
 
-        // First roundtrip: get the `buffer` event telling us the format
-        // the compositor wants written into.
-        self.event_queue
-            .roundtrip(&mut self.state)
-            .map_err(|e| format!("roundtrip while awaiting buffer spec failed: {e}"))?;
+        // Wait until the compositor has advertised a shm buffer (and, on
+        // protocol v3+, `buffer_done`). A single roundtrip is not always
+        // enough on Hyprland.
+        for i in 0..32 {
+            self.event_queue
+                .roundtrip(&mut self.state)
+                .map_err(|e| format!("roundtrip while awaiting buffer spec failed: {e}"))?;
+            if self.state.failed {
+                return Ok(None);
+            }
+            // v3+ sends `buffer_done` after the last `buffer`/`linux_dmabuf`.
+            // Older compositors never send it — fall through after a few trips.
+            if self.state.buffer_done || (self.state.buffer_spec.is_some() && i >= 8) {
+                break;
+            }
+        }
 
         let spec = match self.state.buffer_spec {
             Some(s) => s,
@@ -187,38 +215,48 @@ impl FrameSource for WlrScreenSource {
             spec.width as i32,
             spec.height as i32,
             spec.stride as i32,
-            wl_shm::Format::Argb8888,
+            spec.format,
             &qh,
             (),
         );
 
         frame.copy(&buffer);
 
-        // Second roundtrip: wait for `ready` (or `failed`).
-        self.event_queue
-            .roundtrip(&mut self.state)
-            .map_err(|e| format!("roundtrip while awaiting ready/failed failed: {e}"))?;
+        for _ in 0..32 {
+            self.event_queue
+                .roundtrip(&mut self.state)
+                .map_err(|e| format!("roundtrip while awaiting ready/failed failed: {e}"))?;
+            if self.state.ready || self.state.failed {
+                break;
+            }
+        }
 
         if self.state.failed {
             return Ok(None);
         }
         if !self.state.ready {
-            return Err("frame neither ready nor failed after roundtrip".to_string());
+            return Err("frame neither ready nor failed after copy".to_string());
         }
 
         // Read the shm-backed pixels back out. `Argb8888` on the wire is
         // little-endian, so byte order in memory is B, G, R, A.
         let mmap = map_shm_readonly(&shm_fd, size)?;
         let mut rgba = vec![0u8; (spec.width * spec.height * 4) as usize];
+        let y_invert = self.state.y_invert;
         for y in 0..spec.height as usize {
-            let row_start = y * spec.stride as usize;
+            let src_y = if y_invert { spec.height as usize - 1 - y } else { y };
+            let row_start = src_y * spec.stride as usize;
             for x in 0..spec.width as usize {
                 let src = row_start + x * 4;
                 let dst = (y * spec.width as usize + x) * 4;
-                rgba[dst] = mmap[src + 2]; // R
-                rgba[dst + 1] = mmap[src + 1]; // G
-                rgba[dst + 2] = mmap[src]; // B
-                rgba[dst + 3] = mmap[src + 3]; // A
+                // Wayland shm 8888 is little-endian; byte 0 is B.
+                rgba[dst] = mmap[src + 2];
+                rgba[dst + 1] = mmap[src + 1];
+                rgba[dst + 2] = mmap[src];
+                rgba[dst + 3] = match spec.format {
+                    wl_shm::Format::Argb8888 => mmap[src + 3],
+                    _ => 255,
+                };
             }
         }
 
@@ -229,7 +267,7 @@ impl FrameSource for WlrScreenSource {
 /// Wayland shm buffers are backed by a plain memory-mapped file descriptor
 /// the client owns — `memfd_create` is the standard way to get one
 /// without touching the real filesystem.
-fn create_anonymous_shm(size: usize) -> Result<std::os::fd::OwnedFd, String> {
+pub(crate) fn create_anonymous_shm(size: usize) -> Result<std::os::fd::OwnedFd, String> {
     use std::os::fd::FromRawFd;
     let name = c"pachakutech-presence-screencopy";
     let fd = unsafe { libc::memfd_create(name.as_ptr(), 0) };
@@ -242,7 +280,7 @@ fn create_anonymous_shm(size: usize) -> Result<std::os::fd::OwnedFd, String> {
     Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) })
 }
 
-fn map_shm_readonly(fd: &std::os::fd::OwnedFd, size: usize) -> Result<memmap_shim::Mmap, String> {
+pub(crate) fn map_shm_readonly(fd: &std::os::fd::OwnedFd, size: usize) -> Result<memmap_shim::Mmap, String> {
     memmap_shim::Mmap::map(fd, size)
 }
 

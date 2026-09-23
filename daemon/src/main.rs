@@ -55,7 +55,7 @@ fn main() {
         }
     };
 
-    let mut gpu = match OverlayGpu::new(&vk, overlay.extent()) {
+    let mut gpu = match OverlayGpu::new(&vk, overlay.extent(), overlay.capture_extent()) {
         Ok(g) => g,
         Err(e) => {
             eprintln!("[overlay] gpu: {e}");
