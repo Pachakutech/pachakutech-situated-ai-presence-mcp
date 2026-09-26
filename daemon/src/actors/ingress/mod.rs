@@ -4,23 +4,20 @@
 //! it enters as a camera-facing billboard, using the exact code path
 //! `splat_projection.comp`'s `isTexturedBillboard` branch already has.
 //!
-//! What's real vs. not, honestly: `frame_to_billboard` and `IngressActor`
-//! below are pure data transforms with no OS dependency, and are unit
-//! tested in this sandbox. The two capture backends (`screen_wlr`,
-//! `webcam_v4l2`) are real, compiling code — but this sandbox has no
-//! Wayland compositor and no `/dev/video0`, so they've only been verified
-//! to *compile*, never to actually open a display connection or a camera
-//! device. That has to happen on your Omarchy box, not here. Same
-//! "dlopen at runtime, fail clearly if missing" posture as `ash`'s Vulkan
-//! loading — see Cargo.toml.
+//! Two capture backends live here:
+//! - `screen_wlr` — SHM-based wlr-screencopy (CPU readback path, fallback)
+//! - `screen_dmabuf` — zero-copy wlr-export-dmabuf → Vulkan import
+//!   (the preferred path when the compositor and GPU driver both support it)
 
+pub mod screen_dmabuf;
 pub mod screen_wlr;
 pub mod webcam_v4l2;
 
 use super::gpu_layout::{AnimatedSplatGpu, FLAG_ACTIVE, FLAG_TEXTURED_BILLBOARD};
 use std::collections::HashMap;
+use std::os::fd::OwnedFd;
 
-/// One decoded frame from any capture source: RGBA8, top-left origin.
+/// One decoded frame from any SHM capture source: RGBA8, top-left origin.
 /// Getting bytes into an actual Vulkan-visible texture (the atlas
 /// `texture_layer` indexes into) is a separate, not-yet-built step; this
 /// is the CPU-side shape that step would consume.
@@ -29,6 +26,56 @@ pub struct IngressFrame {
     pub height: u32,
     pub rgba: Vec<u8>,
 }
+
+/// One plane of an exported DMA-BUF. The `fd` is owned by us until it is
+/// handed to Vulkan via `VkImportMemoryFdInfoKHR` — at which point
+/// ownership transfers to the Vulkan driver and must NOT be closed.
+pub struct DmabufPlane {
+    pub fd: OwnedFd,
+    pub stride: u32,
+    pub offset: u32,
+    pub plane_index: u32,
+}
+
+/// A captured frame exported by the compositor as a DMA-BUF. This is the
+/// zero-copy equivalent of `IngressFrame`: instead of CPU-side RGBA bytes,
+/// it carries the dmabuf file descriptor(s) + format/modifier/plane metadata
+/// needed to import the buffer directly into a Vulkan `VkImage`.
+///
+/// **Initial constraints** (see the correct_screen_ingress PDF):
+/// - Accept only one exported object / one fd (single-plane).
+/// - Accept only single-plane XRGB/ARGB/XBGR/ABGR formats.
+/// - Accept only DRM modifiers the Vulkan physical device reports as
+///   importable for that format.
+/// Multi-plane YUV / multi-object support should be added deliberately.
+pub struct DmabufFrame {
+    pub width: u32,
+    pub height: u32,
+    pub drm_format: u32,
+    pub modifier: u64,
+    pub planes: Vec<DmabufPlane>,
+}
+
+impl DmabufFrame {
+    /// `true` when the source DRM format has no meaningful alpha channel
+    /// (XRGB/XBGR). The shader should force alpha to 1.0 for these rather
+    /// than treating undefined alpha as image data.
+    pub fn opaque_alpha(&self) -> bool {
+        matches!(
+            self.drm_format,
+            DRM_FORMAT_XRGB8888 | DRM_FORMAT_XBGR8888
+        )
+    }
+}
+
+/// DRM fourcc codes — little-endian byte order, matching the kernel's
+/// `fourcc_code('X','R','2','4')` macro. Defined here rather than pulling
+/// in the `drm_fourcc` crate for a handful of constants.
+pub const DRM_FORMAT_XRGB8888: u32 = 0x34325258; // 'X','R','2','4'
+pub const DRM_FORMAT_ARGB8888: u32 = 0x34325241; // 'A','R','2','4'
+pub const DRM_FORMAT_XBGR8888: u32 = 0x34324258; // 'X','B','2','4'
+pub const DRM_FORMAT_ABGR8888: u32 = 0x34324241; // 'A','B','2','4'
+pub const DRM_FORMAT_MOD_INVALID: u64 = 0x00FFFFFFFFFFFFFF;
 
 /// A capture backend: `next_frame` returns the latest frame if one is
 /// ready, or `None` without blocking if not (an ingress actor should keep
@@ -78,7 +125,7 @@ pub fn frame_to_billboard(
 }
 
 /// Holds one billboard slot per named ingress source ("screen", "webcam",
-/// …) and keeps it refreshed every tick a new frame arrives — bumping
+/// "…") and keeps it refreshed every tick a new frame arrives — bumping
 /// `last_visible_frame` every call is what keeps `splat_eviction.comp`
 /// from reclaiming a still-live feed (see its `absolute_max_age` check).
 /// This is the CPU-side mirror of what would actually be written into the

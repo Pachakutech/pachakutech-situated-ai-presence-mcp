@@ -17,11 +17,15 @@ for how the two talk to each other.
   buffer for Control ingest (`addArtifact` uploads `.splat`/`.ply` clouds).
   `Drop` tears GPU objects down.
 - `src/overlay.rs` — disc-sized `wlr-layer-shell` (220×220, not fullscreen),
-  empty input region, `exclusive_zone = -1`. Looking-glass samples a **region**
-  capture of the pixels under the disc (overlay parked off-screen for the
-  copy). One reused shm, ≤10 fps. Hidden on idle (120s), Hyprland lock, and
-  logind `PrepareForSleep`. Do not leave an older fullscreen-capture build
-  running; that OOMed Hyprland.
+  empty input region, `exclusive_zone = -1`. Looking-glass samples the full
+  output. When the Vulkan device supports zero-copy dmabuf import
+  (`VK_EXT_image_drm_format_modifier` + `VK_KHR_external_memory_fd` +
+  `VK_EXT_external_memory_dma_buf`), the compositor exports a DMA-BUF via
+  `zwlr_export_dmabuf_manager_v1` and Vulkan imports it directly — no CPU
+  pixel copy. Falls back to SHM screencopy (one reused memfd, ≤10 fps) when
+  dmabuf is unavailable. Hidden on idle (120s), Hyprland lock, and logind
+  `PrepareForSleep`. Do not leave an older fullscreen-capture build running;
+  that OOMed Hyprland.
 - `src/protocol.rs` / `src/socket.rs` — JSONL over
   `$XDG_RUNTIME_DIR/pachakutech/presence.sock`. One connection at a time.
 - `src/registry.rs` + `src/actors/` — Control (ingest `.splat`/`.ply` into
@@ -30,6 +34,8 @@ for how the two talk to each other.
 
 Last run on this Omarchy box (2026-09-22): Intel Iris Xe (TGL GT2), dma_buf
 import yes, smoke projected splat 0 to screen (640.0, 360.0), depth 2.00.
+With `VK_EXT_image_drm_format_modifier` enabled, the overlay now uses the
+zero-copy dmabuf path by default; SHM screencopy is the automatic fallback.
 
 ## Build and run
 
@@ -48,12 +54,14 @@ it listens on the socket until killed.
 
 1. **Hyperbubble** on the existing layer-shell surface (fisheye of
    screen/camera as the un-artifacted default). Then raster `ProjectedSplat`.
-3. **Tick ingress:** the V4L2 and `wlr-screencopy` (SHM) clients already
+2. **Tick ingress:** the V4L2 and `wlr-screencopy` (SHM) clients already
    compile; feed `IngressActor::update_slot` into the live buffer. dma_buf
-   import is probed and present here, but the working capture path is SHM.
-4. **Placeholder pose table** so `animatePresence` moves bone 0 without
+   import is probed and present here, and the zero-copy `wlr-export-dmabuf`
+   capture path is now wired into the overlay loop when the device supports
+   `VK_EXT_image_drm_format_modifier`. SHM remains the fallback.
+3. **Placeholder pose table** so `animatePresence` moves bone 0 without
    waiting on the research text-to-pose model.
-5. Concurrent socket clients, and move caps/ids into this process so two
+4. Concurrent socket clients, and move caps/ids into this process so two
    MCP sessions share one substrate.
 
 The MCP Binding already speaks this socket (`../src/daemonClient.ts`) and
