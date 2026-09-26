@@ -959,7 +959,7 @@ impl OverlayGpu {
             vk.device.destroy_pipeline_layout(self.pipeline_layout, None);
             self.screen.destroy(vk);
             if let Some(dsl) = self._legacy_dsl.take() {
-                unsafe { vk.device.destroy_descriptor_set_layout(dsl, None) };
+                vk.device.destroy_descriptor_set_layout(dsl, None);
             }
             vk.device.destroy_command_pool(self.command_pool, None);
             vk.device.destroy_semaphore(self.image_available, None);

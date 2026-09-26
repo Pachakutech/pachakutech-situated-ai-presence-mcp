@@ -15,7 +15,7 @@
 //! `ready` → return dmabuf fd for Vulkan import.
 
 use super::{DmabufFrame, DmabufPlane, DRM_FORMAT_MOD_INVALID};
-use std::os::fd::{AsFd, AsRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 use wayland_client::protocol::{wl_buffer, wl_output, wl_registry};
 use wayland_client::{delegate_noop, Connection, Dispatch, EventQueue, QueueHandle, WEnum};
 use wayland_protocols_wlr::screencopy::v1::client::{
@@ -77,15 +77,18 @@ struct GbmBoGuard<'a> {
 
 impl GbmCtx {
     fn open() -> Result<Self, String> {
-        let lib = libloading::Library::new("libgbm.so.1")
-            .or_else(|_| libloading::Library::new("libgbm.so"))
-            .map_err(|e| format!("failed to load libgbm: {e}"))?;
+        let lib = unsafe {
+            libloading::Library::new("libgbm.so.1")
+                .or_else(|_| libloading::Library::new("libgbm.so"))
+                .map_err(|e| format!("failed to load libgbm: {e}"))?
+        };
 
         let load_sym = |name: &[u8]| -> Result<unsafe extern "C" fn(), String> {
-            unsafe {
-                *lib.get(name)
+            let sym = unsafe {
+                lib.get::<unsafe extern "C" fn()>(name)
                     .map_err(|e| format!("symbol {}: {e}", std::str::from_utf8(name).unwrap_or("?")))?
-            }
+            };
+            Ok(*sym)
         };
 
         let create_device: gbm_ffi::CreateDeviceFn =
@@ -438,7 +441,7 @@ impl DmabufScreenSource {
             width as i32,
             height as i32,
             format,
-            0, // flags
+            zwp_linux_buffer_params_v1::Flags::empty(),
             &qh,
             (),
         );
