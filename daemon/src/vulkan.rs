@@ -7,6 +7,7 @@
 use ash::{vk, Entry};
 use std::ffi::CStr;
 use std::os::fd::{AsRawFd, RawFd};
+use std::ffi::c_void;
 
 use crate::actors::ingress::{DmabufFrame, DRM_FORMAT_MOD_INVALID};
 
@@ -285,13 +286,17 @@ impl VulkanContext {
         let plane_layouts = [subresource_layout];
 
         // --- Create the VkImage with DRM format modifier + external memory ---
+        // pNext chain: ImageCreateInfo → ExternalMemoryImageCreateInfo →
+        //               ImageDrmFormatModifierExplicitCreateInfoEXT
+        // `push_next` only exists on root structs; extension structs chain
+        // via their public `p_next` field.
         let modifier_info = vk::ImageDrmFormatModifierExplicitCreateInfoEXT::default()
             .drm_format_modifier(frame.modifier)
             .plane_layouts(&plane_layouts);
 
-        let external_image_info = vk::ExternalMemoryImageCreateInfo::default()
-            .handle_types(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT)
-            .push_next(&modifier_info);
+        let mut external_image_info = vk::ExternalMemoryImageCreateInfo::default()
+            .handle_types(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT);
+        external_image_info.p_next = &modifier_info as *const _ as *const c_void;
 
         let image_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
@@ -312,7 +317,7 @@ impl VulkanContext {
             )
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED)
-            .push_next(&external_image_info);
+            .push_next(&mut external_image_info);
 
         let image = unsafe { device.create_image(&image_info, None) }
             .map_err(|e| {
@@ -368,7 +373,7 @@ impl VulkanContext {
         }
 
         // --- Choose a memory type from the compatible set ---
-        let memory_type_index = choose_memory_type(self.physical_device, &self.instance, compatible_types, 0)
+        let memory_type_index = choose_memory_type(self.physical_device, &self.instance, compatible_types, vk::MemoryPropertyFlags::empty())
             .ok_or_else(|| {
                 eprintln!("[dmabuf_import] choose_memory_type found no match");
                 device.destroy_image(image, None);
@@ -376,18 +381,20 @@ impl VulkanContext {
             })?;
 
         // --- Allocate memory with fd import + dedicated allocation ---
+        // pNext chain: MemoryAllocateInfo → MemoryDedicatedAllocateInfo →
+        //               ImportMemoryFdInfoKHR
         let import_info = vk::ImportMemoryFdInfoKHR::default()
             .handle_type(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT)
             .fd(raw_fd);
 
-        let dedicated_info = vk::MemoryDedicatedAllocateInfo::default()
-            .image(image)
-            .push_next(&import_info);
+        let mut dedicated_info = vk::MemoryDedicatedAllocateInfo::default()
+            .image(image);
+        dedicated_info.p_next = &import_info as *const _ as *const c_void;
 
         let alloc_info = vk::MemoryAllocateInfo::default()
             .allocation_size(mem_req2.memory_requirements.size)
             .memory_type_index(memory_type_index)
-            .push_next(&dedicated_info);
+            .push_next(&mut dedicated_info);
 
         let memory = unsafe { device.allocate_memory(&alloc_info, None) }.map_err(|e| {
             eprintln!(

@@ -23,7 +23,7 @@
 //! rather than treated as an edge case.
 
 use super::{DmabufFrame, DmabufPlane};
-use std::os::fd::{FromRawFd, OwnedFd, RawFd};
+use std::os::fd::OwnedFd;
 use wayland_client::protocol::{wl_output, wl_registry};
 use wayland_client::{delegate_noop, Connection, Dispatch, EventQueue, QueueHandle, WEnum};
 use wayland_protocols_wlr::export_dmabuf::v1::client::{
@@ -127,12 +127,15 @@ impl Dispatch<zwlr_export_dmabuf_frame_v1::ZwlrExportDmabufFrameV1, ()> for Capt
                 state.drm_format = format;
                 state.modifier = (u64::from(mod_high) << 32) | u64::from(mod_low);
                 state.flags = match flags {
-                    WEnum::Value(f) => f.bits(),
+                    WEnum::Value(f) => f as u32,
                     WEnum::Unknown(v) => v,
                 };
                 state.expected_objects = num_objects;
                 state.planes.clear();
-                state.planes.resize(num_objects as usize, None);
+                state.planes.reserve(num_objects as usize);
+                for _ in 0..num_objects {
+                    state.planes.push(None);
+                }
                 state.frame_received = true;
             }
 
@@ -144,16 +147,16 @@ impl Dispatch<zwlr_export_dmabuf_frame_v1::ZwlrExportDmabufFrameV1, ()> for Capt
                 stride,
                 plane_index,
             } => {
-                let owned_fd = unsafe { OwnedFd::from_raw_fd(fd as RawFd) };
+                // `fd` is already an `OwnedFd` from the wayland-client crate.
                 if (index as usize) < state.planes.len() {
-                    state.planes[index as usize] = Some((owned_fd, stride, offset, plane_index));
+                    state.planes[index as usize] = Some((fd, stride, offset, plane_index));
                 } else {
-                    // Object index out of range — close the fd to avoid leak.
+                    // Object index out of range — fd will be closed on drop.
                     eprintln!(
                         "[screen_dmabuf] object index {} out of range (expected {})",
                         index, state.expected_objects
                     );
-                    drop(owned_fd);
+                    drop(fd);
                     state.failed = true;
                 }
             }
