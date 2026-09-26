@@ -29,6 +29,10 @@ wayland-backend = { version = "0.3", features = ["client_system", "dlopen"] }
 # `v4l2-sys` binding generator needs libclang (not installable in this
 # sandbox, and an unnecessary build dependency for something this small).
 libc = "0.2"
+# GBM is dlopen'd at runtime for dmabuf allocation in the screencopy-dmabuf
+# capture path — same pattern as ash/wayland-client. Avoids the `gbm` crate's
+# build-time dependency on libclang (via drm-ffi/bindgen).
+libloading = "0.8"
 
 [dev-dependencies]
 # Used only in tests, to assert real struct field offsets (`offset_of!`)

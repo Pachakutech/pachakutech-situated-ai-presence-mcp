@@ -1,16 +1,21 @@
 //! Present vs ingress are split:
 //! - **Present:** a *movable* disc-sized layer-shell surface (compositor
 //!   damage is the bubble, not the output). Empty input, exclusive_zone=-1.
-//! - **Ingress:** when the Vulkan device supports zero-copy dmabuf import
+//! - **Ingress:** when the Vulkan device supports dmabuf import
 //!   (`VK_EXT_image_drm_format_modifier` + `VK_KHR_external_memory_fd` +
-//!   `VK_EXT_external_memory_dma_buf`), the compositor exports a DMA-BUF
-//!   via `zwlr_export_dmabuf_manager_v1` and Vulkan imports it directly —
-//!   no CPU-visible `wl_shm` buffer, no host readback, no pixel copies.
+//!   `VK_EXT_external_memory_dma_buf`), the compositor copies frames into
+//!   a client-allocated dmabuf via `wlr-screencopy` (one GPU-to-GPU copy,
+//!   no CPU readback). Vulkan imports the dmabuf directly into a sampled
+//!   `VkImage`.
 //!   When dmabuf is unavailable, falls back to the SHM screencopy path
 //!   (a reused memfd of the full output at ≤10 fps, overlay parked
 //!   off-screen for the copy).
 //!   1080p RGBA is ~8MiB overwritten in place — the OOM was new shm +
 //!   60fps fullscreen *present*, not "the GPU cannot sample 1080p".
+//!
+//! **Always starts on SHM.** The GPU feed switches to dmabuf only when the
+//! capture thread confirms the first dmabuf frame — so a failed dmabuf path
+//! (no `zwp_linux_dmabuf_v1`, no GBM, etc.) never causes a black screen.
 
 use crate::actors::ingress::screen_dmabuf::DmabufScreenSource;
 use crate::actors::ingress::screen_wlr::WlrScreenSource;
@@ -562,18 +567,25 @@ pub struct OverlayGpu {
     render_finished: vk::Semaphore,
     in_flight: vk::Fence,
     screen: ScreenFeedKind,
+    /// When the feed switches from Shm to Dmabuf, the old Shm feed's
+    /// descriptor set layout is moved here to keep it alive — the pipeline
+    /// layout still references it, and Vulkan requires it to remain valid.
+    _legacy_dsl: Option<vk::DescriptorSetLayout>,
     pending_update: bool,
 }
 
 /// Which screen-feeding strategy is active. Both variants expose the same
-/// `descriptor_set` / `descriptor_set_layout` that `OverlayGpu` binds.
+/// `descriptor_set` that `OverlayGpu` binds. The descriptor set layouts
+/// are structurally identical (one COMBINED_IMAGE_SAMPLER binding), so
+/// descriptor sets from either layout are compatible with the pipeline.
 enum ScreenFeedKind {
     /// SHM fallback: host-visible staging buffer + sampled GPU image,
     /// re-uploaded from CPU RGBA each frame.
     Shm(ScreenFeed),
-    /// Zero-copy: compositor-exported dmabuf imported directly into a
-    /// sampled `VkImage` via `VkImportMemoryFdInfoKHR`. One imported
-    /// image per captured frame, retired after the GPU fence signals.
+    /// One-copy dmabuf: compositor copies the frame into a client-allocated
+    /// dmabuf, which is imported directly into a sampled `VkImage` via
+    /// `VkImportMemoryFdInfoKHR`. One imported image per captured frame,
+    /// retired after the GPU fence signals.
     Dmabuf(DmabufScreenFeed),
 }
 
@@ -619,7 +631,7 @@ struct ScreenFeed {
     image_layout: vk::ImageLayout,
 }
 
-/// Zero-copy dmabuf screen feed. Manages a rotating pair of imported
+/// One-copy dmabuf screen feed. Manages a rotating pair of imported
 /// `DmabufImportedImage`s: the *current* one (being sampled this frame)
 /// and the *previous* one (retired after the GPU fence signals).
 ///
@@ -654,14 +666,11 @@ impl OverlayGpu {
         let render_pass = create_render_pass(&vk.device, format)?;
         let framebuffers = create_framebuffers(&vk.device, render_pass, extent, &image_views)?;
 
-        // Choose the screen feed strategy based on device capability.
-        let screen = if vk.supports_zero_copy_capture() {
-            println!("[overlay] using zero-copy dmabuf screen feed (VK_EXT_image_drm_format_modifier enabled)");
-            ScreenFeedKind::Dmabuf(DmabufScreenFeed::new(vk)?)
-        } else {
-            println!("[overlay] using SHM screen feed (dmabuf import not supported on this device)");
-            ScreenFeedKind::Shm(ScreenFeed::new(vk, capture.width.max(1), capture.height.max(1))?)
-        };
+        // Always start on SHM. The feed switches to dmabuf only when the
+        // capture thread confirms the first dmabuf frame — so a failed
+        // dmabuf path never causes a black screen.
+        let screen = ScreenFeedKind::Shm(ScreenFeed::new(vk, capture.width.max(1), capture.height.max(1))?);
+        println!("[overlay] starting on SHM screen feed (will switch to dmabuf when capture confirms)");
 
         let (pipeline_layout, pipeline) =
             create_quad_pipeline(&vk.device, render_pass, screen.descriptor_set_layout())?;
@@ -703,6 +712,7 @@ impl OverlayGpu {
             render_finished,
             in_flight,
             screen,
+            _legacy_dsl: None,
             pending_update: true,
         })
     }
@@ -735,6 +745,53 @@ impl OverlayGpu {
         }
         self.pipeline_layout = layout;
         self.pipeline = pipeline;
+        Ok(())
+    }
+
+    /// Returns true if the GPU feed is currently using dmabuf import.
+    pub fn is_dmabuf(&self) -> bool {
+        matches!(self.screen, ScreenFeedKind::Dmabuf(_))
+    }
+
+    /// Switches the screen feed from SHM to dmabuf. Destroys the SHM
+    /// feed's resources (image, buffer, sampler, etc.) but preserves its
+    /// descriptor set layout — the pipeline layout references it, and the
+    /// new DmabufScreenFeed's descriptor sets are compatible (same binding
+    /// structure). Called on the main thread when the capture thread
+    /// confirms the first dmabuf frame.
+    pub fn switch_to_dmabuf(&mut self, vk: &VulkanContext) -> Result<(), String> {
+        if self.is_dmabuf() {
+            return Ok(());
+        }
+
+        // Take ownership of the SHM feed's descriptor set layout before
+        // destroying the rest of its resources.
+        let dsl = match &self.screen {
+            ScreenFeedKind::Shm(f) => f.descriptor_set_layout,
+            _ => unreachable!(),
+        };
+
+        // Destroy the SHM feed's resources — but NOT the dsl (we keep it).
+        if let ScreenFeedKind::Shm(ref mut f) = self.screen {
+            unsafe {
+                vk.device.destroy_descriptor_pool(f.descriptor_pool, None);
+                vk.device.destroy_sampler(f.sampler, None);
+                vk.device.destroy_image_view(f.view, None);
+                vk.device.destroy_image(f.image, None);
+                vk.device.free_memory(f.image_mem, None);
+                vk.device.unmap_memory(f.staging_mem);
+                vk.device.destroy_buffer(f.staging, None);
+                vk.device.free_memory(f.staging_mem, None);
+            }
+        }
+
+        // Keep the old dsl alive for the pipeline layout's lifetime.
+        self._legacy_dsl = Some(dsl);
+
+        // Create the dmabuf feed.
+        let feed = DmabufScreenFeed::new(vk)?;
+        self.screen = ScreenFeedKind::Dmabuf(feed);
+        println!("[overlay] switched screen feed from SHM to dmabuf import");
         Ok(())
     }
 
@@ -901,6 +958,9 @@ impl OverlayGpu {
             vk.device.destroy_pipeline(self.pipeline, None);
             vk.device.destroy_pipeline_layout(self.pipeline_layout, None);
             self.screen.destroy(vk);
+            if let Some(dsl) = self._legacy_dsl.take() {
+                unsafe { vk.device.destroy_descriptor_set_layout(dsl, None) };
+            }
             vk.device.destroy_command_pool(self.command_pool, None);
             vk.device.destroy_semaphore(self.image_available, None);
             vk.device.destroy_semaphore(self.render_finished, None);
@@ -1567,7 +1627,7 @@ fn spawn_sleep_watch(sleeping: Arc<AtomicBool>) {
 }
 
 /// Message type for the capture thread → main loop channel. Either a
-/// zero-copy dmabuf frame or a CPU-side SHM frame.
+/// one-copy dmabuf frame or a CPU-side SHM frame.
 enum CaptureMsg {
     Dmabuf(DmabufFrame),
     Shm(IngressFrame),
@@ -1575,14 +1635,18 @@ enum CaptureMsg {
 
 /// Combined Wayland + Unix-socket loop. One thread: pipeline is `!Send`.
 ///
-/// When the Vulkan device supports zero-copy dmabuf import, spawns a
-/// `DmabufScreenSource` thread that captures via
-/// `zwlr_export_dmabuf_manager_v1` and sends `DmabufFrame`s. Each frame
-/// is imported directly into a sampled `VkImage` — no CPU pixel copy.
+/// When the Vulkan device supports dmabuf import, spawns a
+/// `DmabufScreenSource` thread that captures via `wlr-screencopy` with
+/// dmabuf (client-allocated via GBM, compositor copies into it). Each frame
+/// is imported directly into a sampled `VkImage` — one GPU-to-GPU copy, no
+/// CPU pixel readback.
+///
+/// The GPU feed always starts on SHM and switches to dmabuf when the first
+/// dmabuf frame arrives — so a failed dmabuf path never causes a black
+/// screen.
 ///
 /// Falls back to the SHM screencopy path (`WlrScreenSource`) when dmabuf
-/// is unavailable, retaining the last-good GPU texture and rate-limiting
-/// retries if the dmabuf path fails at runtime.
+/// is unavailable.
 pub fn run(
     overlay: &mut Overlay,
     gpu: &mut OverlayGpu,
@@ -1607,7 +1671,7 @@ pub fn run(
     let use_dmabuf = vk.supports_zero_copy_capture();
 
     if use_dmabuf {
-        // --- Zero-copy dmabuf capture thread ---
+        // --- One-copy dmabuf capture thread (wlr-screencopy + dmabuf) ---
         std::thread::Builder::new()
             .name("presence-dmabuf-capture".into())
             .spawn(move || {
@@ -1644,7 +1708,6 @@ pub fn run(
                             let _ = frame_tx.send(CaptureMsg::Dmabuf(frame));
                         }
                         Ok(None) => {
-                            // Cancelled (temporary) — retry after backoff.
                             consecutive_failures = consecutive_failures.saturating_add(1);
                         }
                         Err(e) => {
@@ -1652,7 +1715,6 @@ pub fn run(
                             eprintln!("[overlay] dmabuf capture error: {e}");
                         }
                     }
-                    // Rate-limit after repeated failures to avoid log spam.
                     let delay = if consecutive_failures > 3 {
                         CAPTURE_INTERVAL * 3
                     } else {
@@ -1662,7 +1724,7 @@ pub fn run(
                 }
             })
             .map_err(|e| format!("dmabuf capture thread: {e}"))?;
-        println!("[overlay] zero-copy dmabuf capture enabled (wlr-export-dmabuf → Vulkan import)");
+        println!("[overlay] dmabuf capture enabled (wlr-screencopy + dmabuf → Vulkan import)");
     } else {
         // --- SHM screencopy fallback thread ---
         std::thread::Builder::new()
@@ -1742,6 +1804,12 @@ pub fn run(
                 }
                 match msg {
                     CaptureMsg::Dmabuf(frame) => {
+                        if !gpu.is_dmabuf() {
+                            if let Err(e) = gpu.switch_to_dmabuf(vk) {
+                                eprintln!("[overlay] switch_to_dmabuf failed: {e} — staying on SHM");
+                                continue;
+                            }
+                        }
                         gpu.import_screen(vk, &frame);
                     }
                     CaptureMsg::Shm(frame) => {

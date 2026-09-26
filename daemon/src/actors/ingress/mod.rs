@@ -6,8 +6,10 @@
 //!
 //! Two capture backends live here:
 //! - `screen_wlr` — SHM-based wlr-screencopy (CPU readback path, fallback)
-//! - `screen_dmabuf` — zero-copy wlr-export-dmabuf → Vulkan import
-//!   (the preferred path when the compositor and GPU driver both support it)
+//! - `screen_dmabuf` — one-copy wlr-screencopy with dmabuf → Vulkan import
+//!   (the preferred path when the compositor and GPU driver both support it).
+//!   Uses GBM-allocated dmabufs that the compositor copies frames into —
+//!   one GPU-to-GPU copy, no CPU readback.
 
 pub mod screen_dmabuf;
 pub mod screen_wlr;
@@ -27,9 +29,11 @@ pub struct IngressFrame {
     pub rgba: Vec<u8>,
 }
 
-/// One plane of an exported DMA-BUF. The `fd` is owned by us until it is
+/// One plane of a DMA-BUF. The `fd` is owned by us until it is
 /// handed to Vulkan via `VkImportMemoryFdInfoKHR` — at which point
 /// ownership transfers to the Vulkan driver and must NOT be closed.
+/// In the screencopy-dmabuf path, the fd comes from a GBM-allocated
+/// buffer that the compositor has copied the frame into.
 pub struct DmabufPlane {
     pub fd: OwnedFd,
     pub stride: u32,
@@ -37,10 +41,14 @@ pub struct DmabufPlane {
     pub plane_index: u32,
 }
 
-/// A captured frame exported by the compositor as a DMA-BUF. This is the
-/// zero-copy equivalent of `IngressFrame`: instead of CPU-side RGBA bytes,
-/// it carries the dmabuf file descriptor(s) + format/modifier/plane metadata
-/// needed to import the buffer directly into a Vulkan `VkImage`.
+/// A captured frame as a DMA-BUF. This is the GPU-side equivalent of
+/// `IngressFrame`: instead of CPU-side RGBA bytes, it carries the dmabuf
+/// file descriptor(s) + format/modifier/plane metadata needed to import
+/// the buffer directly into a Vulkan `VkImage`.
+///
+/// In the screencopy-dmabuf path, the dmabuf is client-allocated (via
+/// GBM) and the compositor copies the frame into it — one GPU-to-GPU
+/// copy, no CPU readback.
 ///
 /// **Initial constraints** (see the correct_screen_ingress PDF):
 /// - Accept only one exported object / one fd (single-plane).

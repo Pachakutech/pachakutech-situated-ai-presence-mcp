@@ -187,11 +187,11 @@ impl VulkanContext {
 // DMA-BUF → Vulkan import
 // ---------------------------------------------------------------------------
 
-/// A Vulkan image + memory + view imported from a compositor-exported
-/// dmabuf fd. The fd's ownership transferred to Vulkan on successful
-/// import — do NOT close it separately.
+/// A Vulkan image + memory + view imported from a dmabuf fd. The fd's
+/// ownership transferred to Vulkan on successful import — do NOT close
+/// it separately.
 ///
-/// Lifetime: one exported frame → one `DmabufImportedImage` → sample it
+/// Lifetime: one captured frame → one `DmabufImportedImage` → sample it
 /// → retire (destroy) after the GPU fence from the render that first
 /// referenced it has signalled.
 pub struct DmabufImportedImage {
@@ -204,8 +204,8 @@ pub struct DmabufImportedImage {
     pub opaque_alpha: bool,
 }
 
-/// Maps the DRM fourcc formats Hyprland commonly exports to their Vulkan
-/// equivalents. This is deliberately a starting point — for XRGB vs ARGB,
+/// Maps the DRM fourcc formats commonly used by wlr-screencopy to their
+/// Vulkan equivalents. This is deliberately a starting point — for XRGB vs ARGB,
 /// alpha may be absent or semantically opaque. The shader should force
 /// alpha to 1.0 for XRGB/XBGR source formats (see `opaque_alpha` on
 /// `DmabufImportedImage`).
@@ -220,9 +220,9 @@ pub fn drm_to_vk_format(drm_format: u32) -> vk::Format {
 }
 
 impl VulkanContext {
-    /// Imports a compositor-exported dmabuf into a sampled `VkImage`.
+    /// Imports a dmabuf into a sampled `VkImage`.
     ///
-    /// This is the core of the zero-copy capture pipeline:
+    /// This is the core of the one-copy capture pipeline:
     ///
     /// 1. Build `VkImageDrmFormatModifierExplicitCreateInfoEXT` with the
     ///    per-plane layout (stride, offset) from the export protocol.
@@ -242,6 +242,9 @@ impl VulkanContext {
     /// On success, the fd's ownership has transferred to Vulkan. On
     /// failure, the fd is still owned by `DmabufFrame` and will be closed
     /// when it drops.
+    ///
+    /// In the screencopy-dmabuf path, the dmabuf is client-allocated
+    /// via GBM and the compositor has copied the frame into it.
     pub fn import_dmabuf(&self, frame: &DmabufFrame) -> Result<DmabufImportedImage, String> {
         let device = &self.device;
         let fd_loader = self
