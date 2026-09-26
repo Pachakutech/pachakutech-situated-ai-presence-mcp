@@ -368,7 +368,7 @@ impl VulkanContext {
                 frame.drm_format,
                 frame.modifier
             );
-            device.destroy_image(image, None);
+            unsafe { device.destroy_image(image, None) };
             return Err("no compatible Vulkan memory type for dmabuf fd".into());
         }
 
@@ -376,7 +376,7 @@ impl VulkanContext {
         let memory_type_index = choose_memory_type(self.physical_device, &self.instance, compatible_types, vk::MemoryPropertyFlags::empty())
             .ok_or_else(|| {
                 eprintln!("[dmabuf_import] choose_memory_type found no match");
-                device.destroy_image(image, None);
+                unsafe { device.destroy_image(image, None) };
                 "no suitable memory type for dmabuf import".to_string()
             })?;
 
@@ -404,15 +404,17 @@ impl VulkanContext {
                 frame.drm_format, frame.modifier
             );
             // Vulkan did NOT take ownership of the fd on failure.
-            device.destroy_image(image, None);
+            unsafe { device.destroy_image(image, None) };
             format!("vkAllocateMemory (dmabuf) failed: {e:?}")
         })?;
 
         // --- Bind image memory ---
         unsafe { device.bind_image_memory(image, memory, 0) }.map_err(|e| {
             eprintln!("[dmabuf_import] vkBindImageMemory failed: {e:?}");
-            device.free_memory(memory, None);
-            device.destroy_image(image, None);
+            unsafe {
+                device.free_memory(memory, None);
+                device.destroy_image(image, None);
+            }
             format!("vkBindImageMemory (dmabuf) failed: {e:?}")
         })?;
 
@@ -439,8 +441,10 @@ impl VulkanContext {
 
         let view = unsafe { device.create_image_view(&view_info, None) }.map_err(|e| {
             eprintln!("[dmabuf_import] vkCreateImageView failed: {e:?}");
-            device.free_memory(memory, None);
-            device.destroy_image(image, None);
+            unsafe {
+                device.free_memory(memory, None);
+                device.destroy_image(image, None);
+            }
             format!("vkCreateImageView (dmabuf) failed: {e:?}")
         })?;
 
