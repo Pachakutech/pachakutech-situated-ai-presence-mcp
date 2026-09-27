@@ -37,15 +37,11 @@ A one-page version of this contract, formatted for printing/sharing, is in
 This is two components in different environments:
 
 - **The MCP Binding** (`src/`) is plain Node/TypeScript — it runs on Linux,
-  macOS, or WSL, anywhere your agent CLI does. This is the half you install
-  today.
-- **The Presence Daemon** (`daemon/`) is Linux-only by design — it needs a
-  real Vulkan device and, once overlay lands, a Wayland compositor speaking
+  macOS, or WSL, anywhere your agent CLI does.
+- **The Presence Daemon** (`daemon/`) targets Linux but mirrors an Impeller
+  solution for mobile; it needs a a Wayland compositor speaking
   `wlr-screencopy`/`wlr-layer-shell` (Hyprland is the reference target; see
-  [`docs/architecture.md`](docs/architecture.md)). The MCP Binding connects
-  to it when it's running and falls back to the stub when it isn't, so you
-  can try the tools today without the daemon — you need the daemon to get
-  past notify-send.
+  [`docs/architecture.md`](docs/architecture.md)).
 
 ### MCP Binding — any OS with Node
 
@@ -133,9 +129,9 @@ Neither requires root, a privileged daemon, or a setup wizard — just the
 ordinary permissions of an interactively logged-in desktop user.
 
 A packaging note: this has no dependency on Arch/pacman specifically, or on
-any particular init system. If Omarchy's packaging base changes, none of the
+any particular init system. If a distro's packaging base changes, none of the
 above changes with it — Hyprland has full first-class support under NixOS
-and Home Manager as of today, so a Nix-based Omarchy would run this exactly
+and Home Manager as of today, so a Nix-based distro would run this exactly
 the same way.
 
 ## What's real vs. stubbed right now
