@@ -1,16 +1,12 @@
 //! Present vs ingress are split:
-//! - **Present:** a movable disk-shaped perception surface (compositor
-//!   damage is the bubble, not the output). Empty input, exclusive_zone=-1.
-//! - **Ingress:** when the Vulkan device supports dmabuf import
-//!   (`VK_EXT_image_drm_format_modifier` + `VK_KHR_external_memory_fd` +
-//!   `VK_EXT_external_memory_dma_buf`), the compositor copies frames into
+//! - **Present:** a movable layer-shell disk; samples the visual perception layer
+//! - **Ingress:** when the Vulkan device supports dmabuf import, the compositor copies frames into
 //!   a client-allocated dmabuf via `wlr-screencopy` (one GPU-to-GPU copy,
 //!   no CPU readback). Vulkan imports the dmabuf directly into a sampled
 //!   `VkImage` which we read after moving the bubble and parking it offscreen.
 //!   active-session captures are park-gated not only so that the looking-glass feed
 //!   remains recursion free, but also that multiple actors can observe the feed
 //!   in the situated agentic presence runtime.
-
 
 //!   When dmabuf is unavailable, falls back to the SHM screencopy path
 //!   (a reused memfd of the full output at ≤10 fps, overlay parked
@@ -1868,7 +1864,7 @@ pub fn run(
                                 parked.store(false, Ordering::SeqCst);
                                 in_progress.store(false, Ordering::SeqCst);
                                 let (lock, cvar) = &*cap_wake;
-                                let _ = lock.lock().unwrap();
+                                let _guard = lock.lock().unwrap();
                                 cvar.notify_all();
                                 std::thread::sleep(CAPTURE_INTERVAL * 5);
                                 continue;
@@ -1895,7 +1891,7 @@ pub fn run(
                     // Main must clear parked_for_capture and unpark.
                     {
                         let (lock, cvar) = &*cap_wake;
-                        let _ = lock.lock().unwrap();
+                        let _guard = lock.lock().unwrap();
                         cvar.notify_all();
                     }
 
@@ -2026,7 +2022,7 @@ pub fn run(
                 } else {
                     parked_for_capture.store(true, Ordering::SeqCst);
                     let (lock, cvar) = &*capture_wake;
-                    let _ = lock.lock().unwrap();
+                    let _guard = lock.lock().unwrap();
                     cvar.notify_all();
                 }
             }
@@ -2075,7 +2071,7 @@ pub fn run(
                     parked_for_capture.store(false, Ordering::SeqCst);
                     overlay.disarm_capture_park();
                     let (lock, cvar) = &*capture_wake;
-                    let _ = lock.lock().unwrap();
+                    let _guard = lock.lock().unwrap();
                     cvar.notify_all();
                 }
             }
