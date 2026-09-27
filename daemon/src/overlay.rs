@@ -311,7 +311,7 @@ impl Overlay {
     /// applies margins before any other client samples the output.
     fn arm_capture_park(&mut self) -> Result<(), String> {
         //self.park_offscreen();
-        self.set_bubble_size(0, 0);
+        self.set_bubble_size(1, 1);
         self.event_queue
             .flush()
             .map_err(|e| format!("wayland flush (capture park): {e}"))?;
