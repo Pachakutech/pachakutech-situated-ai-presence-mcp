@@ -91,6 +91,12 @@ pub struct OverlayState {
     seat: Option<wl_seat::WlSeat>,
     idle_notifier: Option<ext_idle_notifier_v1::ExtIdleNotifierV1>,
     idle: bool,
+    /// Set by `ext_idle_notification_v1::Resumed` when the user becomes
+    /// active. The main loop consumes this to clear `screensaver` and
+    /// `locked` atomics — a second path back to ACTIVE in case the
+    /// Hyprland `closewindow` event doesn't fire (it doesn't carry the
+    /// window class, so we can't match it by class string).
+    session_resumed: bool,
     width: u32,
     height: u32,
     configured: bool,
@@ -126,6 +132,7 @@ impl Overlay {
             seat: None,
             idle_notifier: None,
             idle: false,
+            session_resumed: false,
             width: 0,
             height: 0,
             configured: false,
@@ -526,7 +533,10 @@ impl Dispatch<ext_idle_notification_v1::ExtIdleNotificationV1, ()> for OverlaySt
     ) {
         match event {
             ext_idle_notification_v1::Event::Idled => state.idle = true,
-            ext_idle_notification_v1::Event::Resumed => state.idle = false,
+            ext_idle_notification_v1::Event::Resumed => {
+                state.idle = false;
+                state.session_resumed = true;
+            }
             _ => {}
         }
     }
@@ -1610,24 +1620,41 @@ fn spawn_hypr_lock_watch(
             let path = Path::new(&runtime).join("hypr").join(sig).join(".socket2.sock");
             let Ok(stream) = std::os::unix::net::UnixStream::connect(path) else { return };
             let reader = io::BufReader::new(stream);
+            // Hyprland socket2 event formats:
+            //   openwindow>>ADDR,WORKSPACE,CLASS,TITLE
+            //   closewindow>>ADDR
+            // closewindow does NOT include the window class, so we track
+            // the screensaver window address from openwindow and match it.
+            let mut ss_window_addr: Option<String> = None;
             for line in io::BufRead::lines(reader) {
                 let Ok(line) = line else { break };
                 if line.starts_with("lock") {
                     locked.store(true, Ordering::Relaxed);
                 } else if line.starts_with("unlock") {
                     // Returning from lock is definitive session activity.
-                    // Clear screensaver too (lock may have been triggered
-                    // from SS) and force-clear idle so the disc returns.
                     locked.store(false, Ordering::Relaxed);
                     screensaver.store(false, Ordering::Relaxed);
                     force_clear_idle.store(true, Ordering::Relaxed);
-                } else if line.contains("org.omarchy.screensaver") {
-                    if line.starts_with("openwindow") {
-                        screensaver.store(true, Ordering::Relaxed);
-                    } else if line.starts_with("closewindow") {
-                        // Dismissing the screensaver is also session activity.
-                        screensaver.store(false, Ordering::Relaxed);
-                        force_clear_idle.store(true, Ordering::Relaxed);
+                    ss_window_addr = None;
+                } else if line.starts_with("openwindow") && line.contains("org.omarchy.screensaver") {
+                    // Extract window address: openwindow>>ADDR,WORKSPACE,CLASS,TITLE
+                    if let Some(rest) = line.split(">>").nth(1) {
+                        if let Some(addr) = rest.split(',').next() {
+                            ss_window_addr = Some(addr.to_string());
+                        }
+                    }
+                    screensaver.store(true, Ordering::Relaxed);
+                    eprintln!("[hypr-watch] screensaver open (addr={:?})", ss_window_addr);
+                } else if line.starts_with("closewindow") {
+                    // closewindow>>ADDR — match by tracked address
+                    if let Some(rest) = line.split(">>").nth(1) {
+                        let addr = rest.trim();
+                        if ss_window_addr.as_deref() == Some(addr) {
+                            screensaver.store(false, Ordering::Relaxed);
+                            force_clear_idle.store(true, Ordering::Relaxed);
+                            ss_window_addr = None;
+                            eprintln!("[hypr-watch] screensaver closed (addr={addr})");
+                        }
                     }
                 }
             }
@@ -1856,6 +1883,16 @@ pub fn run(
             overlay.state.idle = false;
         }
 
+        // Fallback: ext_idle_notification_v1::Resumed fires when the user
+        // becomes active — clear screensaver and locked as a second path
+        // back to ACTIVE (in case closewindow didn't match).
+        if overlay.state.session_resumed {
+            overlay.state.session_resumed = false;
+            screensaver.store(false, Ordering::Relaxed);
+            locked.store(false, Ordering::Relaxed);
+            eprintln!("[overlay] idle Resumed event — clearing screensaver/locked");
+        }
+
         let hide = overlay.should_hide(
             locked.load(Ordering::Relaxed) || screensaver.load(Ordering::Relaxed),
             sleeping.load(Ordering::Relaxed),
@@ -1864,6 +1901,12 @@ pub fn run(
         // --- Session ingress power policy (L1 + L2 + L3) ---
         // Edge-triggered: only act on hide transitions, not steady-state.
         if hide != was_hide {
+            eprintln!("[overlay] hide transition {} -> {} (idle={}, locked={}, ss={}, sleep={})",
+                was_hide, hide,
+                overlay.state.idle,
+                locked.load(Ordering::Relaxed),
+                screensaver.load(Ordering::Relaxed),
+                sleeping.load(Ordering::Relaxed));
             if hide {
                 // ENTER_INACTIVE: stop capture, release producers.
                 capture_enabled.store(false, Ordering::Relaxed);
