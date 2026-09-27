@@ -1,12 +1,17 @@
 //! Present vs ingress are split:
-//! - **Present:** a *movable* disc-sized layer-shell surface (compositor
+//! - **Present:** a movable disk-shaped perception surface (compositor
 //!   damage is the bubble, not the output). Empty input, exclusive_zone=-1.
 //! - **Ingress:** when the Vulkan device supports dmabuf import
 //!   (`VK_EXT_image_drm_format_modifier` + `VK_KHR_external_memory_fd` +
 //!   `VK_EXT_external_memory_dma_buf`), the compositor copies frames into
 //!   a client-allocated dmabuf via `wlr-screencopy` (one GPU-to-GPU copy,
 //!   no CPU readback). Vulkan imports the dmabuf directly into a sampled
-//!   `VkImage`.
+//!   `VkImage` which we read after moving the bubble and parking it offscreen.
+//!   active-session captures are park-gated not only so that the looking-glass feed
+//!   remains recursion free, but also that multiple actors can observe the feed
+//!   in the situated agentic presence runtime.
+
+
 //!   When dmabuf is unavailable, falls back to the SHM screencopy path
 //!   (a reused memfd of the full output at ≤10 fps, overlay parked
 //!   off-screen for the copy).
@@ -28,7 +33,7 @@ use std::io;
 use std::os::fd::{AsFd, AsRawFd};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 use wayland_client::protocol::{
     wl_buffer, wl_compositor, wl_output, wl_region, wl_registry, wl_shm, wl_shm_pool, wl_surface,
@@ -293,6 +298,27 @@ impl Overlay {
                 s.commit();
             }
         }
+    }
+
+    /// Park for a single bubble-free capture, then barrier so the compositor
+    /// applies margins before any other client samples the output.
+    fn arm_capture_park(&mut self) -> Result<(), String> {
+        self.park_offscreen();
+        self.event_queue
+            .flush()
+            .map_err(|e| format!("wayland flush (capture park): {e}"))?;
+        self.event_queue
+            .roundtrip(&mut self.state)
+            .map_err(|e| format!("wayland park barrier: {e}"))?;
+        Ok(())
+    }
+
+    /// Restore disc to the current bubble_x/y after a gated capture.
+    fn disarm_capture_park(&self) {
+        if !self.state.idle {
+            self.unpark_at_bubble();
+        }
+        let _ = self.event_queue.flush();
     }
 
     fn should_hide(&self, locked: bool, sleeping: bool) -> bool {
@@ -1768,8 +1794,9 @@ pub fn run(
     // L1/L2: the capture thread checks this before each frame. When false,
     // it drops its client (L2) and waits on `capture_wake`.
     let capture_enabled = Arc::new(AtomicBool::new(true));
-    let capture_wake: Arc<(std::sync::Mutex<()>, std::sync::Condvar)> =
-        Arc::new((std::sync::Mutex::new(()), std::sync::Condvar::new()));
+    let parked_for_capture = Arc::new(AtomicBool::new(false));
+    let capture_in_progress = Arc::new(AtomicBool::new(false));
+    let capture_wake: Arc<(Mutex<()>, Condvar)> = Arc::new((Mutex::new(()), Condvar::new()));
 
     spawn_hypr_lock_watch(locked.clone(), screensaver.clone(), force_clear_idle.clone());
     spawn_sleep_watch(sleeping.clone());
@@ -1787,23 +1814,24 @@ pub fn run(
     // L3: the GPU feed retains the last good frame across the pause.
     {
         let cap_enabled = capture_enabled.clone();
+        let parked = parked_for_capture.clone();
+        let in_progress = capture_in_progress.clone();
         let cap_wake = capture_wake.clone();
-        let _ = frame_tx; // moved into the closure
         std::thread::Builder::new()
             .name("presence-capture".into())
             .spawn(move || {
                 let mut src: Option<CaptureSource> = None;
                 let mut consecutive_failures = 0u32;
                 loop {
-                    // L1: check capture_enabled before each frame.
-                    if !cap_enabled.load(Ordering::Relaxed) {
-                        // L2: drop the client.
+                    // L1: session inactive — release client and wait.
+                    if !cap_enabled.load(Ordering::SeqCst) {
                         if src.is_some() {
                             src = None;
                             eprintln!("[overlay] capture paused — screencopy client released");
                         }
-                        // Wait until capture is re-enabled.
-                        while !cap_enabled.load(Ordering::Relaxed) {
+                        parked.store(false, Ordering::SeqCst);
+                        in_progress.store(false, Ordering::SeqCst);
+                        while !cap_enabled.load(Ordering::SeqCst) {
                             let (lock, cvar) = &*cap_wake;
                             let guard = lock.lock().unwrap();
                             let _ = cvar.wait_timeout(guard, Duration::from_secs(1));
@@ -1812,26 +1840,47 @@ pub fn run(
                         consecutive_failures = 0;
                     }
 
-                    // L2: (re)connect if we don't have a client.
+                    // Wait until main has parked the disc for this sample.
+                    {
+                        let (lock, cvar) = &*cap_wake;
+                        let mut guard = lock.lock().unwrap();
+                        while cap_enabled.load(Ordering::SeqCst)
+                            && !parked.load(Ordering::SeqCst)
+                        {
+                            let (g, _) = cvar
+                                .wait_timeout(guard, Duration::from_millis(50))
+                                .unwrap();
+                            guard = g;
+                        }
+                    }
+                    if !cap_enabled.load(Ordering::SeqCst) {
+                        continue;
+                    }
+                    if !parked.load(Ordering::SeqCst) {
+                        continue;
+                    }
+
                     if src.is_none() {
                         match CaptureSource::connect(use_dmabuf) {
                             Ok(s) => src = Some(s),
                             Err(e) => {
                                 eprintln!("[overlay] capture connect failed: {e}");
+                                parked.store(false, Ordering::SeqCst);
+                                in_progress.store(false, Ordering::SeqCst);
+                                let (lock, cvar) = &*cap_wake;
+                                let _ = lock.lock().unwrap();
+                                cvar.notify_all();
                                 std::thread::sleep(CAPTURE_INTERVAL * 5);
                                 continue;
                             }
                         }
                     }
 
-                    // Capture one frame.
+                    in_progress.store(true, Ordering::SeqCst);
                     let result = src.as_mut().unwrap().next_frame();
                     match result {
                         Ok(Some(msg)) => {
                             consecutive_failures = 0;
-                            // try_send: if the main loop is hidden (not
-                            // consuming), drop the frame rather than block
-                            // — capture_enabled will be checked next loop.
                             let _ = frame_tx.try_send(msg);
                         }
                         Ok(None) => {
@@ -1842,9 +1891,28 @@ pub fn run(
                             eprintln!("[overlay] capture error: {e}");
                         }
                     }
+                    in_progress.store(false, Ordering::SeqCst);
+                    // Main must clear parked_for_capture and unpark.
+                    {
+                        let (lock, cvar) = &*cap_wake;
+                        let _ = lock.lock().unwrap();
+                        cvar.notify_all();
+                    }
 
-                    // Sleep between captures — using the condvar so a
-                    // capture_enabled change can wake us immediately.
+                    // Handshake: wait until main disarmed park (or session paused).
+                    {
+                        let (lock, cvar) = &*cap_wake;
+                        let mut guard = lock.lock().unwrap();
+                        while cap_enabled.load(Ordering::SeqCst)
+                            && parked.load(Ordering::SeqCst)
+                        {
+                            let (g, _) = cvar
+                                .wait_timeout(guard, Duration::from_millis(50))
+                                .unwrap();
+                            guard = g;
+                        }
+                    }
+
                     let delay = if consecutive_failures > 3 {
                         CAPTURE_INTERVAL * 3
                     } else {
@@ -1856,8 +1924,10 @@ pub fn run(
                 }
             })
             .map_err(|e| format!("capture thread: {e}"))?;
-        println!("[overlay] capture thread started ({} mode, gated by session activity)",
-            if use_dmabuf { "dmabuf" } else { "SHM" });
+        println!(
+            "[overlay] capture thread started ({} mode, session-gated + bubble-free park gate)",
+            if use_dmabuf { "dmabuf" } else { "SHM" }
+        );
     }
 
     gpu.draw(vk)?;
@@ -1909,7 +1979,9 @@ pub fn run(
                 sleeping.load(Ordering::Relaxed));
             if hide {
                 // ENTER_INACTIVE: stop capture, release producers.
-                capture_enabled.store(false, Ordering::Relaxed);
+                capture_enabled.store(false, Ordering::SeqCst);
+                parked_for_capture.store(false, Ordering::SeqCst);
+                capture_in_progress.store(false, Ordering::SeqCst);
                 {
                     let (lock, cvar) = &*capture_wake;
                     let _guard = lock.lock().unwrap();
@@ -1939,14 +2011,29 @@ pub fn run(
             if parked {
                 overlay.unpark_at_bubble();
                 parked = false;
-                // Force-present the last cached frame immediately (L3 + H4).
-                // Don't wait for a new capture — the disc should appear now.
                 gpu.draw(vk)?;
                 last_capture = Instant::now();
             }
+
+            // Arm bubble-free capture when due and not already gated.
+            let need_sample = last_capture.elapsed() >= CAPTURE_INTERVAL;
+            if need_sample
+                && !parked_for_capture.load(Ordering::SeqCst)
+                && !capture_in_progress.load(Ordering::SeqCst)
+            {
+                if let Err(e) = overlay.arm_capture_park() {
+                    eprintln!("[overlay] arm_capture_park: {e}");
+                } else {
+                    parked_for_capture.store(true, Ordering::SeqCst);
+                    let (lock, cvar) = &*capture_wake;
+                    let _ = lock.lock().unwrap();
+                    cvar.notify_all();
+                }
+            }
+
             let mut got = false;
             while let Ok(msg) = frame_rx.try_recv() {
-                static ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                static ONCE: AtomicBool = AtomicBool::new(false);
                 if !ONCE.swap(true, Ordering::Relaxed) {
                     match &msg {
                         CaptureMsg::Dmabuf(f) => println!(
@@ -1975,6 +2062,24 @@ pub fn run(
                 }
                 got = true;
             }
+
+            // Disarm park after a sample finished (or stall timeout).
+            if parked_for_capture.load(Ordering::SeqCst)
+                && !capture_in_progress.load(Ordering::SeqCst)
+            {
+                let stall = last_capture.elapsed() > CAPTURE_INTERVAL * 3;
+                if got || stall {
+                    if stall && !got {
+                        eprintln!("[overlay] capture park timeout — unparking without new frame");
+                    }
+                    parked_for_capture.store(false, Ordering::SeqCst);
+                    overlay.disarm_capture_park();
+                    let (lock, cvar) = &*capture_wake;
+                    let _ = lock.lock().unwrap();
+                    cvar.notify_all();
+                }
+            }
+
             if got || last_capture.elapsed() >= CAPTURE_INTERVAL {
                 gpu.draw(vk)?;
                 last_capture = Instant::now();
