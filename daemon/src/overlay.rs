@@ -1597,7 +1597,11 @@ fn disc_origin(output_w: u32, output_h: u32) -> (i32, i32) {
     center_margins(output_w, output_h)
 }
 
-fn spawn_hypr_lock_watch(locked: Arc<AtomicBool>, screensaver: Arc<AtomicBool>) {
+fn spawn_hypr_lock_watch(
+    locked: Arc<AtomicBool>,
+    screensaver: Arc<AtomicBool>,
+    force_clear_idle: Arc<AtomicBool>,
+) {
     std::thread::Builder::new()
         .name("presence-hypr-lock".into())
         .spawn(move || {
@@ -1611,12 +1615,19 @@ fn spawn_hypr_lock_watch(locked: Arc<AtomicBool>, screensaver: Arc<AtomicBool>) 
                 if line.starts_with("lock") {
                     locked.store(true, Ordering::Relaxed);
                 } else if line.starts_with("unlock") {
+                    // Returning from lock is definitive session activity.
+                    // Clear screensaver too (lock may have been triggered
+                    // from SS) and force-clear idle so the disc returns.
                     locked.store(false, Ordering::Relaxed);
+                    screensaver.store(false, Ordering::Relaxed);
+                    force_clear_idle.store(true, Ordering::Relaxed);
                 } else if line.contains("org.omarchy.screensaver") {
                     if line.starts_with("openwindow") {
                         screensaver.store(true, Ordering::Relaxed);
                     } else if line.starts_with("closewindow") {
+                        // Dismissing the screensaver is also session activity.
                         screensaver.store(false, Ordering::Relaxed);
+                        force_clear_idle.store(true, Ordering::Relaxed);
                     }
                 }
             }
@@ -1659,20 +1670,56 @@ enum CaptureMsg {
     Shm(IngressFrame),
 }
 
+/// Wrapper enum so the capture thread can drop and reconnect either
+/// backend (L2 release/recreate) without knowing which one is active.
+enum CaptureSource {
+    Dmabuf(DmabufScreenSource),
+    Shm(WlrScreenSource),
+}
+
+impl CaptureSource {
+    /// Try dmabuf first (if the device supports it), fall back to SHM.
+    fn connect(use_dmabuf: bool) -> Result<Self, String> {
+        if use_dmabuf {
+            match DmabufScreenSource::connect() {
+                Ok(s) => Ok(Self::Dmabuf(s)),
+                Err(e) => {
+                    eprintln!("[overlay] dmabuf capture client: {e}");
+                    eprintln!("[overlay] dmabuf unavailable — falling back to SHM screencopy");
+                    match WlrScreenSource::connect() {
+                        Ok(s) => Ok(Self::Shm(s)),
+                        Err(e2) => Err(format!("dmabuf: {e}; SHM: {e2}")),
+                    }
+                }
+            }
+        } else {
+            match WlrScreenSource::connect() {
+                Ok(s) => Ok(Self::Shm(s)),
+                Err(e) => Err(e),
+            }
+        }
+    }
+
+    fn next_frame(&mut self) -> Result<Option<CaptureMsg>, String> {
+        match self {
+            Self::Dmabuf(s) => s.next_frame().map(|opt| opt.map(CaptureMsg::Dmabuf)),
+            Self::Shm(s) => s.next_frame().map(|opt| opt.map(CaptureMsg::Shm)),
+        }
+    }
+}
+
 /// Combined Wayland + Unix-socket loop. One thread: pipeline is `!Send`.
 ///
-/// When the Vulkan device supports dmabuf import, spawns a
-/// `DmabufScreenSource` thread that captures via `wlr-screencopy` with
-/// dmabuf (client-allocated via GBM, compositor copies into it). Each frame
-/// is imported directly into a sampled `VkImage` — one GPU-to-GPU copy, no
-/// CPU pixel readback.
+/// Spawns a capture thread that uses `wlr-screencopy` with dmabuf (preferred)
+/// or SHM (fallback). The capture thread is **gated by session activity**:
+/// when the session is idle, locked, under screensaver, or preparing for
+/// sleep, the capture thread pauses (L1), releases its screencopy client
+/// (L2), and waits on a condvar. The GPU feed retains the last good frame
+/// (L3) so return-to-session can present immediately.
 ///
 /// The GPU feed always starts on SHM and switches to dmabuf when the first
 /// dmabuf frame arrives — so a failed dmabuf path never causes a black
 /// screen.
-///
-/// Falls back to the SHM screencopy path (`WlrScreenSource`) when dmabuf
-/// is unavailable.
 pub fn run(
     overlay: &mut Overlay,
     gpu: &mut OverlayGpu,
@@ -1686,98 +1733,104 @@ pub fn run(
     let locked = Arc::new(AtomicBool::new(false));
     let screensaver = Arc::new(AtomicBool::new(false));
     let sleeping = Arc::new(AtomicBool::new(false));
-    spawn_hypr_lock_watch(locked.clone(), screensaver.clone());
+    // Set by the lock/screensaver watch threads when they detect definitive
+    // session activity (unlock, screensaver dismiss). The main loop consumes
+    // this to force-clear the `idle` flag, which can otherwise get stuck
+    // after a lock/screensaver cycle.
+    let force_clear_idle = Arc::new(AtomicBool::new(false));
+    // L1/L2: the capture thread checks this before each frame. When false,
+    // it drops its client (L2) and waits on `capture_wake`.
+    let capture_enabled = Arc::new(AtomicBool::new(true));
+    let capture_wake: Arc<(std::sync::Mutex<()>, std::sync::Condvar)> =
+        Arc::new((std::sync::Mutex::new(()), std::sync::Condvar::new()));
+
+    spawn_hypr_lock_watch(locked.clone(), screensaver.clone(), force_clear_idle.clone());
     spawn_sleep_watch(sleeping.clone());
 
     let mut last_capture = Instant::now() - CAPTURE_INTERVAL;
     let mut parked = false;
+    let mut was_hide = false; // tracks hide → !hide transitions for force-present
     let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel::<CaptureMsg>(1);
 
-    // Choose capture strategy based on device capability.
     let use_dmabuf = vk.supports_zero_copy_capture();
 
-    if use_dmabuf {
-        // --- One-copy dmabuf capture thread (wlr-screencopy + dmabuf) ---
+    // --- Unified capture thread (dmabuf preferred, SHM fallback) ---
+    // L1: pauses when `capture_enabled` is false (session inactive).
+    // L2: drops the screencopy client on pause, reconnects on resume.
+    // L3: the GPU feed retains the last good frame across the pause.
+    {
+        let cap_enabled = capture_enabled.clone();
+        let cap_wake = capture_wake.clone();
+        let _ = frame_tx; // moved into the closure
         std::thread::Builder::new()
-            .name("presence-dmabuf-capture".into())
+            .name("presence-capture".into())
             .spawn(move || {
-                let mut src = match DmabufScreenSource::connect() {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("[overlay] dmabuf capture client: {e}");
-                        eprintln!("[overlay] dmabuf unavailable — falling back to SHM screencopy");
-                        // Fall back to SHM in the same thread.
-                        let mut shm_src = match WlrScreenSource::connect() {
-                            Ok(s) => s,
-                            Err(e) => {
-                                eprintln!("[overlay] SHM fallback also failed: {e}");
-                                return;
-                            }
-                        };
-                        loop {
-                            match shm_src.next_frame() {
-                                Ok(Some(frame)) => {
-                                    let _ = frame_tx.send(CaptureMsg::Shm(frame));
-                                }
-                                Ok(None) => {}
-                                Err(e) => eprintln!("[overlay] SHM capture: {e}"),
-                            }
-                            std::thread::sleep(CAPTURE_INTERVAL);
-                        }
-                    }
-                };
+                let mut src: Option<CaptureSource> = None;
                 let mut consecutive_failures = 0u32;
                 loop {
-                    match src.next_frame() {
-                        Ok(Some(frame)) => {
+                    // L1: check capture_enabled before each frame.
+                    if !cap_enabled.load(Ordering::Relaxed) {
+                        // L2: drop the client.
+                        if src.is_some() {
+                            src = None;
+                            eprintln!("[overlay] capture paused — screencopy client released");
+                        }
+                        // Wait until capture is re-enabled.
+                        while !cap_enabled.load(Ordering::Relaxed) {
+                            let (lock, cvar) = &*cap_wake;
+                            let guard = lock.lock().unwrap();
+                            let _ = cvar.wait_timeout(guard, Duration::from_secs(1));
+                        }
+                        eprintln!("[overlay] capture resumed — reconnecting screencopy client");
+                        consecutive_failures = 0;
+                    }
+
+                    // L2: (re)connect if we don't have a client.
+                    if src.is_none() {
+                        match CaptureSource::connect(use_dmabuf) {
+                            Ok(s) => src = Some(s),
+                            Err(e) => {
+                                eprintln!("[overlay] capture connect failed: {e}");
+                                std::thread::sleep(CAPTURE_INTERVAL * 5);
+                                continue;
+                            }
+                        }
+                    }
+
+                    // Capture one frame.
+                    let result = src.as_mut().unwrap().next_frame();
+                    match result {
+                        Ok(Some(msg)) => {
                             consecutive_failures = 0;
-                            let _ = frame_tx.send(CaptureMsg::Dmabuf(frame));
+                            // try_send: if the main loop is hidden (not
+                            // consuming), drop the frame rather than block
+                            // — capture_enabled will be checked next loop.
+                            let _ = frame_tx.try_send(msg);
                         }
                         Ok(None) => {
                             consecutive_failures = consecutive_failures.saturating_add(1);
                         }
                         Err(e) => {
                             consecutive_failures = consecutive_failures.saturating_add(1);
-                            eprintln!("[overlay] dmabuf capture error: {e}");
+                            eprintln!("[overlay] capture error: {e}");
                         }
                     }
+
+                    // Sleep between captures — using the condvar so a
+                    // capture_enabled change can wake us immediately.
                     let delay = if consecutive_failures > 3 {
                         CAPTURE_INTERVAL * 3
                     } else {
                         CAPTURE_INTERVAL
                     };
-                    std::thread::sleep(delay);
+                    let (lock, cvar) = &*cap_wake;
+                    let guard = lock.lock().unwrap();
+                    let _ = cvar.wait_timeout(guard, delay);
                 }
             })
-            .map_err(|e| format!("dmabuf capture thread: {e}"))?;
-        println!("[overlay] dmabuf capture enabled (wlr-screencopy + dmabuf → Vulkan import)");
-    } else {
-        // --- SHM screencopy fallback thread ---
-        std::thread::Builder::new()
-            .name("presence-screencopy".into())
-            .spawn(move || {
-                let mut src = match WlrScreenSource::connect() {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("[overlay] screencopy client: {e}");
-                        return;
-                    }
-                };
-                loop {
-                    match src.next_frame() {
-                        Ok(Some(frame)) => {
-                            let _ = frame_tx.send(CaptureMsg::Shm(frame));
-                        }
-                        Ok(None) => {}
-                        Err(e) => eprintln!("[overlay] screencopy: {e}"),
-                    }
-                    std::thread::sleep(CAPTURE_INTERVAL);
-                }
-            })
-            .map_err(|e| format!("screencopy thread: {e}"))?;
-        println!(
-            "[overlay] disc {BUBBLE_PX}px movable, full-output ingress ≤10fps on a second Wayland client (SHM)"
-        );
+            .map_err(|e| format!("capture thread: {e}"))?;
+        println!("[overlay] capture thread started ({} mode, gated by session activity)",
+            if use_dmabuf { "dmabuf" } else { "SHM" });
     }
 
     gpu.draw(vk)?;
@@ -1798,10 +1851,37 @@ pub fn run(
 
         server.pump(vk, pipeline).map_err(|e| format!("socket pump: {e}"))?;
 
+        // Consume force_clear_idle from the lock/screensaver watch threads.
+        if force_clear_idle.swap(false, Ordering::Relaxed) {
+            overlay.state.idle = false;
+        }
+
         let hide = overlay.should_hide(
             locked.load(Ordering::Relaxed) || screensaver.load(Ordering::Relaxed),
             sleeping.load(Ordering::Relaxed),
         );
+
+        // --- Session ingress power policy (L1 + L2 + L3) ---
+        // Edge-triggered: only act on hide transitions, not steady-state.
+        if hide != was_hide {
+            if hide {
+                // ENTER_INACTIVE: stop capture, release producers.
+                capture_enabled.store(false, Ordering::Relaxed);
+                let (lock, cvar) = &*capture_wake;
+                let _ = lock.lock().unwrap();
+                cvar.notify_all();
+                println!("[overlay] session inactive — ingress producers paused");
+            } else {
+                // ENTER_ACTIVE: restart capture, force-present cached frame (L3).
+                capture_enabled.store(true, Ordering::Relaxed);
+                let (lock, cvar) = &*capture_wake;
+                let _ = lock.lock().unwrap();
+                cvar.notify_all();
+                println!("[overlay] session active — ingress producers resuming");
+            }
+        }
+        was_hide = hide;
+
         if hide {
             if !parked {
                 overlay.park_offscreen();
@@ -1812,6 +1892,10 @@ pub fn run(
             if parked {
                 overlay.unpark_at_bubble();
                 parked = false;
+                // Force-present the last cached frame immediately (L3 + H4).
+                // Don't wait for a new capture — the disc should appear now.
+                gpu.draw(vk)?;
+                last_capture = Instant::now();
             }
             let mut got = false;
             while let Ok(msg) = frame_rx.try_recv() {
