@@ -296,11 +296,22 @@ impl Overlay {
         }
     }
 
+    // arm:   self.set_bubble_size(0, 0);
+    // disarm: self.set_bubble_size(BUBBLE_PX, BUBBLE_PX);
+    fn set_bubble_size(&self, w: u32, h: u32) {
+        if let Some(ls) = &self.state.layer_surface {
+            ls.set_size(w, h);
+            if let Some(s) = &self.state.surface {
+                s.commit();
+            }
+        }
+    }
+
     /// Park for a single bubble-free capture, then barrier so the compositor
     /// applies margins before any other client samples the output.
     fn arm_capture_park(&mut self) -> Result<(), String> {
         //self.park_offscreen();
-        layer_surface.set_size(0,0);
+        self.set_bubble_size(0, 0);
         self.event_queue
             .flush()
             .map_err(|e| format!("wayland flush (capture park): {e}"))?;
@@ -313,7 +324,7 @@ impl Overlay {
     /// Restore disc to the current bubble_x/y after a gated capture.
     fn disarm_capture_park(&self) {
         if !self.state.idle {
-            layer_surface.set_size(BUBBLE_PX,BUBBLE_PX);
+            self.set_bubble_size(BUBBLE_PX, BUBBLE_PX);
             //self.unpark_at_bubble();
         }
         let _ = self.event_queue.flush();
