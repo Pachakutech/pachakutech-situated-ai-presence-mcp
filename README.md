@@ -108,7 +108,7 @@ the MCP server it spawns inherits that session's environment automatically —
 separate setup step, unlike a systemd service, which would need its
 environment imported explicitly.
 
-**Today**, if the daemon isn't running, `src/daemonStub.ts` only calls
+If the daemon isn't running, `src/daemonStub.ts` only calls
 `notify-send` and appends to a log file, so the only real dependency is
 Node. If the daemon *is* running, the Binding talks to it over the Unix
 socket and those session variables matter.

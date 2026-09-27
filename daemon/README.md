@@ -55,7 +55,7 @@ it listens on the socket until killed.
 1. **Hyperbubble** on the existing layer-shell surface (fisheye of
    screen/camera as the un-artifacted default). Then raster `ProjectedSplat`.
 2. **Tick ingress:** the V4L2 and `wlr-screencopy` (SHM) clients already
-   compile; feed `IngressActor::update_slot` into the live buffer. dma_buf
+   compile; fed `IngressActor::update_slot` into the live buffer. dma_buf
    import is probed and present here, and the zero-copy `wlr-export-dmabuf`
    capture path is now wired into the overlay loop when the device supports
    `VK_EXT_image_drm_format_modifier`. SHM remains the fallback.
