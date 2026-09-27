@@ -638,9 +638,9 @@ struct ScreenFeed {
 /// Lifecycle per captured frame:
 /// 1. `import_frame(vk, frame)` — moves current→previous, imports the
 ///    new dmabuf fd into a fresh `VkImage`, updates the descriptor set.
-/// 2. `record_transition(device, cmd)` — inserts an image layout barrier
-///    (`UNDEFINED`→`SHADER_READ_ONLY_OPTIMAL`) with
-///    `VK_QUEUE_FAMILY_EXTERNAL` as the source queue family.
+/// 2. `record_transition(vk, cmd)` — acquires the image
+///    (`GENERAL`→`SHADER_READ_ONLY_OPTIMAL`) from the compositor's queue
+///    family. `UNDEFINED` would discard the texels the copy just wrote.
 /// 3. After the render fence signals (next `draw`), `retire_previous`
 ///    destroys the old imported image.
 struct DmabufScreenFeed {
@@ -764,6 +764,13 @@ impl OverlayGpu {
             return Ok(());
         }
 
+        // The first draw may still be sampling the SHM image.
+        unsafe {
+            vk.device
+                .wait_for_fences(&[self.in_flight], true, u64::MAX)
+                .ok();
+        }
+
         // Take ownership of the SHM feed's descriptor set layout before
         // destroying the rest of its resources.
         let dsl = match &self.screen {
@@ -859,7 +866,7 @@ impl OverlayGpu {
             match &mut self.screen {
                 ScreenFeedKind::Shm(feed) => feed.record_upload(&vk.device, self.command_buffer),
                 ScreenFeedKind::Dmabuf(feed) => {
-                    feed.record_transition(&vk.device, self.command_buffer);
+                    feed.record_transition(vk, self.command_buffer);
                 }
             }
             self.pending_update = false;
@@ -901,7 +908,20 @@ impl OverlayGpu {
             };
             vk.device.cmd_set_viewport(self.command_buffer, 0, &[viewport]);
             vk.device.cmd_set_scissor(self.command_buffer, 0, &[render_area]);
-            let pc = [self.extent.width as f32, self.extent.height as f32, 0.0, 0.0];
+            let y_invert = match &self.screen {
+                ScreenFeedKind::Dmabuf(feed) => feed
+                    .current
+                    .as_ref()
+                    .map(|img| img.y_invert)
+                    .unwrap_or(false),
+                ScreenFeedKind::Shm(_) => false,
+            };
+            let pc = [
+                self.extent.width as f32,
+                self.extent.height as f32,
+                if y_invert { 1.0 } else { 0.0 },
+                0.0,
+            ];
             vk.device.cmd_push_constants(
                 self.command_buffer,
                 self.pipeline_layout,
@@ -1055,12 +1075,18 @@ impl DmabufScreenFeed {
     /// Records the image layout transition barrier for the current imported
     /// image. Called once before the render pass, in the same command
     /// buffer as the draw.
-    fn record_transition(&mut self, device: &ash::Device, cmd: vk::CommandBuffer) {
+    fn record_transition(&mut self, vk: &VulkanContext, cmd: vk::CommandBuffer) {
         if !self.needs_transition {
             return;
         }
         if let Some(ref imported) = self.current {
-            VulkanContext::record_dmabuf_transition(device, cmd, imported.image);
+            VulkanContext::record_dmabuf_transition(
+                &vk.device,
+                cmd,
+                imported.image,
+                vk.dmabuf_src_queue_family,
+                vk.graphics_queue_family,
+            );
         }
         self.needs_transition = false;
     }

@@ -7,6 +7,7 @@
 
 layout(push_constant) uniform PC {
     vec2 overlay; // this layer's pixel size (the disc)
+    float yInvert; // 1 when zwlr_screencopy says the dmabuf is y-inverted
 } pc;
 
 layout(set = 0, binding = 0) uniform sampler2D tScreen;
@@ -30,6 +31,9 @@ void main() {
         1.0 - (dist * cos(phi) * 0.5 + 0.5),
         dist * sin(phi) * 0.5 + 0.5
     );
+    if (pc.yInvert > 0.5) {
+        uv.y = 1.0 - uv.y;
+    }
     uv = clamp(uv, vec2(0.001), vec2(0.999));
 
     vec3 scene = texture(tScreen, uv).rgb;

@@ -6,7 +6,7 @@
 
 use ash::{vk, Entry};
 use std::ffi::CStr;
-use std::os::fd::{AsRawFd, RawFd};
+use std::os::fd::AsRawFd;
 use std::ffi::c_void;
 
 use crate::actors::ingress::{DmabufFrame, DRM_FORMAT_MOD_INVALID};
@@ -35,6 +35,11 @@ pub struct VulkanContext {
     /// Provides `get_memory_fd_properties` — the call that tells us which
     /// Vulkan memory types are compatible with a given dmabuf fd.
     pub external_memory_fd: Option<ash::khr::external_memory_fd::Device>,
+    /// Queue family a dmabuf acquire barrier uses as `srcQueueFamilyIndex`.
+    /// `VK_QUEUE_FAMILY_FOREIGN_EXT` when that extension is enabled (the
+    /// compositor is outside this Vulkan instance); otherwise
+    /// `VK_QUEUE_FAMILY_EXTERNAL`.
+    pub dmabuf_src_queue_family: u32,
     pub device_name: String,
     /// Presentable Wayland `VkSurfaceKHR` when the overlay is up. Destroyed
     /// in `Drop` before the instance.
@@ -120,6 +125,7 @@ impl VulkanContext {
             && has_extension(ash::ext::external_memory_dma_buf::NAME);
         let supports_drm_format_modifier =
             has_extension(ash::ext::image_drm_format_modifier::NAME);
+        let supports_foreign_queue = has_extension(ash::ext::queue_family_foreign::NAME);
 
         let queue_priorities = [1.0f32];
         let queue_create_info = vk::DeviceQueueCreateInfo::default()
@@ -140,6 +146,14 @@ impl VulkanContext {
         if supports_drm_format_modifier {
             enabled_extensions.push(ash::ext::image_drm_format_modifier::NAME.as_ptr());
         }
+        if supports_dma_buf_import && supports_foreign_queue {
+            enabled_extensions.push(ash::ext::queue_family_foreign::NAME.as_ptr());
+        }
+        let dmabuf_src_queue_family = if supports_dma_buf_import && supports_foreign_queue {
+            vk::QUEUE_FAMILY_FOREIGN_EXT
+        } else {
+            vk::QUEUE_FAMILY_EXTERNAL
+        };
 
         let device_create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_create_infos)
@@ -169,6 +183,7 @@ impl VulkanContext {
             supports_dma_buf_import,
             supports_drm_format_modifier,
             external_memory_fd,
+            dmabuf_src_queue_family,
             device_name,
             surface,
             surface_loader,
@@ -202,6 +217,7 @@ pub struct DmabufImportedImage {
     pub width: u32,
     pub height: u32,
     pub opaque_alpha: bool,
+    pub y_invert: bool,
 }
 
 /// Maps the DRM fourcc formats commonly used by wlr-screencopy to their
@@ -277,6 +293,17 @@ impl VulkanContext {
         }
 
         let plane = &frame.planes[0];
+        // Vulkan takes ownership of the fd passed to vkAllocateMemory and
+        // closes it. Dup first so `DmabufFrame`'s OwnedFd can still close
+        // the original without a double-close (which drops the GEM handle
+        // out from under the imported image).
+        let import_fd = unsafe { libc::dup(plane.fd.as_raw_fd()) };
+        if import_fd < 0 {
+            return Err(format!(
+                "dup(dmabuf fd) failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
 
         // --- Build the per-plane layout for the modifier create-info chain ---
         let subresource_layout = vk::SubresourceLayout {
@@ -313,11 +340,9 @@ impl VulkanContext {
             .array_layers(1)
             .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT)
-            .usage(
-                vk::ImageUsageFlags::SAMPLED
-                    | vk::ImageUsageFlags::TRANSFER_SRC
-                    | vk::ImageUsageFlags::TRANSFER_DST,
-            )
+            // Sampled only. TRANSFER_* is not in every modifier's usage
+            // set, and this image is never copied — the shader reads it.
+            .usage(vk::ImageUsageFlags::SAMPLED)
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED)
             .push_next(&mut external_image_info);
@@ -328,6 +353,7 @@ impl VulkanContext {
                     "[dmabuf_import] vkCreateImage failed: {e:?} — format={:?} {}x{} modifier=0x{:016X}",
                     vk_format, frame.width, frame.height, frame.modifier
                 );
+                unsafe { libc::close(import_fd) };
                 format!("vkCreateImage (dmabuf) failed: {e:?}")
             })?;
 
@@ -339,13 +365,12 @@ impl VulkanContext {
         }
 
         // --- Query which memory types can import this fd ---
-        let raw_fd: RawFd = plane.fd.as_raw_fd();
         let mut fd_props = vk::MemoryFdPropertiesKHR::default();
         unsafe {
             fd_loader
                 .get_memory_fd_properties(
                     vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT,
-                    raw_fd,
+                    import_fd,
                     &mut fd_props,
                 )
                 .map_err(|e| {
@@ -354,7 +379,7 @@ impl VulkanContext {
                          format=0x{:08X} modifier=0x{:016X}",
                         frame.drm_format, frame.modifier
                     );
-                    // Image was created but we can't import memory — clean it up.
+                    libc::close(import_fd);
                     device.destroy_image(image, None);
                     format!("vkGetMemoryFdPropertiesKHR failed: {e:?}")
                 })?;
@@ -371,7 +396,10 @@ impl VulkanContext {
                 frame.drm_format,
                 frame.modifier
             );
-            unsafe { device.destroy_image(image, None) };
+            unsafe {
+                libc::close(import_fd);
+                device.destroy_image(image, None);
+            }
             return Err("no compatible Vulkan memory type for dmabuf fd".into());
         }
 
@@ -379,7 +407,10 @@ impl VulkanContext {
         let memory_type_index = choose_memory_type(self.physical_device, &self.instance, compatible_types, vk::MemoryPropertyFlags::empty())
             .ok_or_else(|| {
                 eprintln!("[dmabuf_import] choose_memory_type found no match");
-                unsafe { device.destroy_image(image, None) };
+                unsafe {
+                    libc::close(import_fd);
+                    device.destroy_image(image, None);
+                }
                 "no suitable memory type for dmabuf import".to_string()
             })?;
 
@@ -388,7 +419,7 @@ impl VulkanContext {
         //               ImportMemoryFdInfoKHR
         let import_info = vk::ImportMemoryFdInfoKHR::default()
             .handle_type(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT)
-            .fd(raw_fd);
+            .fd(import_fd);
 
         let mut dedicated_info = vk::MemoryDedicatedAllocateInfo::default()
             .image(image);
@@ -406,8 +437,11 @@ impl VulkanContext {
                 mem_req2.memory_requirements.size, memory_type_index,
                 frame.drm_format, frame.modifier
             );
-            // Vulkan did NOT take ownership of the fd on failure.
-            unsafe { device.destroy_image(image, None) };
+            // On failure the implementation does not take the fd.
+            unsafe {
+                libc::close(import_fd);
+                device.destroy_image(image, None);
+            }
             format!("vkAllocateMemory (dmabuf) failed: {e:?}")
         })?;
 
@@ -421,13 +455,9 @@ impl VulkanContext {
             format!("vkBindImageMemory (dmabuf) failed: {e:?}")
         })?;
 
-        // SUCCESS: fd ownership has transferred to Vulkan.
-        // The OwnedFd in DmabufFrame will be closed on drop, but Vulkan
-        // now holds a duplicate reference via the import. This is safe
-        // because VkImportMemoryFdInfoKHR takes ownership of the fd —
-        // the driver has its own reference and closing our copy is fine.
-        // (If the driver had failed, it would NOT have taken the fd, and
-        // we'd still own it — but we already returned Err above in that case.)
+        // SUCCESS: the driver owns `import_fd` and closes it. The original
+        // fd in `DmabufFrame` is a separate dup and closes on drop. The
+        // imported VkDeviceMemory holds the GEM object either way.
 
         // --- Create image view ---
         let view_info = vk::ImageViewCreateInfo::default()
@@ -459,24 +489,35 @@ impl VulkanContext {
             width: frame.width,
             height: frame.height,
             opaque_alpha: frame.opaque_alpha(),
+            y_invert: frame.y_invert,
         })
     }
 
-    /// Records a pipeline barrier that transitions an imported dmabuf
-    /// image from `UNDEFINED` to `SHADER_READ_ONLY_OPTIMAL`, with
-    /// `VK_QUEUE_FAMILY_EXTERNAL` as the source queue family (the
-    /// compositor produced the buffer on a different queue/context).
+    /// Acquire a compositor-written dmabuf so the fragment shader can
+    /// sample it.
+    ///
+    /// `oldLayout = UNDEFINED` tells the driver it may discard texels.
+    /// The screencopy copy already landed in this memory, so the acquire
+    /// must preserve them: `GENERAL` (the layout external producers leave
+    /// an image in) → `SHADER_READ_ONLY_OPTIMAL`, with the source queue
+    /// family outside this device.
     ///
     /// Call this once before the first draw that samples the imported
     /// image, in the same command buffer as the render.
-    pub fn record_dmabuf_transition(device: &ash::Device, cmd: vk::CommandBuffer, image: vk::Image) {
+    pub fn record_dmabuf_transition(
+        device: &ash::Device,
+        cmd: vk::CommandBuffer,
+        image: vk::Image,
+        src_queue_family: u32,
+        dst_queue_family: u32,
+    ) {
         let barrier = vk::ImageMemoryBarrier::default()
             .src_access_mask(vk::AccessFlags::empty())
             .dst_access_mask(vk::AccessFlags::SHADER_READ)
-            .old_layout(vk::ImageLayout::UNDEFINED)
+            .old_layout(vk::ImageLayout::GENERAL)
             .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-            .src_queue_family_index(vk::QUEUE_FAMILY_EXTERNAL)
-            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .src_queue_family_index(src_queue_family)
+            .dst_queue_family_index(dst_queue_family)
             .image(image)
             .subresource_range(vk::ImageSubresourceRange {
                 aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -489,7 +530,7 @@ impl VulkanContext {
         unsafe {
             device.cmd_pipeline_barrier(
                 cmd,
-                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::ALL_COMMANDS,
                 vk::PipelineStageFlags::FRAGMENT_SHADER,
                 vk::DependencyFlags::empty(),
                 &[],

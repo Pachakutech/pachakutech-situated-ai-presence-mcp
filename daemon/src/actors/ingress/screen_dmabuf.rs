@@ -16,6 +16,7 @@
 
 use super::{DmabufFrame, DmabufPlane, DRM_FORMAT_MOD_INVALID};
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
+use std::time::{Duration, Instant};
 use wayland_client::protocol::{wl_buffer, wl_output, wl_registry};
 use wayland_client::{delegate_noop, Connection, Dispatch, EventQueue, QueueHandle, WEnum};
 use wayland_protocols_wlr::screencopy::v1::client::{
@@ -36,8 +37,13 @@ mod gbm_ffi {
     #[repr(C)]
     pub struct gbm_bo { _opaque: [u8; 0] }
 
+    // Values from <gbm.h> (mesa). LINEAR is bit 4; bit 3 is GBM_BO_USE_WRITE,
+    // and RENDERING|WRITE is rejected (EINVAL) by iris. A wrong LINEAR bit
+    // makes every screencopy allocation fail and the bubble stays empty.
     pub const GBM_BO_USE_RENDERING: u32 = 1 << 2;
-    pub const GBM_BO_USE_LINEAR: u32 = 1 << 3;
+    pub const GBM_BO_USE_LINEAR: u32 = 1 << 4;
+    const _: () = assert!(GBM_BO_USE_LINEAR == 16);
+    const _: () = assert!(GBM_BO_USE_RENDERING == 4);
 
     pub type CreateDeviceFn = unsafe extern "C" fn(fd: i32) -> *mut gbm_device;
     pub type DestroyDeviceFn = unsafe extern "C" fn(gbm: *mut gbm_device);
@@ -137,19 +143,24 @@ impl GbmCtx {
     }
 
     fn create_bo(&self, width: u32, height: u32, format: u32) -> Result<GbmBoGuard, String> {
-        let bo = unsafe {
-            (self.bo_create)(
-                self.device,
-                width,
-                height,
-                format,
-                gbm_ffi::GBM_BO_USE_RENDERING | gbm_ffi::GBM_BO_USE_LINEAR,
-            )
-        };
-        if bo.is_null() {
-            return Err("gbm_bo_create returned null".into());
+        // Linear first: one plane, modifier 0, the import Vulkan already
+        // accepts. If this GPU cannot render to linear, take the driver's
+        // preferred tiling and pass that modifier through to the compositor
+        // and to vkCreateImage.
+        let usages = [
+            gbm_ffi::GBM_BO_USE_RENDERING | gbm_ffi::GBM_BO_USE_LINEAR,
+            gbm_ffi::GBM_BO_USE_RENDERING,
+        ];
+        for usage in usages {
+            let bo = unsafe { (self.bo_create)(self.device, width, height, format, usage) };
+            if !bo.is_null() {
+                return Ok(GbmBoGuard { bo, ctx: self });
+            }
         }
-        Ok(GbmBoGuard { bo, ctx: self })
+        Err(format!(
+            "gbm_bo_create returned null for {width}x{height} format=0x{format:08X} \
+             (rendering+linear and rendering)"
+        ))
     }
 }
 
@@ -329,6 +340,7 @@ pub struct DmabufScreenSource {
     event_queue: EventQueue<CaptureState>,
     state: CaptureState,
     gbm: GbmCtx,
+    logged_capture: bool,
 }
 
 impl DmabufScreenSource {
@@ -365,7 +377,7 @@ impl DmabufScreenSource {
 
         let gbm = GbmCtx::open()?;
 
-        Ok(Self { conn, event_queue, state, gbm })
+        Ok(Self { conn, event_queue, state, gbm, logged_capture: false })
     }
 
     /// Captures one frame. Returns `Ok(Some(frame))` on success,
@@ -459,16 +471,12 @@ impl DmabufScreenSource {
         }
 
         // Copy the frame into our dmabuf-backed buffer.
+        // Hyprland does this copy on a later compositor frame and only then
+        // sends `flags` + `ready`. A burst of roundtrips all completes in
+        // the same tick, before that frame, and destroying the screencopy
+        // object here drops the callback so `ready` is never sent.
         frame.copy(&buffer);
-
-        for _ in 0..32 {
-            self.event_queue
-                .roundtrip(&mut self.state)
-                .map_err(|e| format!("screencopy ready roundtrip: {e}"))?;
-            if self.state.ready || self.state.failed {
-                break;
-            }
-        }
+        wait_for_copy(&mut self.event_queue, &mut self.state, Duration::from_millis(500))?;
 
         // Clean up Wayland objects.
         buffer.destroy();
@@ -497,11 +505,13 @@ impl DmabufScreenSource {
             raw_modifier
         };
 
+        let y_invert = self.state.y_invert;
         let dmabuf_frame = DmabufFrame {
             width,
             height,
             drm_format: format,
             modifier,
+            y_invert,
             planes: vec![DmabufPlane {
                 fd: import_fd,
                 stride,
@@ -510,12 +520,70 @@ impl DmabufScreenSource {
             }],
         };
 
-        println!(
-            "[screen_dmabuf] captured {}x{} format=0x{:08X} modifier=0x{:016X} stride={}",
-            dmabuf_frame.width, dmabuf_frame.height, dmabuf_frame.drm_format,
-            dmabuf_frame.modifier, stride
-        );
+        if !self.logged_capture {
+            self.logged_capture = true;
+            println!(
+                "[screen_dmabuf] captured {}x{} format=0x{:08X} modifier=0x{:016X} stride={} y_invert={}",
+                dmabuf_frame.width, dmabuf_frame.height, dmabuf_frame.drm_format,
+                dmabuf_frame.modifier, stride, y_invert
+            );
+        }
 
         Ok(Some(dmabuf_frame))
+    }
+
+}
+
+/// Block until the compositor sends `ready` or `failed`, or `timeout`.
+/// The screencopy frame and wl_buffer must stay alive across this wait.
+fn wait_for_copy(
+    queue: &mut EventQueue<CaptureState>,
+    state: &mut CaptureState,
+    timeout: Duration,
+) -> Result<(), String> {
+    let start = Instant::now();
+    loop {
+        if state.ready || state.failed {
+            return Ok(());
+        }
+        if start.elapsed() >= timeout {
+            return Err("screencopy frame never became ready".into());
+        }
+        queue
+            .dispatch_pending(state)
+            .map_err(|e| format!("screencopy dispatch: {e}"))?;
+        if state.ready || state.failed {
+            return Ok(());
+        }
+        queue.flush().map_err(|e| format!("screencopy flush: {e}"))?;
+        let Some(guard) = queue.prepare_read() else {
+            continue;
+        };
+        let raw_fd = guard.connection_fd().as_raw_fd();
+        let mut pfd = libc::pollfd {
+            fd: raw_fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let remain = timeout
+            .saturating_sub(start.elapsed())
+            .as_millis()
+            .min(i32::MAX as u128) as i32;
+        let n = unsafe { libc::poll(&mut pfd, 1, remain.max(0)) };
+        if n < 0 {
+            let err = std::io::Error::last_os_error();
+            drop(guard);
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(format!("screencopy poll: {err}"));
+        }
+        if n == 0 {
+            drop(guard);
+            return Err("screencopy frame never became ready".into());
+        }
+        guard
+            .read()
+            .map_err(|e| format!("screencopy read: {e}"))?;
     }
 }

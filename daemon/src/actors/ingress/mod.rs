@@ -61,6 +61,10 @@ pub struct DmabufFrame {
     pub height: u32,
     pub drm_format: u32,
     pub modifier: u64,
+    /// `zwlr_screencopy_frame_v1.flags.y_invert`. The SHM path flips rows
+    /// on the CPU; the dmabuf path leaves the bytes on the GPU and the
+    /// overlay shader flips V instead.
+    pub y_invert: bool,
     pub planes: Vec<DmabufPlane>,
 }
 
