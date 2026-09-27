@@ -1867,16 +1867,20 @@ pub fn run(
             if hide {
                 // ENTER_INACTIVE: stop capture, release producers.
                 capture_enabled.store(false, Ordering::Relaxed);
-                let (lock, cvar) = &*capture_wake;
-                let _ = lock.lock().unwrap();
-                cvar.notify_all();
+                {
+                    let (lock, cvar) = &*capture_wake;
+                    let _guard = lock.lock().unwrap();
+                    cvar.notify_all();
+                }
                 println!("[overlay] session inactive — ingress producers paused");
             } else {
                 // ENTER_ACTIVE: restart capture, force-present cached frame (L3).
                 capture_enabled.store(true, Ordering::Relaxed);
-                let (lock, cvar) = &*capture_wake;
-                let _ = lock.lock().unwrap();
-                cvar.notify_all();
+                {
+                    let (lock, cvar) = &*capture_wake;
+                    let _guard = lock.lock().unwrap();
+                    cvar.notify_all();
+                }
                 println!("[overlay] session active — ingress producers resuming");
             }
         }
