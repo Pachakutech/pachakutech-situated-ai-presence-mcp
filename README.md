@@ -39,9 +39,11 @@ This is two components in different environments:
 - **The MCP Binding** (`src/`) is plain Node/TypeScript — it runs on Linux,
   macOS, or WSL, anywhere your agent CLI does.
 - **The Presence Daemon** (`daemon/`) targets Linux but mirrors an Impeller
-  solution for mobile; it needs a a Wayland compositor speaking
-  `wlr-screencopy`/`wlr-layer-shell` (Hyprland is the reference target; see
+  solution for mobile; it calls `wlr-screencopy`/`wlr-layer-shell` on the
+  Wayland compositor (Hyprland is the reference target; see
   [`docs/architecture.md`](docs/architecture.md)).
+
+![Situated Agentic Presence Runtime](docs/assets/nomind.jpg)
 
 ### MCP Binding — any OS with Node
 
