@@ -1,3 +1,5 @@
+Complete
+
 # Package Pachakutech Presence for npm
 
 ## Objective
