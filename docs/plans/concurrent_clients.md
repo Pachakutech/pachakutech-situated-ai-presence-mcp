@@ -1,3 +1,5 @@
+Complete
+
 # Spec: Daemon-Authoritative Caps, IDs, and Concurrent Socket Clients
 
 **Status:** Design for implementation  

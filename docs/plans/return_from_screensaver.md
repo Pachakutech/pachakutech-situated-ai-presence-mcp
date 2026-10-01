@@ -1,3 +1,5 @@
+Complete
+
 # Doc 1 — Bugfix: presence not returning after screensaver / lock
 
 **File suggestion:** `docs/bugfix-presence-return-after-session-hide.md`  

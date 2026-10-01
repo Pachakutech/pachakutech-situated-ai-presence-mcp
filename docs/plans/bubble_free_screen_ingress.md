@@ -1,3 +1,5 @@
+Infeasible
+
 # Feature plan: Bubble-free screen ingress (park gate + cached feed)
 
 **Repo:** `pachakutech-situated-ai-presence-mcp`  
