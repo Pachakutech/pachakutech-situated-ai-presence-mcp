@@ -3,9 +3,9 @@
 Not another agent harness! A **Presence Layer**: a small, typed, policy-gated
 set of actions — Manifestations — through which an agent can put sensory
 stimuli directly into your UI instead of only describing it in text. This
-package is the MCP Binding: the same substrate also binds to AppFunctions on
-Android and App Intents on iOS, but this is the one that runs on your
-desktop against whatever agent you're already running.
+package allows AI to instantiate that avatar in the user space through an
+MCP Binding and a presence daemon evaluating a time-rectified sensory perception:
+the Eros for LLM/AI Logos to learn by.
 
 ## The contract
 
@@ -34,7 +34,7 @@ A one-page version of this contract, formatted for printing/sharing, is in
 
 ## Setup
 
-This is two components in different environments:
+To allow AI to instantiate an avatar for itself, we use two components in different environments:
 
 - **The MCP Binding** (`src/`) is plain Node/TypeScript — it runs on Linux,
   macOS, or WSL, anywhere your agent CLI does.
