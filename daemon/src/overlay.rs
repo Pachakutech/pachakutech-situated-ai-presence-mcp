@@ -1755,6 +1755,7 @@ pub fn run(
     socket_path: &Path,
 ) -> Result<(), String> {
     let mut server = SocketServer::bind(socket_path).map_err(|e| format!("socket bind: {e}"))?;
+    let _pid = crate::socket::PidFile::create(socket_path).map_err(|e| format!("pid file: {e}"))?;
     println!("[socket] listening on {}", socket_path.display());
 
     let locked = Arc::new(AtomicBool::new(false));
@@ -1876,7 +1877,16 @@ pub fn run(
             }
         }
 
-        server.pump(vk, pipeline).map_err(|e| format!("socket pump: {e}"))?;
+        if server.pump(vk, pipeline).map_err(|e| format!("socket pump: {e}"))? {
+            println!("[socket] shutdown requested");
+            capture_enabled.store(false, Ordering::Relaxed);
+            {
+                let (lock, cvar) = &*capture_wake;
+                let _guard = lock.lock().unwrap();
+                cvar.notify_all();
+            }
+            break;
+        }
 
         // Consume force_clear_idle from the lock/screensaver watch threads.
         if force_clear_idle.swap(false, Ordering::Relaxed) {

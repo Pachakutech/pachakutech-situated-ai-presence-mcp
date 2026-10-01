@@ -4,13 +4,20 @@
   "description": "MCP Binding for Pachakutech's Situated Agentic Presence Layer",
   "type": "module",
   "bin": {
-    "presence": "dist/cli.js"
+    "presence": "./dist/cli.js"
   },
   "engines": {
     "node": ">=18"
   },
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
   "files": [
-    "dist"
+    "dist",
+    "native"
   ],
   "repository": {
     "type": "git",
@@ -20,13 +27,19 @@
     "mcp",
     "model-context-protocol",
     "presence",
-    "avatar"
+    "avatar",
+    "wayland",
+    "hyprland",
+    "vulkan"
   ],
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "test": "node --test",
-    "prepublishOnly": "npm run build"
+    "cli": "node dist/cli.js",
+    "build:daemon": "cargo build --release --manifest-path daemon/Cargo.toml",
+    "stage:daemon": "node scripts/stage-daemon.mjs",
+    "prepare:package": "npm run build && npm run build:daemon && npm run stage:daemon",
+    "prepublishOnly": "npm run prepare:package"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.11.0",

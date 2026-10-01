@@ -9,6 +9,9 @@ import { execFileSync } from "node:child_process";
 import { existsSync, accessSync, constants } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { getBundledDaemonPath } from "./daemonBinary.js";
+import { socketPath } from "./daemonClient.js";
+import { socketReachable, startDaemon, statusDaemon, stopDaemon } from "./daemonControl.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SERVER_ENTRY = join(__dirname, "index.js");
@@ -18,11 +21,15 @@ function usage(): never {
     [
       "presence <command>",
       "",
-      "  mcp             Run the Presence MCP server on stdio (what agents spawn)",
-      "  setup claude    Register this server with Claude Code",
-      "  setup codex     Register this server with Codex CLI",
-      "  setup grok      Register this server with Grok CLI",
-      "  doctor          Check that this machine can actually run the daemon later",
+      "  mcp                  Run the Presence MCP server on stdio (what agents spawn)",
+      "  setup claude         Register this server with Claude Code",
+      "  setup codex          Register this server with Codex CLI",
+      "  setup grok           Register this server with Grok CLI",
+      "  doctor               Check platform, bundled daemon, Wayland, and GPU access",
+      "  daemon path          Print the bundled presence-daemon path",
+      "  daemon start         Start the bundled daemon and wait for its socket",
+      "  daemon status        Report whether the daemon socket accepts a connection",
+      "  daemon stop          Ask the daemon to shut down",
     ].join("\n"),
   );
   process.exit(1);
@@ -80,29 +87,50 @@ function canAccess(path: string): boolean {
   }
 }
 
-function doctor() {
+async function doctor() {
   const checks: Array<[string, boolean, string]> = [];
+
+  checks.push([
+    "Linux x64",
+    process.platform === "linux" && process.arch === "x64",
+    `found ${process.platform} ${process.arch}; this package's daemon is Linux x86_64 only`,
+  ]);
 
   const nodeMajor = Number(process.versions.node.split(".")[0]);
   checks.push(["Node >= 18", nodeMajor >= 18, `found ${process.versions.node}`]);
 
+  try {
+    const daemonPath = getBundledDaemonPath();
+    checks.push(["bundled presence-daemon", true, daemonPath]);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message.replaceAll("\n", " ") : String(error);
+    checks.push(["bundled presence-daemon", false, detail]);
+  }
+
   checks.push([
     "WAYLAND_DISPLAY set",
     Boolean(process.env.WAYLAND_DISPLAY),
-    "needed later, for the native daemon to reach the compositor",
+    "the daemon needs a Wayland session to reach the compositor",
+  ]);
+
+  const sock = socketPath();
+  checks.push([
+    "daemon socket reachable",
+    await socketReachable(sock),
+    `not running at ${sock} — start it with: presence daemon start`,
   ]);
 
   checks.push([
     "/dev/dri/renderD128 accessible",
     existsSync("/dev/dri/renderD128") && canAccess("/dev/dri/renderD128"),
-    "needed later for Vulkan; usually automatic via logind session ACLs, otherwise join the 'render' group",
+    "needed for Vulkan; usually automatic via logind session ACLs, otherwise join the 'render' group",
   ]);
 
   const videoDevice = "/dev/video0";
   checks.push([
     `${videoDevice} accessible`,
     !existsSync(videoDevice) || canAccess(videoDevice),
-    "needed later for webcam ingress; join the 'video' group if this fails and a webcam is present",
+    "needed for webcam ingress; join the 'video' group if this fails and a webcam is present",
   ]);
 
   console.log("presence doctor\n");
@@ -110,8 +138,8 @@ function doctor() {
     console.log(`  ${ok ? "ok  " : "warn"}  ${label}${ok ? "" : `  — ${note}`}`);
   }
   console.log(
-    "\nNone of the 'warn' items block the MCP server itself (it falls back to notify-send " +
-      "if presence-daemon isn't running). They matter for the native daemon.",
+    "\nWarn items do not block `presence mcp` (it falls back to notify-send when the " +
+      "daemon socket is down). They matter for the native daemon. npm install does not start it.",
   );
 }
 
@@ -128,7 +156,25 @@ switch (command) {
     else usage();
     break;
   case "doctor":
-    doctor();
+    await doctor();
+    break;
+  case "daemon":
+    if (sub === "path") {
+      try {
+        console.log(getBundledDaemonPath());
+      } catch (error) {
+        console.error(error instanceof Error ? error.message : error);
+        process.exit(1);
+      }
+    } else if (sub === "start") {
+      process.exit(await startDaemon());
+    } else if (sub === "status") {
+      process.exit(await statusDaemon());
+    } else if (sub === "stop") {
+      process.exit(await stopDaemon());
+    } else {
+      usage();
+    }
     break;
   default:
     usage();

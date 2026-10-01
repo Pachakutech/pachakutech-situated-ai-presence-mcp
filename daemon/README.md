@@ -27,7 +27,9 @@ for how the two talk to each other.
   `PrepareForSleep`. Do not leave an older fullscreen-capture build running;
   that OOMed Hyprland.
 - `src/protocol.rs` / `src/socket.rs` — JSONL over
-  `$XDG_RUNTIME_DIR/pachakutech/presence.sock`. One connection at a time.
+  `$XDG_RUNTIME_DIR/pachakutech/presence.sock` (override
+  `PRESENCE_DAEMON_SOCKET`). A `shutdown` proposal replies, then the overlay
+  loop exits. Drop unlinks the socket and removes `presence.pid` beside it.
 - `src/registry.rs` + `src/actors/` — Control (ingest `.splat`/`.ply` into
   Scene Memory), Presence (live ids, stub `text_to_pose_code`), GPU layout
   types, V4L2 and `wlr-screencopy` (SHM) ingress clients that are not ticked.

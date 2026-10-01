@@ -133,7 +133,7 @@ Replace or update the package metadata to follow this structure:
   ],
 
   "engines": {
-    "node": ">=20"
+    "node": ">=18"
   },
 
   "os": [
@@ -146,7 +146,7 @@ Replace or update the package metadata to follow this structure:
 
   "repository": {
     "type": "git",
-    "url": "git+[https://github.com/Pachakutech/pachakutech-situated-ai-presence-mcp.git](https://github.com/Pachakutech/pachakutech-situated-ai-presence-mcp.git)"
+    "url": "git+https://github.com/Pachakutech/pachakutech-situated-ai-presence-mcp.git"
   },
 
   "keywords": [
@@ -190,8 +190,11 @@ Replace or update the package metadata to follow this structure:
 - `presence` is a multi-command user CLI.
 - `presence mcp` is the specific command that launches the stdio MCP server.
 - The `os` and `cpu` fields intentionally prevent unsupported installations.
+- `engines.node` stays `>=18`, matching `presence doctor` and the existing engine cutoff. The TypeScript does not require Node 20.
 - `prepublishOnly` builds artifacts only when publishing. It must not run for ordinary consumers installing the package.
+- `prepare:package` means "assemble the tarball" (TypeScript, release daemon, copy into `native/`). It is not a second npm package. The name stays because `prepublishOnly` already calls it.
 - Do not place the Rust build under `postinstall`, `install`, or `prepare` if `prepare` would run for consumers. End users must never build Rust locally.
+- The repository URL in this file must be a plain `git+https://…` string. A markdown link is not valid JSON, and a trailing comma after `repository` is not either.
 
 ---
 

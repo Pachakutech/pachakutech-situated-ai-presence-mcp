@@ -32,71 +32,77 @@ remains versatile is in [`skills/presence/SKILL.md`](skills/presence/SKILL.md).
 A one-page version of this contract, formatted for printing/sharing, is in
 [`docs/contract-onepager.html`](docs/contract-onepager.html).
 
-## Setup
+## Install — Linux x86_64
 
-To allow AI to instantiate an avatar for itself, we use two components in different environments:
+```bash
+npm install -g @pachakutech/presence-mcp
+presence doctor
+presence daemon start
+presence setup claude
+```
 
-- **The MCP Binding** (`src/`) is plain Node/TypeScript — it runs on Linux,
-  macOS, or WSL, anywhere your agent CLI does.
-- **The Presence Daemon** (`daemon/`) targets Linux but mirrors an Impeller
-  solution for mobile; it calls `wlr-screencopy`/`wlr-layer-shell` on the
-  Wayland compositor (Hyprland is the reference target; see
-  [`docs/architecture.md`](docs/architecture.md)).
+`@pachakutech/presence-mcp` is one package. It includes the Node MCP binding,
+the `presence` CLI, and a prebuilt Linux x86_64 `presence-daemon`. You do not
+need Rust or Cargo, and install does not compile or start anything.
+
+`presence setup claude` runs `claude mcp add presence -- presence mcp`.
+`presence setup codex` and `presence setup grok` do the equivalent for Codex
+and Grok CLI. Your agent client then launches `presence mcp` over stdio. That
+process talks to the daemon on a local Unix socket
+(`$XDG_RUNTIME_DIR/pachakutech/presence.sock`).
+
+The daemon is a separate process. It owns the Wayland and Vulkan integration
+and runs only in a logged-in Linux desktop session, as that user, never as
+root. Start it yourself with `presence daemon start`. Stop it with
+`presence daemon stop`. `presence doctor` is the diagnostic.
+
+npm can ship the executable. It cannot ship the host session:
+
+- Linux x86_64.
+- A Wayland desktop session (`WAYLAND_DISPLAY`).
+- A Vulkan loader and a vendor driver.
+- GPU render-node access (`/dev/dri/renderD128`).
+- Webcam access only when webcam features are used.
+- Hyprland is the reference compositor.
+
+On a machine with no Vulkan driver the daemon prints a clear error and exits.
+On a working desktop it reports the GPU name and dma_buf support, runs a
+one-splat compute smoke tick (fatal if dispatch fails), then listens on the
+socket above. `presence daemon path` prints the bundled binary it will launch.
+Stdout and stderr from that process go to
+`$XDG_RUNTIME_DIR/pachakutech/presence-daemon.log`.
 
 ![Situated Agentic Presence Runtime](docs/assets/nomind.jpg)
 
-### MCP Binding — any OS with Node
+On Omarchy, [`docs/omarchy.md`](docs/omarchy.md) describes a planned
+`omarchy-mise-install` line. That path is not verified yet. The npm install
+above is the one to use.
 
-Not yet published to npm — clone and build until it is:
+## Building from source — contributors
 
-```
+Rust and Cargo are required only when building the daemon from this
+repository. A normal npm install uses the bundled binary.
+
+Shader compile needs `glslangValidator` at build time (Arch/Omarchy: `glslang`).
+Run time needs `vulkan-icd-loader` and a vendor driver (`vulkan-intel`,
+`vulkan-radeon`, or `nvidia-utils`).
+
+```bash
 git clone https://github.com/Pachakutech/pachakutech-situated-ai-presence-mcp.git
 cd pachakutech-situated-ai-presence-mcp
 npm install
-npm run build
-npm link          # puts `presence` on your PATH from this checkout
-presence setup claude
+npm run prepare:package   # tsc, cargo build --release, copy into native/linux-x64
+npm link                  # puts `presence` on your PATH from this checkout
 ```
 
-`presence setup claude` runs `claude mcp add presence -- presence mcp` for
-you. `presence setup codex` and `presence setup grok` do the equivalent for
-Codex and Grok CLI. Once this is published, the same setup becomes:
+`prepare:package` means "assemble what the tarball contains." It is not a
+second npm package. `npm publish` runs it via `prepublishOnly`. `npm install`
+does not.
 
-```
-npm install -g @pachakutech/presence-mcp
-presence setup claude
-```
-
-On Omarchy specifically, see [`docs/omarchy.md`](docs/omarchy.md) for the
-planned one-line install via `omarchy-mise-install` — that path needs this
-published to npm first (or a GitHub Release with a built `dist/`); it's not
-verified to work yet, so clone-and-build is the reliable path until then.
-
-Run `presence doctor` any time to check what this machine can support —
-Node, `WAYLAND_DISPLAY`, `/dev/dri/renderD128`, `/dev/video0`. Those
-matter for the daemon, not for the stub.
-
-### Presence Daemon — Linux, with a Vulkan driver installed
-
-Required for anything past notify-send. Needs a Rust toolchain, `glslang`
-(shader compile at **build** time), and a working Vulkan ICD at **run**
-time. The binary is not installed on `PATH`:
-
-```
-# Arch/Omarchy: glslang + vulkan-icd-loader + vendor driver
-# (vulkan-radeon, vulkan-intel, or nvidia-utils)
-cd daemon
-cargo build
-./target/debug/presence-daemon
-```
-
-On a machine with no Vulkan driver, it prints a clear error and exits.
-On a working desktop it reports the GPU name and dma_buf support, runs a
-one-splat compute smoke tick (fatal if dispatch fails), then listens on
-`$XDG_RUNTIME_DIR/pachakutech/presence.sock`. Last checked on Intel Iris
-Xe (TGL GT2): dma_buf import yes; smoke projected splat 0 to (640, 360).
-See [`daemon/README.md`](daemon/README.md) for what's built versus what's
-next.
+See [`daemon/README.md`](daemon/README.md) for the overlay and ingress
+details. The daemon presents a 220×220 layer-shell disc
+(`exclusive_zone = -1`). Do not leave an older fullscreen-capture build
+running; that exhausted Hyprland's memory.
 
 ## Where this runs, and what it needs access to
 
@@ -142,10 +148,11 @@ The MCP surface — schemas, Policy Gate, CLI, and the Unix-socket client —
 is real. With `presence-daemon` up, tool calls hit the Rust registry; without
 it, they hit `notify-send` plus `~/.local/state/pachakutech-presence/log.jsonl`.
 The daemon owns a Vulkan device and a compute splat pipeline that smokes on
-startup. It does **not** yet present to Hyprland, keep that pipeline alive
-for actors, or tick webcam/screen capture. `addArtifact`'s `sourceUri` is a
-local `.splat`/`.ply` path the daemon reads from disk — description-only
-holds an empty cloud. The boundary is deliberate: the daemon owns the GPU,
+startup, and it presents a 220×220 layer-shell disc on Hyprland. Screen
+ingress imports a dmabuf when the device and compositor allow it, and
+otherwise falls back to a shared-memory copy at about 10 fps. `addArtifact`'s
+`sourceUri` is a local `.splat`/`.ply` path the daemon reads from disk —
+description-only holds an empty cloud. The boundary is deliberate: the daemon owns the GPU,
 the MCP layer owns the contract, and they talk over a small, typed protocol
 rather than sharing buffers. See [`docs/architecture.md`](docs/architecture.md).
 

@@ -9,7 +9,7 @@ use serde_json::json;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 struct Client {
@@ -20,8 +20,15 @@ struct Client {
 /// Non-blocking Unix JSONL server, pumped from the overlay event loop.
 pub struct SocketServer {
     listener: UnixListener,
+    path: PathBuf,
     clients: Vec<Client>,
     registry: Mutex<Registry>,
+}
+
+enum ClientRead {
+    Keep,
+    Closed,
+    Shutdown,
 }
 
 impl SocketServer {
@@ -34,7 +41,12 @@ impl SocketServer {
         }
         let listener = UnixListener::bind(socket_path)?;
         listener.set_nonblocking(true)?;
-        Ok(Self { listener, clients: Vec::new(), registry: Mutex::new(Registry::new()) })
+        Ok(Self {
+            listener,
+            path: socket_path.to_path_buf(),
+            clients: Vec::new(),
+            registry: Mutex::new(Registry::new()),
+        })
     }
 
     pub fn listener_fd(&self) -> RawFd {
@@ -45,7 +57,8 @@ impl SocketServer {
         self.clients.iter().map(|c| c.stream.as_raw_fd())
     }
 
-    pub fn pump(&mut self, vk: &VulkanContext, pipeline: &SplatPipeline) -> io::Result<()> {
+    /// `Ok(true)` means a client asked the process to exit after its reply was written.
+    pub fn pump(&mut self, vk: &VulkanContext, pipeline: &SplatPipeline) -> io::Result<bool> {
         loop {
             match self.listener.accept() {
                 Ok((stream, _)) => {
@@ -60,32 +73,70 @@ impl SocketServer {
         let mut i = 0;
         while i < self.clients.len() {
             match read_client(&mut self.clients[i], vk, pipeline, &self.registry) {
-                Ok(true) => i += 1,
-                Ok(false) | Err(_) => {
+                Ok(ClientRead::Keep) => i += 1,
+                Ok(ClientRead::Closed) | Err(_) => {
                     self.clients.remove(i);
+                }
+                Ok(ClientRead::Shutdown) => {
+                    self.clients.remove(i);
+                    return Ok(true);
                 }
             }
         }
-        Ok(())
+        Ok(false)
     }
 }
 
-/// Returns Ok(true) to keep the client, Ok(false) if it closed.
+impl Drop for SocketServer {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// `presence.pid` beside the socket. Removed on drop only when it still names this process.
+pub struct PidFile {
+    path: PathBuf,
+}
+
+impl PidFile {
+    pub fn create(socket_path: &Path) -> io::Result<Self> {
+        let path = socket_path.with_extension("pid");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, format!("{}\n", std::process::id()))?;
+        Ok(Self { path })
+    }
+}
+
+impl Drop for PidFile {
+    fn drop(&mut self) {
+        let Ok(text) = std::fs::read_to_string(&self.path) else {
+            return;
+        };
+        if text.trim() == std::process::id().to_string() {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// Keep the client, drop it, or leave the overlay loop after the reply is flushed.
 fn read_client(
     client: &mut Client,
     vk: &VulkanContext,
     pipeline: &SplatPipeline,
     registry: &Mutex<Registry>,
-) -> io::Result<bool> {
+) -> io::Result<ClientRead> {
     let mut tmp = [0u8; 4096];
     loop {
         match client.stream.read(&mut tmp) {
-            Ok(0) => return Ok(false),
+            Ok(0) => return Ok(ClientRead::Closed),
             Ok(n) => client.buf.extend_from_slice(&tmp[..n]),
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
             Err(e) => return Err(e),
         }
     }
+    let mut shutdown = false;
     while let Some(pos) = client.buf.iter().position(|&b| b == b'\n') {
         let line = client.buf.drain(..=pos).collect::<Vec<_>>();
         let line = String::from_utf8_lossy(&line);
@@ -93,33 +144,45 @@ fn read_client(
         if line.is_empty() {
             continue;
         }
-        let result = match serde_json::from_str::<Proposal>(line) {
+        let (result, stop) = match serde_json::from_str::<Proposal>(line) {
             Ok(proposal) => dispatch(proposal, vk, pipeline, registry),
             Err(e) => {
                 eprintln!("[socket] malformed proposal: {e}");
-                ProposalResult::err("unknown", format!("malformed proposal: {e}"))
+                (ProposalResult::err("unknown", format!("malformed proposal: {e}")), false)
             }
         };
         let response = serde_json::to_string(&result).unwrap_or_else(|_| {
             json!({ "status": "error", "error": "failed to serialize result" }).to_string()
         });
-        if writeln!(client.stream, "{response}").is_err() {
-            return Ok(false);
+        if writeln!(client.stream, "{response}").is_err() || client.stream.flush().is_err() {
+            return Ok(ClientRead::Closed);
+        }
+        if stop {
+            shutdown = true;
+            break;
         }
     }
-    Ok(true)
+    if shutdown {
+        Ok(ClientRead::Shutdown)
+    } else {
+        Ok(ClientRead::Keep)
+    }
 }
 
+/// Second value is true when the overlay loop should exit after this reply.
 fn dispatch(
     proposal: Proposal,
     vk: &VulkanContext,
     pipeline: &SplatPipeline,
     registry: &Mutex<Registry>,
-) -> ProposalResult {
+) -> (ProposalResult, bool) {
     let proposal_id = proposal.proposal_id().to_string();
+    if matches!(proposal, Proposal::Shutdown { .. }) {
+        return (ProposalResult::ok(&proposal_id, None), true);
+    }
     let mut reg = registry.lock().expect("registry mutex poisoned");
 
-    match proposal {
+    let result = match proposal {
         Proposal::HighlightRegion { description, duration_seconds, .. } => {
             reg.highlight_region(vk, &description, duration_seconds);
             ProposalResult::ok(&proposal_id, Some(json!({ "regionId": format!("r-{proposal_id}") })))
@@ -146,5 +209,7 @@ fn dispatch(
             Ok(()) => ProposalResult::ok(&proposal_id, None),
             Err(e) => ProposalResult::err(&proposal_id, e),
         },
-    }
+        Proposal::Shutdown { .. } => ProposalResult::ok(&proposal_id, None),
+    };
+    (result, false)
 }

@@ -14,6 +14,13 @@ use vulkan::VulkanContext;
 const PIPELINE_CAPACITY: u32 = 256;
 
 fn socket_path() -> PathBuf {
+    // Same override the Node client reads, so `presence daemon stop` reaches
+    // the process it started.
+    if let Ok(over) = std::env::var("PRESENCE_DAEMON_SOCKET") {
+        if !over.is_empty() {
+            return PathBuf::from(over);
+        }
+    }
     let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
     PathBuf::from(runtime_dir).join("pachakutech").join("presence.sock")
 }

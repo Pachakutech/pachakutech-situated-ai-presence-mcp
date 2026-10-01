@@ -61,6 +61,12 @@ pub enum Proposal {
         #[serde(rename = "artifactId")]
         artifact_id: String,
     },
+    /// Ask the process to leave the overlay loop after this response is written.
+    #[serde(rename = "shutdown")]
+    Shutdown {
+        #[serde(rename = "proposalId")]
+        proposal_id: String,
+    },
 }
 
 impl Proposal {
@@ -71,7 +77,8 @@ impl Proposal {
             | Proposal::AnimatePresence { proposal_id, .. }
             | Proposal::RetirePresence { proposal_id, .. }
             | Proposal::AddArtifact { proposal_id, .. }
-            | Proposal::RetireArtifact { proposal_id, .. } => proposal_id,
+            | Proposal::RetireArtifact { proposal_id, .. }
+            | Proposal::Shutdown { proposal_id } => proposal_id,
         }
     }
 }
