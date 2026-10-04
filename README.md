@@ -74,6 +74,35 @@ Stdout and stderr from that process go to
 
 ![Situated Agentic Presence Runtime](docs/assets/nomind.jpg)
 
+## Updating
+
+Presence does not auto-update.
+
+Check for available global npm updates:
+
+```bash
+npm outdated -g --depth=0
+```
+
+Update Presence:
+
+```bash
+npm update -g @pachakutech/presence-mcp
+```
+
+Restart the local daemon after updating:
+
+```bash
+presence daemon restart
+```
+
+Confirm installed versions:
+
+```bash
+presence --version
+presence daemon status
+```
+
 On Omarchy, [`docs/omarchy.md`](docs/omarchy.md) describes a planned
 `omarchy-mise-install` line. That path is not verified yet. The npm install
 above is the one to use.
