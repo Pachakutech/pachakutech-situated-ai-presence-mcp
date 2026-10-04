@@ -417,8 +417,8 @@ This gives your daemon a reliable model of what it is expressing, while its audi
 
 Deliverables:
 
-- `humanoid_proxy.glb` with working `jaw`.
-- Confirmed exported viseme morph targets.
+- `humanoid_proxy.glb` with working `jaw`. -- Done
+- Confirmed exported viseme morph targets. -- Done, is assets/
 - `avatar_manifest.json` mapping actual joint and target names.
 - Topology fingerprint and a deliberately small splat-bind test cloud.
 
