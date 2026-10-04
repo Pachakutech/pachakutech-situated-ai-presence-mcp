@@ -502,6 +502,15 @@ Pass criteria:
 
 ## Milestones
 
+## Speech / face animation
+
+Jaw openness and viseme morph weights are driven by a separate speech
+pipeline. See [`text_to_cues.md`](./text_to_cues.md) for text → TTS →
+Rhubarb → `faceanim` and for how those weights are applied to this proxy.
+
+This document does not redefine that pipeline; it only requires that the
+runtime accept a time-varying jaw scalar and a small set of morph weights.
+
 ### M0: Import and diagnostics
 
 Deliverable: an A-pose proxy mesh and skeleton load correctly in the Vulkan engine, with wireframe, joints, and normalized weights visible.

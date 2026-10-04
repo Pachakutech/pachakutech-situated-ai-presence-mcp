@@ -1,4 +1,6 @@
-**Yes — keep the existing pure-DQ contract intact for non-rigged artifacts, and treat mesh+barycentric as an upstream producer that feeds the same `AnimatedSplatGpu` buffer.** You do not need to rewrite the projection/eviction shaders or break the current layout for v1.
+architectural decision for integrating the skinned-proxy avatar with the existing `AnimatedSplatGpu` / pure-DQ path.
+
+**keep the existing pure-DQ contract intact for non-rigged artifacts, and treat mesh+barycentric as an upstream producer that feeds the same `AnimatedSplatGpu` buffer.** You do not need to rewrite the projection/eviction shaders or break the current layout for v1.
 
 ### What the current contract already assumes
 
