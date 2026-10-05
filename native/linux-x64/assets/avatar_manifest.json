@@ -1,0 +1,14 @@
+{
+  "asset": "humanoid_proxy_rigged.glb",
+  "splatbind": "humanoid_proxy_rigged.splatbind",
+  "units": "meters",
+  "up": "+Y",
+  "forward": "+Z",
+  "left": "+X",
+  "rest_pose": "A",
+  "ground_offset_y": -0.028042316436767578,
+  "jaw_joint": "jaw",
+  "jaw_axis": [1, 0, 0],
+  "jaw_max_open_deg": 25.0,
+  "note": "The GLB owns the skeleton. This file only names the mesh, the splatbind, and the jaw joint. Joint lists and clips in older copies of this file are not authoritative."
+}
