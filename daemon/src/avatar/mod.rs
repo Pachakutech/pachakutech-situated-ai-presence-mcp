@@ -4,9 +4,8 @@
 //! them into the *existing* AnimatedSplatGpu buffer as rigid (skin = None)
 //! splats. The projection shader and gpu_layout.rs are untouched.
 //!
-//! Status: compile- and unit-test-verified only. Nothing rasterizes projected
-//! splats to the screen yet, and the daemon has no >=30 Hz tick, so this is
-//! not wired into the run loop.
+//! The overlay loop ticks this at 30 Hz and draws the projected discs. Speech
+//! stays out: `FaceFrame` is demo motion or a socket command.
 pub mod debug;
 pub mod deform;
 pub mod glb;
@@ -16,9 +15,10 @@ pub mod splatbind;
 #[cfg(test)]
 mod tests;
 
-use crate::actors::gpu_layout::{to_gpu_splat, FLAG_SOFT_GAUSSIAN_FALLOFF};
+use crate::actors::gpu_layout::{to_gpu_splat, DualQuatGpu, ProjectionUniformsGpu, FLAG_SOFT_GAUSSIAN_FALLOFF};
 use crate::actors::scene_memory::GaussianSplat;
 use crate::pipeline::SplatPipeline;
+use crate::protocol::AvatarCommand;
 use deform::{DeformStats, ProxyMesh, Reconstructor};
 use math::*;
 use rig::Rig;
@@ -57,9 +57,26 @@ pub struct AvatarActor {
     clip_time: f32,
     clip_loop: bool,
     walk_target: Option<[f32; 2]>,
+    /// When set, the tick sways yaw and opens the jaw. Socket controls clear it.
+    pub demo_motion: bool,
+    time: f32,
     posed_verts: Vec<[f32; 3]>,
     pub posed: Vec<GaussianSplat>,
     pub stats: DeformStats,
+}
+
+/// Rigid camera: on +Z, looking at the origin, with the body upright.
+/// `Ry(π)` turns the face (+Z) toward the camera. Translation is `-R * camera`.
+fn body_camera_dq() -> DualQuatGpu {
+    let q = quat_axis_angle([0.0, 1.0, 0.0], std::f32::consts::PI);
+    let cam_y = 0.90_f32;
+    let cam_z = 2.55_f32;
+    let t = [0.0_f32, -cam_y, cam_z];
+    let dual = quat_mul([t[0], t[1], t[2], 0.0], q);
+    DualQuatGpu {
+        real: [q[3], q[0], q[1], q[2]],
+        dual: [dual[3] * 0.5, dual[0] * 0.5, dual[1] * 0.5, dual[2] * 0.5],
+    }
 }
 
 impl AvatarActor {
@@ -86,6 +103,7 @@ impl AvatarActor {
             face: FaceFrame::default(),
             root: RootState { pos: [0.; 3], yaw: 0. },
             clip: None, clip_time: 0., clip_loop: true, walk_target: None,
+            demo_motion: true, time: 0.,
             posed_verts: vec![], posed: vec![], stats: DeformStats::default(),
         };
         a.play("idle", true);
@@ -106,8 +124,35 @@ impl AvatarActor {
     pub fn set_face(&mut self, f: FaceFrame) { self.face = f; }
     pub fn walk_to(&mut self, x: f32, z: f32) { self.walk_target = Some([x, z]); }
 
+    pub fn apply_command(&mut self, cmd: AvatarCommand) {
+        match cmd {
+            AvatarCommand::Rest => {
+                self.demo_motion = false;
+                self.rest();
+                self.walk_target = None;
+                self.root.yaw = 0.0;
+                self.face = FaceFrame::default();
+            }
+            AvatarCommand::Face { jaw_open, morph_index, morph_weight } => {
+                self.demo_motion = false;
+                let mut morphs = vec![0.0; self.mesh.morph_names.len()];
+                if let Some(i) = morph_index {
+                    if let Some(slot) = morphs.get_mut(i as usize) {
+                        *slot = morph_weight;
+                    }
+                }
+                self.face = FaceFrame { jaw_open, morphs };
+            }
+            AvatarCommand::Walk { x, z } => {
+                self.demo_motion = false;
+                self.walk_to(x, z);
+            }
+        }
+    }
+
     /// Advance clock and locomotion by dt seconds.
     pub fn advance(&mut self, dt: f32) {
+        self.time += dt;
         self.clip_time += dt;
         if let Some([tx, tz]) = self.walk_target {
             let (dx, dz) = (tx - self.root.pos[0], tz - self.root.pos[2]);
@@ -126,6 +171,26 @@ impl AvatarActor {
                 self.root.pos[2] += self.root.yaw.cos() * step;
             }
         }
+        if self.demo_motion {
+            if self.walk_target.is_none() {
+                self.root.yaw = 0.45 * (self.time * 0.7).sin();
+            }
+            self.face.jaw_open = 0.5 + 0.5 * (self.time * 1.7).sin();
+        }
+    }
+
+    /// Camera for the 220px layer: body centered, facing the disc, +Y up.
+    pub fn layer_camera(width: f32, height: f32, frame: u32) -> ProjectionUniformsGpu {
+        let focal = width.max(height) * 1.2;
+        ProjectionUniformsGpu::new(
+            body_camera_dq(),
+            [focal, -focal],
+            [width * 0.5, height * 0.5],
+            [width, height],
+            0.022,
+            0,
+            frame,
+        )
     }
 
     /// Run clip -> face -> FK -> morph/LBS -> barycentric reconstruction.

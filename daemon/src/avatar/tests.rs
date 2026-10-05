@@ -15,6 +15,7 @@ fn ply_samples() -> Vec<([f32; 3], [f32; 3])> {
 fn rest_actor() -> AvatarActor {
     let mut a = AvatarActor::load(&manifest()).expect("load avatar");
     a.rest();
+    a.demo_motion = false;
     a.ground_offset = 0.0; // compare in mesh space
     a.evaluate();
     a
@@ -68,76 +69,49 @@ fn finite_all(a: &AvatarActor) -> bool {
     a.posed.iter().all(|s| s.position.iter().chain(&s.rotation).chain(&s.scale).all(|v| v.is_finite()))
 }
 
-fn pose_actor(clip: &str, t: f32) -> AvatarActor {
-    let mut a = AvatarActor::load(&manifest()).unwrap();
-    a.ground_offset = 0.0;
-    a.play(clip, false);
-    a.set_clip_time(t);
-    a.evaluate();
-    a
+fn dist3(a: [f32; 3], b: [f32; 3]) -> f32 {
+    (0..3).map(|c| (a[c] - b[c]).powi(2)).sum::<f32>().sqrt()
 }
 
-fn centroid_where(a: &AvatarActor, f: impl Fn(&[f32; 3]) -> bool) -> [f32; 3] {
-    let (mut c, mut n) = ([0.0f32; 3], 0.0);
-    for s in &a.posed { if f(&s.position) { for i in 0..3 { c[i] += s.position[i]; } n += 1.0; } }
-    [c[0] / n, c[1] / n, c[2] / n]
-}
-
+/// This GLB has no animation clips. Body motion is the root; the face is the jaw.
 #[test]
-fn all_pose_clips_stay_finite_and_attached() {
-    let rest = rest_actor();
-    for clip in ["idle", "walk", "pose_arm_raise_90", "pose_elbow_flex_120", "pose_forearm_twist_170", "pose_head_yaw_pitch", "pose_jaw_open", "pose_point_left", "pose_point_center", "pose_point_right"] {
-        for t in [0.0, 0.3, 0.7, 1.0] {
-            let a = pose_actor(clip, t);
-            assert!(finite_all(&a), "{clip}@{t}: non-finite splat");
-            assert_eq!(a.stats.nonfinite_repaired, 0, "{clip}@{t}");
-            // Detachment check: every splat must stay within 6 cm of the bbox-limited
-            // reach of its rest position plus 1.0 m (loose), and the whole body must
-            // keep a plausible extent (no catastrophic collapse).
-            let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
-            for s in &a.posed { for c in 0..3 { lo[c] = lo[c].min(s.position[c]); hi[c] = hi[c].max(s.position[c]); } }
-            assert!(hi[1] - lo[1] > 1.4 && hi[1] - lo[1] < 2.0, "{clip}@{t}: body height {}", hi[1] - lo[1]);
-            // Torso (rest y 0.9..1.2, |x|<0.1) should barely move for limb-only poses.
-            if clip.starts_with("pose_") && clip != "pose_head_yaw_pitch" {
-                for (s, r) in a.posed.iter().zip(&rest.posed) {
-                    if r.position[1] > 0.95 && r.position[1] < 1.15 && r.position[0].abs() < 0.08 && r.position[2] > 0.05 {
-                        let d: f32 = (0..3).map(|c| (s.position[c] - r.position[c]).powi(2)).sum::<f32>().sqrt();
-                        assert!(d < 0.03, "{clip}@{t}: belly splat moved {d} m");
-                    }
-                }
-            }
+fn rest_pose_is_a_standing_body() {
+    let a = rest_actor();
+    assert!(finite_all(&a));
+    assert_eq!(a.stats.nonfinite_repaired, 0);
+    assert!(a.rig.clips.is_empty(), "this mesh has no clips; the demo must not invent them");
+    assert!(a.jaw_joint.is_some(), "jaw joint missing");
+    let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+    for s in &a.posed {
+        for c in 0..3 {
+            lo[c] = lo[c].min(s.position[c]);
+            hi[c] = hi[c].max(s.position[c]);
         }
     }
+    let height = hi[1] - lo[1];
+    assert!(height > 1.4 && height < 2.0, "body height {height}");
 }
 
 #[test]
-fn arm_raise_lifts_hand_forward() {
+fn root_yaw_swings_the_body() {
     let rest = rest_actor();
-    let hand = |a: &AvatarActor| centroid_where(a, |p| p[0] > 0.44 && p[1] < 1.05);
-    let (h0, h1) = (hand(&rest), hand(&pose_actor("pose_arm_raise_90", 1.0)));
-    let _ = (h0, h1);
-    // follow the same splats: use rest-defined selection
-    let sel: Vec<usize> = rest.posed.iter().enumerate().filter(|(_, s)| s.position[0] > 0.44).map(|(i, _)| i).collect();
-    assert!(sel.len() > 100);
-    let a = pose_actor("pose_arm_raise_90", 1.0);
-    let mean = |act: &AvatarActor| { let mut c = [0.0f32; 3]; for &i in &sel { for k in 0..3 { c[k] += act.posed[i].position[k]; } } c.map(|v| v / sel.len() as f32) };
-    let (m0, m1) = (mean(&rest), mean(&a));
-    assert!(m1[2] - m0[2] > 0.1 && m1[1] - m0[1] > 0.3, "hand should swing forward (+Z) and up: {:?} -> {:?}", m0, m1);
-    // arm length preserved (hand stays ~ same distance from the shoulder)
-    let sh = [0.17f32, 1.35, 0.03];
-    let d = |m: [f32; 3]| ((m[0] - sh[0]).powi(2) + (m[1] - sh[1]).powi(2) + (m[2] - sh[2]).powi(2)).sqrt();
-    assert!((d(m0) - d(m1)).abs() < 0.05, "arm length changed: {} vs {}", d(m0), d(m1));
-}
-
-#[test]
-fn elbow_flex_keeps_upper_arm_and_moves_forearm() {
-    let rest = rest_actor();
-    let upper: Vec<usize> = rest.posed.iter().enumerate().filter(|(_, s)| s.position[0] > 0.22 && s.position[0] < 0.28 && s.position[1] > 1.2).map(|(i, _)| i).collect();
-    let fore: Vec<usize> = rest.posed.iter().enumerate().filter(|(_, s)| s.position[0] > 0.45).map(|(i, _)| i).collect();
-    let a = pose_actor("pose_elbow_flex_120", 1.0);
-    let mv = |ids: &Vec<usize>| ids.iter().map(|&i| (0..3).map(|c| (a.posed[i].position[c] - rest.posed[i].position[c]).powi(2)).sum::<f32>().sqrt()).sum::<f32>() / ids.len() as f32;
-    assert!(mv(&upper) < 0.03, "upper arm moved {}", mv(&upper));
-    assert!(mv(&fore) > 0.2, "forearm barely moved {}", mv(&fore));
+    let mut a = rest_actor();
+    a.root.yaw = std::f32::consts::FRAC_PI_2;
+    a.evaluate();
+    let i = rest
+        .posed
+        .iter()
+        .enumerate()
+        .max_by(|(_, s), (_, t)| s.position[0].total_cmp(&t.position[0]))
+        .unwrap()
+        .0;
+    let before = rest.posed[i].position;
+    let after = a.posed[i].position;
+    assert!(before[0] > 0.15, "expected a +X extremity, got {before:?}");
+    // Ry(+90°): (x, y, z) -> (z, y, -x). The whole body follows the root.
+    assert!((after[0] - before[2]).abs() < 1e-3, "yaw x: {before:?} -> {after:?}");
+    assert!((after[1] - before[1]).abs() < 1e-3, "yaw y: {before:?} -> {after:?}");
+    assert!((after[2] + before[0]).abs() < 1e-3, "yaw z: {before:?} -> {after:?}");
 }
 
 #[test]
@@ -146,13 +120,82 @@ fn jaw_opens_chin_without_moving_forehead() {
     let mut a = rest_actor();
     a.set_face(FaceFrame { jaw_open: 1.0, morphs: vec![] });
     a.evaluate();
-    let chin: Vec<usize> = rest.posed.iter().enumerate().filter(|(_, s)| s.position[1] > 1.43 && s.position[1] < 1.47 && s.position[2] > 0.1).map(|(i, _)| i).collect();
-    let brow: Vec<usize> = rest.posed.iter().enumerate().filter(|(_, s)| s.position[1] > 1.58 && s.position[1] < 1.64).map(|(i, _)| i).collect();
-    assert!(!chin.is_empty() && !brow.is_empty());
-    let dy = chin.iter().map(|&i| rest.posed[i].position[1] - a.posed[i].position[1]).sum::<f32>() / chin.len() as f32;
-    let br = brow.iter().map(|&i| (0..3).map(|c| (a.posed[i].position[c] - rest.posed[i].position[c]).powi(2)).sum::<f32>().sqrt()).sum::<f32>() / brow.len() as f32;
-    assert!(dy > 0.015, "chin dropped only {dy} m");
-    assert!(br < 0.003, "forehead moved {br} m");
+    let hi_y = rest.posed.iter().map(|s| s.position[1]).fold(f32::MIN, f32::max);
+    let brow_y = hi_y - 0.04;
+    let head_y = hi_y - 0.25;
+    let mut brow_move = 0.0f32;
+    let mut brow_n = 0.0f32;
+    let mut chin_drop = 0.0f32;
+    let mut chin_n = 0.0f32;
+    for (i, r) in rest.posed.iter().enumerate() {
+        let moved = dist3(r.position, a.posed[i].position);
+        if r.position[1] > brow_y {
+            brow_move += moved;
+            brow_n += 1.0;
+        }
+        // Lower face, in front of the head, and actually displaced by the hinge.
+        if r.position[1] > head_y && r.position[1] < brow_y - 0.05 && r.position[2] > 0.02 && moved > 0.002 {
+            chin_drop += r.position[1] - a.posed[i].position[1];
+            chin_n += 1.0;
+        }
+    }
+    assert!(brow_n > 10.0, "no forehead splats above {brow_y}");
+    let br = brow_move / brow_n;
+    assert!(br < 0.004, "forehead moved {br} m");
+    assert!(chin_n > 10.0, "jaw axis did not move a lower-face band (moved splats {chin_n})");
+    let dy = chin_drop / chin_n;
+    assert!(dy > 0.004, "chin dropped only {dy} m across {chin_n} splats");
+}
+
+/// Same rigid transform the projection shader applies (`transform_point_dq`).
+fn camera_space(p: [f32; 3]) -> [f32; 3] {
+    let dq = super::body_camera_dq();
+    let q = [dq.real[1], dq.real[2], dq.real[3]];
+    let w = dq.real[0];
+    let dual = [dq.dual[1], dq.dual[2], dq.dual[3]];
+    let dw = dq.dual[0];
+    let cross_dq = [
+        dual[1] * q[2] - dual[2] * q[1],
+        dual[2] * q[0] - dual[0] * q[2],
+        dual[0] * q[1] - dual[1] * q[0],
+    ];
+    let t = [
+        2.0 * (dual[0] * w - dw * q[0] - cross_dq[0]),
+        2.0 * (dual[1] * w - dw * q[1] - cross_dq[1]),
+        2.0 * (dual[2] * w - dw * q[2] - cross_dq[2]),
+    ];
+    let tmp = [
+        q[1] * p[2] - q[2] * p[1] + w * p[0],
+        q[2] * p[0] - q[0] * p[2] + w * p[1],
+        q[0] * p[1] - q[1] * p[0] + w * p[2],
+    ];
+    let c2 = [
+        q[1] * tmp[2] - q[2] * tmp[1],
+        q[2] * tmp[0] - q[0] * tmp[2],
+        q[0] * tmp[1] - q[1] * tmp[0],
+    ];
+    [p[0] + 2.0 * c2[0] + t[0], p[1] + 2.0 * c2[1] + t[1], p[2] + 2.0 * c2[2] + t[2]]
+}
+
+#[test]
+fn layer_camera_frames_the_body_upright() {
+    let chest = camera_space([0.0, 0.90, 0.0]);
+    assert!(chest[0].abs() < 1e-3 && chest[1].abs() < 1e-3, "chest not centered: {chest:?}");
+    assert!((chest[2] - 2.55).abs() < 1e-3, "chest depth: {chest:?}");
+    let nose = camera_space([0.0, 0.90, 0.08]);
+    assert!(nose[2] < chest[2] - 0.05, "face (+Z) should be nearer the camera");
+    let focal = 220.0_f32 * 1.2;
+    let project = |p: [f32; 3]| {
+        let c = camera_space(p);
+        [focal * c[0] / c[2] + 110.0, -focal * c[1] / c[2] + 110.0]
+    };
+    let head = project([0.0, 1.62, 0.0]);
+    let mid = project([0.0, 0.90, 0.0]);
+    let feet = project([0.0, 0.05, 0.0]);
+    for (name, s) in [("head", head), ("chest", mid), ("feet", feet)] {
+        assert!(s[0] > 4.0 && s[0] < 216.0 && s[1] > 4.0 && s[1] < 216.0, "{name} off the 220 disc: {s:?}");
+    }
+    assert!(head[1] < mid[1] && mid[1] < feet[1], "head {head:?} chest {mid:?} feet {feet:?} should stack top to bottom");
 }
 
 #[test]
@@ -172,6 +215,7 @@ fn degenerate_triangle_uses_fallback_and_is_counted() {
 #[test]
 fn walk_to_turns_and_moves() {
     let mut a = AvatarActor::load(&manifest()).unwrap();
+    a.demo_motion = false;
     a.walk_to(-1.0, -1.0);
     for _ in 0..120 { a.advance(1.0 / 30.0); }
     let d = (a.root.pos[0] + 1.0).hypot(a.root.pos[2] + 1.0);

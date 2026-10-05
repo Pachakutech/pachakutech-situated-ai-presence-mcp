@@ -51,14 +51,22 @@ impl MappedBuffer {
 
         let requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
         let mem_props = unsafe { vk_ctx.instance.get_physical_device_memory_properties(vk_ctx.physical_device) };
-        let wanted = vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
-        let memory_type_index = (0..mem_props.memory_type_count)
-            .find(|&i| {
+        let coherent = vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
+        // Cached host memory. The first coherent type on this Intel GPU is
+        // write-combined: a one-splat smoke write shows up, and a 5 MB avatar
+        // upload does not. Prefer the cached coherent heap when the buffer
+        // can live there.
+        let cached = coherent | vk::MemoryPropertyFlags::HOST_CACHED;
+        let pick = |wanted: vk::MemoryPropertyFlags| {
+            (0..mem_props.memory_type_count).find(|&i| {
                 let type_supported = requirements.memory_type_bits & (1 << i) != 0;
-                let props_supported = mem_props.memory_types[i as usize].property_flags.contains(wanted);
-                type_supported && props_supported
+                let props = mem_props.memory_types[i as usize].property_flags;
+                type_supported && props.contains(wanted)
             })
-            .ok_or_else(|| "no HOST_VISIBLE|HOST_COHERENT memory type supports this buffer".to_string())?;
+        };
+        let memory_type_index = pick(cached).or_else(|| pick(coherent)).ok_or_else(|| {
+            "no HOST_VISIBLE|HOST_COHERENT memory type supports this buffer".to_string()
+        })?;
 
         let alloc_info = vk::MemoryAllocateInfo::default()
             .allocation_size(requirements.size)
@@ -137,6 +145,10 @@ pub struct SplatPipeline {
     device: ash::Device,
     graphics_queue: vk::Queue,
     capacity: u32,
+    /// Slots `[0, artifact_slot_limit)` belong to artifacts. The avatar
+    /// cloud is uploaded at `artifact_slot_limit` and is not allocated by
+    /// the registry.
+    artifact_slot_limit: u32,
     dynamic_splats: MappedBuffer,
     bone_palette: MappedBuffer,
     projected_output: MappedBuffer,
@@ -164,7 +176,7 @@ impl SplatPipeline {
     /// pipeline can hold — the same number the shaders' `total_capacity`
     /// uniform gets set to, and the size `DynamicSplatBuffer`/
     /// `ProjectedOutput` are allocated to.
-    pub fn new(vk_ctx: &VulkanContext, capacity: u32) -> Result<Self, String> {
+    pub fn new(vk_ctx: &VulkanContext, capacity: u32, artifact_slot_limit: u32) -> Result<Self, String> {
         let device = &vk_ctx.device;
 
         // ---- Buffers ----
@@ -198,7 +210,7 @@ impl SplatPipeline {
         let projection_uniforms = MappedBuffer::new(
             vk_ctx,
             std::mem::size_of::<ProjectionUniformsGpu>() as vk::DeviceSize,
-            vk::BufferUsageFlags::UNIFORM_BUFFER,
+            vk::BufferUsageFlags::STORAGE_BUFFER,
         )?;
 
         let eviction_uniforms = MappedBuffer::new(
@@ -215,7 +227,7 @@ impl SplatPipeline {
 
         // ---- Projection stage ----
         let projection_bindings = [
-            descriptor_binding(0, vk::DescriptorType::UNIFORM_BUFFER),
+            descriptor_binding(0, vk::DescriptorType::STORAGE_BUFFER), // ProjectionUniforms
             descriptor_binding(1, vk::DescriptorType::STORAGE_BUFFER), // BonePalette
             descriptor_binding(2, vk::DescriptorType::STORAGE_BUFFER), // DynamicSplatBuffer
             descriptor_binding(3, vk::DescriptorType::STORAGE_BUFFER), // ProjectedOutput
@@ -244,8 +256,8 @@ impl SplatPipeline {
 
         // ---- Descriptor pool + sets ----
         let pool_sizes = [
-            vk::DescriptorPoolSize { ty: vk::DescriptorType::UNIFORM_BUFFER, descriptor_count: 2 },
-            vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 5 },
+            vk::DescriptorPoolSize { ty: vk::DescriptorType::UNIFORM_BUFFER, descriptor_count: 1 },
+            vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 6 },
         ];
         let pool_info = vk::DescriptorPoolCreateInfo::default().pool_sizes(&pool_sizes).max_sets(2);
         let descriptor_pool = unsafe { device.create_descriptor_pool(&pool_info, None) }
@@ -259,7 +271,7 @@ impl SplatPipeline {
             .map_err(|e| format!("vkAllocateDescriptorSets failed: {e:?}"))?;
         let (projection_set, eviction_set) = (sets[0], sets[1]);
 
-        write_buffer_descriptor(device, projection_set, 0, vk::DescriptorType::UNIFORM_BUFFER, projection_uniforms.buffer, projection_uniforms.size);
+        write_buffer_descriptor(device, projection_set, 0, vk::DescriptorType::STORAGE_BUFFER, projection_uniforms.buffer, projection_uniforms.size);
         write_buffer_descriptor(device, projection_set, 1, vk::DescriptorType::STORAGE_BUFFER, bone_palette.buffer, bone_palette.size);
         write_buffer_descriptor(device, projection_set, 2, vk::DescriptorType::STORAGE_BUFFER, dynamic_splats.buffer, dynamic_splats.size);
         write_buffer_descriptor(device, projection_set, 3, vk::DescriptorType::STORAGE_BUFFER, projected_output.buffer, projected_output.size);
@@ -301,6 +313,7 @@ impl SplatPipeline {
             device: vk_ctx.device.clone(),
             graphics_queue: vk_ctx.graphics_queue,
             capacity,
+            artifact_slot_limit: artifact_slot_limit.min(capacity),
             dynamic_splats,
             bone_palette,
             projected_output,
@@ -328,6 +341,92 @@ impl SplatPipeline {
 
     pub fn capacity(&self) -> u32 {
         self.capacity
+    }
+
+    /// First slot the registry must not hand to an artifact.
+    pub fn artifact_slot_limit(&self) -> u32 {
+        self.artifact_slot_limit
+    }
+
+    /// Where `AvatarActor::upload` writes the mesh-bound cloud.
+    pub fn avatar_slot_base(&self) -> u32 {
+        self.artifact_slot_limit
+    }
+
+    pub fn projected_buffer(&self) -> (vk::Buffer, vk::DeviceSize) {
+        (self.projected_output.buffer, self.projected_output.size)
+    }
+
+    /// Zero a range of projected discs before a dispatch. The compute shader
+    /// leaves culled slots untouched, so a stale disc would keep drawing.
+    pub fn clear_projected(&self, start: u32, count: u32) {
+        if start >= self.capacity || count == 0 {
+            return;
+        }
+        let count = count.min(self.capacity - start) as usize;
+        let stride = std::mem::size_of::<ProjectedSplatGpu>();
+        unsafe {
+            let dst = (self.projected_output.mapped_ptr as *mut u8).add(start as usize * stride);
+            std::ptr::write_bytes(dst, 0, count * stride);
+        }
+    }
+
+    /// One-line snapshot of an uploaded range and what projection wrote back.
+    /// Used when the first avatar tick produces an empty disc buffer.
+    pub fn debug_projection_range(&self, start: u32, count: u32) -> String {
+        if start >= self.capacity || count == 0 {
+            return format!("empty range start={start} count={count} capacity={}", self.capacity);
+        }
+        let count = count.min(self.capacity - start);
+        let stride = std::mem::size_of::<AnimatedSplatGpu>();
+        let mut sample = String::new();
+        for i in [0, count / 2] {
+            let index = start + i;
+            let splat = unsafe {
+                let p = (self.dynamic_splats.mapped_ptr as *const u8).add(index as usize * stride)
+                    as *const AnimatedSplatGpu;
+                p.read_unaligned()
+            };
+            sample.push_str(&format!(
+                " [{index}] pos={:?} flags={} joints={:?} w={:?}",
+                splat.position_and_confidence, splat.flags, splat.joint_ids, splat.weights
+            ));
+        }
+        let mut active_all = 0u32;
+        for i in 0..count {
+            let index = start + i;
+            let flags = unsafe {
+                let p = (self.dynamic_splats.mapped_ptr as *const u8).add(index as usize * stride)
+                    as *const AnimatedSplatGpu;
+                (*p).flags
+            };
+            if flags & 1 != 0 {
+                active_all += 1;
+            }
+        }
+        let proj = self.read_projected();
+        let a = proj[start as usize];
+        let b = proj[(start + count / 2) as usize];
+        let uniforms = self.projection_uniforms.read::<ProjectionUniformsGpu>(1);
+        let u = &uniforms[0];
+        format!(
+            "active {active_all}/{count}{sample} | proj[{start}] depth={} r={} screen={:?} id={} | mid depth={} r={} | cam_real={:?} focal={:?} screen={:?}",
+            a.depth, a.radius_pixels, a.screen_center, a.splat_id, b.depth, b.radius_pixels,
+            u.world_to_camera_dq.real, u.focal, u.screen_size
+        )
+    }
+
+    /// How many avatar-range discs the last projection actually wrote.
+    pub fn count_projected_discs(&self, start: u32, count: u32) -> u32 {
+        if start >= self.capacity || count == 0 {
+            return 0;
+        }
+        let count = count.min(self.capacity - start) as usize;
+        let all = self.projected_output.read::<ProjectedSplatGpu>(self.capacity as usize);
+        all[start as usize..start as usize + count]
+            .iter()
+            .filter(|p| p.radius_pixels > 0.5 && p.depth > 0.1)
+            .count() as u32
     }
 
     /// Writes one `AnimatedSplat` into `DynamicSplatBuffer` at `index`.
@@ -388,6 +487,8 @@ impl SplatPipeline {
             absolute_max_age,
         )));
         self.evicted_textures.write(&[0u32]);
+        // Drain write-combine buffers before the GPU reads the mapped heap.
+        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
 
         unsafe { self.device.reset_fences(&[self.fence]) }.map_err(|e| format!("vkResetFences failed: {e:?}"))?;
 
@@ -543,6 +644,25 @@ fn record_dispatch_commands(
     let begin_info = vk::CommandBufferBeginInfo::default();
     unsafe { device.begin_command_buffer(cmd, &begin_info) }.map_err(|e| format!("vkBeginCommandBuffer failed: {e:?}"))?;
 
+    // This command buffer is submitted again every tick. Host writes to the
+    // mapped splat and uniform buffers are not visible to the shader unless
+    // a HOST → COMPUTE dependency runs at the start of each submission.
+    // Without it the second tick still sees the smoke-test cache.
+    let host_to_shader = vk::MemoryBarrier::default()
+        .src_access_mask(vk::AccessFlags::HOST_WRITE)
+        .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::UNIFORM_READ);
+    unsafe {
+        device.cmd_pipeline_barrier(
+            cmd,
+            vk::PipelineStageFlags::HOST,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::DependencyFlags::empty(),
+            &[host_to_shader],
+            &[],
+            &[],
+        );
+    }
+
     unsafe {
         device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, *projection_pipeline);
         device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::COMPUTE, projection_layout, 0, &[projection_set], &[]);
@@ -574,6 +694,21 @@ fn record_dispatch_commands(
         device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, *eviction_pipeline);
         device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::COMPUTE, eviction_layout, 0, &[eviction_set], &[]);
         device.cmd_dispatch(cmd, workgroups, 1, 1);
+    }
+
+    let shader_to_host = vk::MemoryBarrier::default()
+        .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+        .dst_access_mask(vk::AccessFlags::HOST_READ);
+    unsafe {
+        device.cmd_pipeline_barrier(
+            cmd,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::PipelineStageFlags::HOST,
+            vk::DependencyFlags::empty(),
+            &[shader_to_host],
+            &[],
+            &[],
+        );
     }
 
     unsafe { device.end_command_buffer(cmd) }.map_err(|e| format!("vkEndCommandBuffer failed: {e:?}"))?;

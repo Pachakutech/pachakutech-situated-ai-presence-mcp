@@ -49,7 +49,9 @@ struct AnimatedSplat {
     uint padding;
 };
 
-layout (set = 0, binding = 0) uniform ProjectionUniforms {
+// std430 storage. DualQuat is (w, x, y, z); math_utils.comp unpacks that.
+// This field list is 80 bytes, the same size as ProjectionUniformsGpu.
+layout (std430, set = 0, binding = 0) readonly buffer ProjectionUniforms {
     DualQuat world_to_camera_dq;
     vec2 focal;
     vec2 principal;

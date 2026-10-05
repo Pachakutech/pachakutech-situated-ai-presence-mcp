@@ -67,6 +67,40 @@ pub enum Proposal {
         #[serde(rename = "proposalId")]
         proposal_id: String,
     },
+    /// Drop demo motion and return to the bind pose, jaw closed.
+    #[serde(rename = "avatarRest")]
+    AvatarRest {
+        #[serde(rename = "proposalId")]
+        proposal_id: String,
+    },
+    /// Set the jaw and, optionally, one morph-target weight. Turns demo motion off.
+    #[serde(rename = "avatarFace")]
+    AvatarFace {
+        #[serde(rename = "proposalId")]
+        proposal_id: String,
+        #[serde(rename = "jawOpen")]
+        jaw_open: f32,
+        #[serde(rename = "morphIndex")]
+        morph_index: Option<u32>,
+        #[serde(rename = "morphWeight")]
+        morph_weight: Option<f32>,
+    },
+    /// Walk the root toward a point on the ground plane. No click-to-walk.
+    #[serde(rename = "avatarWalk")]
+    AvatarWalk {
+        #[serde(rename = "proposalId")]
+        proposal_id: String,
+        x: f32,
+        z: f32,
+    },
+}
+
+/// Applied on the overlay thread after the socket pump. Not a GPU command.
+#[derive(Debug, Clone)]
+pub enum AvatarCommand {
+    Rest,
+    Face { jaw_open: f32, morph_index: Option<u32>, morph_weight: f32 },
+    Walk { x: f32, z: f32 },
 }
 
 impl Proposal {
@@ -78,7 +112,10 @@ impl Proposal {
             | Proposal::RetirePresence { proposal_id, .. }
             | Proposal::AddArtifact { proposal_id, .. }
             | Proposal::RetireArtifact { proposal_id, .. }
-            | Proposal::Shutdown { proposal_id } => proposal_id,
+            | Proposal::Shutdown { proposal_id }
+            | Proposal::AvatarRest { proposal_id }
+            | Proposal::AvatarFace { proposal_id, .. }
+            | Proposal::AvatarWalk { proposal_id, .. } => proposal_id,
         }
     }
 }

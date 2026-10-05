@@ -43,6 +43,8 @@ fn main() {
         "gltf_to_splat.comp",
         "overlay_quad.vert",
         "overlay_quad.frag",
+        "splat_disc.vert",
+        "splat_disc.frag",
     ] {
         compile(shader, &out_dir);
     }

@@ -20,8 +20,10 @@
 use crate::actors::ingress::screen_dmabuf::DmabufScreenSource;
 use crate::actors::ingress::screen_wlr::WlrScreenSource;
 use crate::actors::ingress::{DmabufFrame, FrameSource, IngressFrame};
+use crate::avatar::AvatarActor;
 use crate::pipeline::SplatPipeline;
 use crate::socket::SocketServer;
+use crate::splat_sprites::SplatSprites;
 use crate::vulkan::{DmabufImportedImage, VulkanContext};
 use ash::{khr, vk};
 use std::io;
@@ -55,6 +57,8 @@ const OVERLAY_FRAG_SPV: &[u8] =
 const BUBBLE_PX: u32 = 220;
 /// Capture/present ceiling. The OOM was a 16ms fullscreen copy+present spin.
 const CAPTURE_INTERVAL: Duration = Duration::from_millis(100);
+/// Avatar deform → project. Independent of the 10 fps capture.
+const AVATAR_TICK: Duration = Duration::from_millis(33);
 /// Hide before Omarchy's 150s screensaver so we are not painted over it.
 const IDLE_HIDE_MS: u32 = 120_000;
 
@@ -214,7 +218,7 @@ impl Overlay {
         }
 
         println!(
-            "[overlay] layer-shell disc {BUBBLE_PX}x{BUBBLE_PX} on {}x{} exclusive_zone=-1 input=pass-through",
+            "[overlay] layer-shell {BUBBLE_PX}x{BUBBLE_PX} on {}x{} exclusive_zone=-1 input=pass-through",
             state.output_width, state.output_height
         );
 
@@ -582,6 +586,12 @@ pub struct OverlayGpu {
     /// layout still references it, and Vulkan requires it to remain valid.
     _legacy_dsl: Option<vk::DescriptorSetLayout>,
     pending_update: bool,
+    /// Isotropic discs for the avatar's projected range. Absent until the
+    /// overlay loop attaches the pipeline's projected buffer.
+    splats: Option<SplatSprites>,
+    splat_base: u32,
+    splat_count: u32,
+    projected: Option<(vk::Buffer, vk::DeviceSize)>,
 }
 
 /// Which screen-feeding strategy is active. Both variants expose the same
@@ -724,11 +734,18 @@ impl OverlayGpu {
             screen,
             _legacy_dsl: None,
             pending_update: true,
+            splats: None,
+            splat_base: 0,
+            splat_count: 0,
+            projected: None,
         })
     }
 
     pub fn recreate(&mut self, vk: &VulkanContext, extent: vk::Extent2D) -> Result<(), String> {
         unsafe { vk.device.device_wait_idle() }.ok();
+        if let Some(sprites) = self.splats.take() {
+            sprites.destroy(&vk.device);
+        }
         self.destroy_swapchain_resources(&vk.device);
         let surface = vk.surface.unwrap();
         let surface_loader = vk.surface_loader.as_ref().unwrap();
@@ -755,7 +772,40 @@ impl OverlayGpu {
         }
         self.pipeline_layout = layout;
         self.pipeline = pipeline;
+        if let Some((buffer, bytes)) = self.projected {
+            self.splats = Some(SplatSprites::new(&vk.device, self.render_pass, buffer, bytes)?);
+        }
         Ok(())
+    }
+
+    pub fn layer_extent(&self) -> vk::Extent2D {
+        self.extent
+    }
+
+    /// The graphics submit of the previous disc reads `projected`. Wait for
+    /// it before the CPU clears that buffer for the next avatar tick.
+    pub fn wait_for_present(&self, vk: &VulkanContext) -> Result<(), String> {
+        unsafe { vk.device.wait_for_fences(&[self.in_flight], true, u64::MAX) }
+            .map_err(|e| format!("overlay fence wait: {e:?}"))
+    }
+
+    pub fn attach_splats(
+        &mut self,
+        vk: &VulkanContext,
+        buffer: vk::Buffer,
+        bytes: vk::DeviceSize,
+    ) -> Result<(), String> {
+        if let Some(old) = self.splats.take() {
+            old.destroy(&vk.device);
+        }
+        self.projected = Some((buffer, bytes));
+        self.splats = Some(SplatSprites::new(&vk.device, self.render_pass, buffer, bytes)?);
+        Ok(())
+    }
+
+    pub fn set_splat_range(&mut self, base: u32, count: u32) {
+        self.splat_base = base;
+        self.splat_count = count;
     }
 
     /// Returns true if the GPU feed is currently using dmabuf import.
@@ -882,6 +932,23 @@ impl OverlayGpu {
             self.pending_update = false;
         }
 
+        // Projection compute already finished (its fence was waited). This
+        // makes those projected-disc writes visible to the vertex shader.
+        let splat_barrier = vk::MemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::SHADER_WRITE | vk::AccessFlags::HOST_WRITE)
+            .dst_access_mask(vk::AccessFlags::SHADER_READ);
+        unsafe {
+            vk.device.cmd_pipeline_barrier(
+                self.command_buffer,
+                vk::PipelineStageFlags::COMPUTE_SHADER | vk::PipelineStageFlags::HOST,
+                vk::PipelineStageFlags::VERTEX_SHADER,
+                vk::DependencyFlags::empty(),
+                &[splat_barrier],
+                &[],
+                &[],
+            );
+        }
+
         let clear = vk::ClearValue { color: vk::ClearColorValue { float32: [0.0, 0.0, 0.0, 0.0] } };
         let render_area = vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent: self.extent };
         let rp_begin = vk::RenderPassBeginInfo::default()
@@ -895,19 +962,6 @@ impl OverlayGpu {
                 &rp_begin,
                 vk::SubpassContents::INLINE,
             );
-            vk.device.cmd_bind_pipeline(
-                self.command_buffer,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.pipeline,
-            );
-            vk.device.cmd_bind_descriptor_sets(
-                self.command_buffer,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.pipeline_layout,
-                0,
-                &[self.screen.descriptor_set()],
-                &[],
-            );
             let viewport = vk::Viewport {
                 x: 0.0,
                 y: 0.0,
@@ -918,28 +972,56 @@ impl OverlayGpu {
             };
             vk.device.cmd_set_viewport(self.command_buffer, 0, &[viewport]);
             vk.device.cmd_set_scissor(self.command_buffer, 0, &[render_area]);
-            let y_invert = match &self.screen {
-                ScreenFeedKind::Dmabuf(feed) => feed
-                    .current
-                    .as_ref()
-                    .map(|img| img.y_invert)
-                    .unwrap_or(false),
-                ScreenFeedKind::Shm(_) => false,
-            };
-            let pc = [
-                self.extent.width as f32,
-                self.extent.height as f32,
-                if y_invert { 1.0 } else { 0.0 },
-                0.0,
-            ];
-            vk.device.cmd_push_constants(
-                self.command_buffer,
-                self.pipeline_layout,
-                vk::ShaderStageFlags::FRAGMENT,
-                0,
-                std::slice::from_raw_parts(pc.as_ptr() as *const u8, 16),
-            );
-            vk.device.cmd_draw(self.command_buffer, 3, 1, 0, 0);
+            // The avatar occupies the layer. The screen quad is the previous
+            // looking-glass disc and is drawn only while no avatar splats
+            // are bound.
+            if self.splat_count > 0 {
+                if let Some(sprites) = &self.splats {
+                    sprites.record(
+                        &vk.device,
+                        self.command_buffer,
+                        self.extent,
+                        self.splat_base,
+                        self.splat_count,
+                    );
+                }
+            } else {
+                vk.device.cmd_bind_pipeline(
+                    self.command_buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    self.pipeline,
+                );
+                vk.device.cmd_bind_descriptor_sets(
+                    self.command_buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    self.pipeline_layout,
+                    0,
+                    &[self.screen.descriptor_set()],
+                    &[],
+                );
+                let y_invert = match &self.screen {
+                    ScreenFeedKind::Dmabuf(feed) => feed
+                        .current
+                        .as_ref()
+                        .map(|img| img.y_invert)
+                        .unwrap_or(false),
+                    ScreenFeedKind::Shm(_) => false,
+                };
+                let pc = [
+                    self.extent.width as f32,
+                    self.extent.height as f32,
+                    if y_invert { 1.0 } else { 0.0 },
+                    0.0,
+                ];
+                vk.device.cmd_push_constants(
+                    self.command_buffer,
+                    self.pipeline_layout,
+                    vk::ShaderStageFlags::FRAGMENT,
+                    0,
+                    std::slice::from_raw_parts(pc.as_ptr() as *const u8, 16),
+                );
+                vk.device.cmd_draw(self.command_buffer, 3, 1, 0, 0);
+            }
             vk.device.cmd_end_render_pass(self.command_buffer);
         }
         unsafe { vk.device.end_command_buffer(self.command_buffer) }
@@ -984,6 +1066,9 @@ impl OverlayGpu {
     pub fn destroy(&mut self, vk: &VulkanContext) {
         unsafe {
             let _ = vk.device.device_wait_idle();
+            if let Some(sprites) = self.splats.take() {
+                sprites.destroy(&vk.device);
+            }
             self.destroy_swapchain_resources(&vk.device);
             vk.device.destroy_pipeline(self.pipeline, None);
             vk.device.destroy_pipeline_layout(self.pipeline_layout, None);
@@ -1735,6 +1820,55 @@ impl CaptureSource {
     }
 }
 
+/// One avatar step: pose, deform, project. Fails the process the first time
+/// the layer camera leaves the cloud with fewer than 1000 live discs.
+fn tick_avatar(
+    avatar: &mut AvatarActor,
+    pipeline: &SplatPipeline,
+    gpu: &mut OverlayGpu,
+    vk: &VulkanContext,
+    server: &mut SocketServer,
+    dt: f32,
+    frame: &mut u32,
+    projection_checked: &mut bool,
+) -> Result<(), String> {
+    gpu.wait_for_present(vk)?;
+    for cmd in server.take_avatar_commands() {
+        avatar.apply_command(cmd);
+    }
+    let started = Instant::now();
+    avatar.advance(dt);
+    avatar.evaluate();
+    let base = pipeline.avatar_slot_base();
+    let count = avatar.splat_count() as u32;
+    pipeline.clear_projected(base, count);
+    let extent = gpu.layer_extent();
+    pipeline.set_projection_uniforms(AvatarActor::layer_camera(
+        extent.width as f32,
+        extent.height as f32,
+        *frame,
+    ));
+    let uploaded = avatar.upload(pipeline, base, 1, *frame);
+    pipeline.tick(*frame, 600)?;
+    if !*projection_checked {
+        let live = pipeline.count_projected_discs(base, uploaded);
+        if live < 1000 {
+            return Err(format!(
+                "avatar projection wrote {live} live discs (need at least 1000). {}",
+                pipeline.debug_projection_range(base, uploaded)
+            ));
+        }
+        println!(
+            "[avatar] {live} discs in the layer ({:.1} ms tick)",
+            started.elapsed().as_secs_f32() * 1000.0
+        );
+        *projection_checked = true;
+    }
+    gpu.set_splat_range(base, uploaded);
+    *frame = frame.saturating_add(1);
+    Ok(())
+}
+
 /// Combined Wayland + Unix-socket loop. One thread: pipeline is `!Send`.
 ///
 /// Spawns a capture thread that uses `wlr-screencopy` with dmabuf (preferred)
@@ -1753,6 +1887,7 @@ pub fn run(
     vk: &VulkanContext,
     pipeline: &SplatPipeline,
     socket_path: &Path,
+    avatar: &mut AvatarActor,
 ) -> Result<(), String> {
     let mut server = SocketServer::bind(socket_path).map_err(|e| format!("socket bind: {e}"))?;
     let _pid = crate::socket::PidFile::create(socket_path).map_err(|e| format!("pid file: {e}"))?;
@@ -1776,6 +1911,9 @@ pub fn run(
     spawn_sleep_watch(sleeping.clone());
 
     let mut last_capture = Instant::now() - CAPTURE_INTERVAL;
+    let mut last_avatar;
+    let mut avatar_frame: u32 = 1;
+    let mut projection_checked = false;
     let mut parked = false;
     let mut was_hide = false; // tracks hide → !hide transitions for force-present
     let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel::<CaptureMsg>(1);
@@ -1861,6 +1999,19 @@ pub fn run(
             if use_dmabuf { "dmabuf" } else { "SHM" });
     }
 
+    let (projected, projected_bytes) = pipeline.projected_buffer();
+    gpu.attach_splats(vk, projected, projected_bytes)?;
+    tick_avatar(
+        avatar,
+        pipeline,
+        gpu,
+        vk,
+        &mut server,
+        1.0 / 30.0,
+        &mut avatar_frame,
+        &mut projection_checked,
+    )?;
+    last_avatar = Instant::now();
     gpu.draw(vk)?;
 
     let wl_fd = overlay.event_queue.as_fd().as_raw_fd();
@@ -1949,10 +2100,10 @@ pub fn run(
             if parked {
                 overlay.unpark_at_bubble();
                 parked = false;
-                // Force-present the last cached frame immediately (L3 + H4).
-                // Don't wait for a new capture — the disc should appear now.
-                gpu.draw(vk)?;
-                last_capture = Instant::now();
+                // Force a tick and a present this iteration, without waiting
+                // on a fresh capture. The disc should show the avatar now.
+                last_avatar = Instant::now() - AVATAR_TICK;
+                last_capture = Instant::now() - CAPTURE_INTERVAL;
             }
             let mut got = false;
             while let Ok(msg) = frame_rx.try_recv() {
@@ -1985,9 +2136,26 @@ pub fn run(
                 }
                 got = true;
             }
-            if got || last_capture.elapsed() >= CAPTURE_INTERVAL {
+            let avatar_due = last_avatar.elapsed() >= AVATAR_TICK;
+            if avatar_due {
+                let dt = last_avatar.elapsed().as_secs_f32().clamp(1.0 / 120.0, 0.1);
+                tick_avatar(
+                    avatar,
+                    pipeline,
+                    gpu,
+                    vk,
+                    &mut server,
+                    dt,
+                    &mut avatar_frame,
+                    &mut projection_checked,
+                )?;
+                last_avatar = Instant::now();
+            }
+            if got || avatar_due || last_capture.elapsed() >= CAPTURE_INTERVAL {
                 gpu.draw(vk)?;
-                last_capture = Instant::now();
+                if got || last_capture.elapsed() >= CAPTURE_INTERVAL {
+                    last_capture = Instant::now();
+                }
             }
         }
 
@@ -2001,7 +2169,8 @@ pub fn run(
 
         overlay.event_queue.flush().map_err(|e| format!("wayland flush: {e}"))?;
         let read_guard = overlay.event_queue.prepare_read();
-        let n = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, 100) };
+        let poll_ms = if hide { 100 } else { 16 };
+        let n = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, poll_ms) };
         if n < 0 {
             let err = io::Error::last_os_error();
             if err.kind() == io::ErrorKind::Interrupted {

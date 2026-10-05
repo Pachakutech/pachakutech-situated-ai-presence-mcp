@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { getBundledDaemonPath } from "./daemonBinary.js";
 import { socketPath } from "./daemonClient.js";
-import { socketReachable, startDaemon, statusDaemon, stopDaemon } from "./daemonControl.js";
+import { sendProposal, socketReachable, startDaemon, statusDaemon, stopDaemon } from "./daemonControl.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SERVER_ENTRY = join(__dirname, "index.js");
@@ -30,6 +30,10 @@ function usage(): never {
       "  daemon start         Start the bundled daemon and wait for its socket",
       "  daemon status        Report whether the daemon socket accepts a connection",
       "  daemon stop          Ask the daemon to shut down",
+      "  avatar rest          Bind pose, jaw closed, demo motion off",
+      "  avatar jaw <0-1>     Set jaw open and stop demo motion",
+      "  avatar walk <x> <z>  Walk the root on the ground plane",
+      "  avatar morph <i> <w> Weight morph target i (jaw stays closed)",
     ].join("\n"),
   );
   process.exit(1);
@@ -143,6 +147,44 @@ async function doctor() {
   );
 }
 
+function finite(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+async function avatarCommand(args: string[]): Promise<number> {
+  const [action, a, b] = args;
+  let payload: Record<string, unknown>;
+  if (action === "rest") {
+    payload = { kind: "avatarRest", proposalId: "cli-rest" };
+  } else if (action === "jaw") {
+    const jawOpen = finite(a);
+    if (jawOpen === undefined) usage();
+    payload = { kind: "avatarFace", proposalId: "cli-jaw", jawOpen };
+  } else if (action === "walk") {
+    const x = finite(a);
+    const z = finite(b);
+    if (x === undefined || z === undefined) usage();
+    payload = { kind: "avatarWalk", proposalId: "cli-walk", x, z };
+  } else if (action === "morph") {
+    const morphIndex = finite(a);
+    const morphWeight = finite(b);
+    if (morphIndex === undefined || morphWeight === undefined) usage();
+    payload = { kind: "avatarFace", proposalId: "cli-morph", jawOpen: 0, morphIndex, morphWeight };
+  } else {
+    usage();
+  }
+  try {
+    await sendProposal(payload);
+    console.log("ok");
+    return 0;
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : error);
+    return 1;
+  }
+}
+
 const [, , command, sub] = process.argv;
 
 switch (command) {
@@ -175,6 +217,9 @@ switch (command) {
     } else {
       usage();
     }
+    break;
+  case "avatar":
+    process.exit(await avatarCommand(process.argv.slice(3)));
     break;
   default:
     usage();
