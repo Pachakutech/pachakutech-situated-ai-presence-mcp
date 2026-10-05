@@ -1823,7 +1823,7 @@ impl CaptureSource {
 /// One avatar step: pose, deform, project. Fails the process the first time
 /// the layer camera leaves the cloud with fewer than 1000 live discs.
 fn tick_avatar(
-    avatar: &mut AvatarActor,
+    avatar: &mut Option<AvatarActor>,
     pipeline: &SplatPipeline,
     gpu: &mut OverlayGpu,
     vk: &VulkanContext,
@@ -1833,13 +1833,26 @@ fn tick_avatar(
     projection_checked: &mut bool,
 ) -> Result<(), String> {
     gpu.wait_for_present(vk)?;
-    for cmd in server.take_avatar_commands() {
+    let base = pipeline.avatar_slot_base();
+    let commands = server.take_avatar_commands();
+    let Some(avatar) = avatar.as_mut() else {
+        if !commands.is_empty() {
+            eprintln!("[avatar] {} avatar command(s) ignored: no avatar body loaded", commands.len());
+        }
+        gpu.set_splat_range(base, 0);
+        return Ok(());
+    };
+    for cmd in commands {
         avatar.apply_command(cmd);
+    }
+    if !avatar.visible {
+        // Idle substrate: no avatar splats bound, so draw() shows the hyperbubble disc.
+        gpu.set_splat_range(base, 0);
+        return Ok(());
     }
     let started = Instant::now();
     avatar.advance(dt);
     avatar.evaluate();
-    let base = pipeline.avatar_slot_base();
     let count = avatar.splat_count() as u32;
     pipeline.clear_projected(base, count);
     let extent = gpu.layer_extent();
@@ -1887,11 +1900,12 @@ pub fn run(
     vk: &VulkanContext,
     pipeline: &SplatPipeline,
     socket_path: &Path,
-    avatar: &mut AvatarActor,
+    avatar: &mut Option<AvatarActor>,
 ) -> Result<(), String> {
     let mut server = SocketServer::bind(socket_path).map_err(|e| format!("socket bind: {e}"))?;
     let _pid = crate::socket::PidFile::create(socket_path).map_err(|e| format!("pid file: {e}"))?;
     println!("[socket] listening on {}", socket_path.display());
+    server.set_avatar_available(avatar.is_some());
 
     let locked = Arc::new(AtomicBool::new(false));
     let screensaver = Arc::new(AtomicBool::new(false));

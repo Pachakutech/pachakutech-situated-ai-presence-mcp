@@ -61,6 +61,12 @@ pub struct AvatarActor {
     pub demo_motion: bool,
     /// Text -> audio -> face. Idle (no thread, no processes) until the first speak.
     pub speech: crate::speech::Speaker,
+    /// Drawn on the layer. Presence-scoped by default: false until a presence binds the body.
+    pub visible: bool,
+    /// PRESENCE_AVATAR_AUTOLOAD=1: stay visible with demo sway regardless of presences.
+    pub autoload: bool,
+    /// The presence that currently owns this body.
+    pub bound_presence: Option<String>,
     time: f32,
     posed_verts: Vec<[f32; 3]>,
     pub posed: Vec<GaussianSplat>,
@@ -107,12 +113,25 @@ impl AvatarActor {
             clip: None, clip_time: 0., clip_loop: true, walk_target: None,
             demo_motion: true, time: 0.,
             speech: crate::speech::Speaker::new(crate::speech::SpeechConfig::from_env()),
+            visible: true, autoload: true, bound_presence: None,
             posed_verts: vec![], posed: vec![], stats: DeformStats::default(),
         };
         a.play("idle", true);
         a.evaluate();
         Ok(a)
     }
+
+    /// Presence-scoped commands only reach the presence that owns the body.
+    /// `None` is the debug path and always applies.
+    fn accepts(&self, presence_id: &Option<String>) -> bool {
+        match presence_id {
+            None => true,
+            Some(id) => self.bound_presence.as_deref() == Some(id.as_str()),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn audio_playing_for_test(&mut self) -> bool { self.speech.audio_running() }
 
     pub fn splat_count(&self) -> usize { self.binding.records.len() }
     pub fn play(&mut self, clip: &str, looping: bool) {
@@ -129,12 +148,33 @@ impl AvatarActor {
 
     pub fn apply_command(&mut self, cmd: AvatarCommand) {
         match cmd {
-            AvatarCommand::Speak { text } => {
+            AvatarCommand::Bind { presence_id } => {
+                self.speech.stop();
+                self.bound_presence = Some(presence_id);
+                self.visible = true;
+                self.demo_motion = false;
+                self.walk_target = None;
+                self.root = RootState { pos: [0.; 3], yaw: 0. };
+                self.rest();
+                self.face = FaceFrame::default();
+            }
+            AvatarCommand::Unbind { presence_id } => {
+                if self.bound_presence.as_deref() == Some(presence_id.as_str()) {
+                    self.speech.stop();
+                    self.face = FaceFrame::default();
+                    self.bound_presence = None;
+                    self.visible = self.autoload;
+                    self.demo_motion = self.autoload;
+                }
+            }
+            AvatarCommand::Speak { presence_id, text } => {
+                if !self.accepts(&presence_id) { return; }
                 self.demo_motion = false;
                 self.face = FaceFrame::default();
                 if let Err(e) = self.speech.speak(&text) { eprintln!("[speech] {e}"); }
             }
-            AvatarCommand::StopSpeech => {
+            AvatarCommand::StopSpeech { presence_id } => {
+                if !self.accepts(&presence_id) { return; }
                 self.speech.stop();
                 self.face = FaceFrame::default();
             }

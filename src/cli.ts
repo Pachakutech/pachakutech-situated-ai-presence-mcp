@@ -30,12 +30,15 @@ function usage(): never {
       "  daemon start         Start the bundled daemon and wait for its socket",
       "  daemon status        Report whether the daemon socket accepts a connection",
       "  daemon stop          Ask the daemon to shut down",
-      "  avatar rest          Bind pose, jaw closed, demo motion off",
-      "  avatar jaw <0-1>     Set jaw open and stop demo motion",
-      "  avatar walk <x> <z>  Walk the root on the ground plane",
-      "  avatar morph <i> <w> Weight morph target i (jaw stays closed)",
-      "  avatar speak <text>  Speak text: local TTS, audio, and synced mouth",
-      "  avatar stop          Interrupt speech (audio and mouth stop together)",
+      "  presence spawn [--context <text>] [--style <hint>] [--artifact <id>]",
+      "                       Spawn a presence (shows the avatar); prints its presenceId",
+      "  presence speak <id> <text>",
+      "                       That presence speaks: local TTS, audio, synced mouth",
+      "  presence stop <id>   Stop that presence's speech; face returns to neutral",
+      "  presence retire <id> End the presence, hide its avatar, free its slot",
+      "  (the above are typed as: presence presence spawn|speak|stop|retire ...)",
+      "  avatar rest|jaw <0-1>|walk <x> <z>|morph <i> <w>",
+      "                       DEBUG controls for the default avatar body, no presence needed",
     ].join("\n"),
   );
   process.exit(1);
@@ -169,12 +172,6 @@ async function avatarCommand(args: string[]): Promise<number> {
     const z = finite(b);
     if (x === undefined || z === undefined) usage();
     payload = { kind: "avatarWalk", proposalId: "cli-walk", x, z };
-  } else if (action === "speak") {
-    const text = args.slice(1).join(" ").trim();
-    if (!text) usage();
-    payload = { kind: "avatarSpeak", proposalId: "cli-speak", text };
-  } else if (action === "stop") {
-    payload = { kind: "avatarStop", proposalId: "cli-stop" };
   } else if (action === "morph") {
     const morphIndex = finite(a);
     const morphWeight = finite(b);
@@ -185,6 +182,51 @@ async function avatarCommand(args: string[]): Promise<number> {
   }
   try {
     await sendProposal(payload);
+    console.log("ok");
+    return 0;
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : error);
+    return 1;
+  }
+}
+
+function flag(args: string[], name: string): string | undefined {
+  const i = args.indexOf(name);
+  return i >= 0 && i + 1 < args.length ? args[i + 1] : undefined;
+}
+
+/** `presence presence spawn|speak|stop|retire`: presence-scoped control, same names as the MCP tools. */
+async function presenceCommand(args: string[]): Promise<number> {
+  const [action, id, ...rest] = args;
+  try {
+    if (action === "spawn") {
+      const flags = args.slice(1);
+      const presenceId = `p-${Math.random().toString(36).slice(2, 8)}`;
+      const reply = await sendProposal({
+        kind: "spawnPresence",
+        proposalId: "cli-spawn",
+        presenceId,
+        sourceContext: flag(flags, "--context") ?? "default avatar",
+        styleHint: flag(flags, "--style") ?? null,
+        artifactId: flag(flags, "--artifact") ?? null,
+      });
+      if (reply.detail?.avatar === false) console.error(`warning: ${String(reply.detail.note ?? "presence has no avatar body")}`);
+      console.log(presenceId); // stdout is only the id: ID=$(presence presence spawn)
+      return 0;
+    }
+    if (action === "speak") {
+      const text = rest.join(" ").trim();
+      if (!id || !text) usage();
+      await sendProposal({ kind: "animatePresence", proposalId: "cli-speak", presenceId: id, text });
+    } else if (action === "stop") {
+      if (!id) usage();
+      await sendProposal({ kind: "stopPresence", proposalId: "cli-stop", presenceId: id });
+    } else if (action === "retire") {
+      if (!id) usage();
+      await sendProposal({ kind: "retirePresence", proposalId: "cli-retire", presenceId: id });
+    } else {
+      usage();
+    }
     console.log("ok");
     return 0;
   } catch (error) {
@@ -225,6 +267,9 @@ switch (command) {
     } else {
       usage();
     }
+    break;
+  case "presence":
+    process.exit(await presenceCommand(process.argv.slice(3)));
     break;
   case "avatar":
     process.exit(await avatarCommand(process.argv.slice(3)));

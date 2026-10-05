@@ -249,7 +249,7 @@ fn avatar_speak_and_rest_commands_route_to_speaker() {
     let mut a = crate::avatar::AvatarActor::load(&manifest).unwrap();
     a.speech = Speaker::new(f.cfg.clone());
     assert!(a.mesh.morph_names.iter().any(|n| n == "viseme_aa"), "GLB lacks viseme_aa: {:?}", a.mesh.morph_names);
-    a.apply_command(AvatarCommand::Speak { text: "Hello from the presence layer.".into() });
+    a.apply_command(AvatarCommand::Speak { presence_id: None, text: "Hello from the presence layer.".into() });
     let t = Instant::now();
     let mut max_jaw = 0.0f32; let mut max_viseme = 0.0f32;
     while t.elapsed() < Duration::from_millis(1500) {
@@ -277,4 +277,52 @@ fn socket_json_for_speak_and_stop_parses() {
     assert!(matches!(p, Proposal::AvatarSpeak { ref text, .. } if text == "Hello"));
     let p: Proposal = serde_json::from_str(r#"{"kind":"avatarStop","proposalId":"x"}"#).unwrap();
     assert_eq!(p.proposal_id(), "x");
+}
+
+#[test]
+fn presence_scoped_bind_speak_stop_unbind() {
+    use crate::protocol::AvatarCommand as C;
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../assets/avatar_manifest.json");
+    let f = fake("bind", true);
+    let mut a = crate::avatar::AvatarActor::load(&manifest).unwrap();
+    a.speech = Speaker::new(f.cfg.clone());
+    a.autoload = false; a.visible = false; a.demo_motion = false;
+    // not bound: presence-scoped speech is ignored
+    a.apply_command(C::Speak { presence_id: Some("p-a".into()), text: "hi".into() });
+    assert!(!a.audio_playing_for_test());
+    a.apply_command(C::Bind { presence_id: "p-a".into() });
+    assert!(a.visible && a.bound_presence.as_deref() == Some("p-a"));
+    // another presence cannot drive this body
+    a.apply_command(C::Speak { presence_id: Some("p-b".into()), text: "intruder".into() });
+    a.apply_command(C::Speak { presence_id: Some("p-a".into()), text: "Hello from the presence layer.".into() });
+    let t = Instant::now();
+    while !a.audio_playing_for_test() && t.elapsed() < Duration::from_secs(5) { a.advance(0.02); std::thread::sleep(Duration::from_millis(20)); }
+    assert!(a.audio_playing_for_test());
+    // stop for the wrong presence does nothing; right one stops audio + face
+    a.apply_command(C::StopSpeech { presence_id: Some("p-b".into()) });
+    assert!(a.audio_playing_for_test());
+    a.apply_command(C::StopSpeech { presence_id: Some("p-a".into()) });
+    assert!(!a.audio_playing_for_test());
+    assert_eq!(a.face.jaw_open, 0.0);
+    // speak again, then retire: speech stops and the body hides (non-autoload)
+    a.apply_command(C::Speak { presence_id: Some("p-a".into()), text: "again".into() });
+    let t = Instant::now();
+    while !a.audio_playing_for_test() && t.elapsed() < Duration::from_secs(5) { a.advance(0.02); std::thread::sleep(Duration::from_millis(20)); }
+    a.apply_command(C::Unbind { presence_id: "p-b".into() });
+    assert!(a.visible, "unbind for a non-owner must not hide the body");
+    a.apply_command(C::Unbind { presence_id: "p-a".into() });
+    assert!(!a.visible && a.bound_presence.is_none() && !a.audio_playing_for_test());
+    assert_eq!(a.face.jaw_open, 0.0);
+}
+
+#[test]
+fn autoload_keeps_body_visible_after_unbind() {
+    use crate::protocol::AvatarCommand as C;
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../assets/avatar_manifest.json");
+    let mut a = crate::avatar::AvatarActor::load(&manifest).unwrap();
+    a.autoload = true; a.visible = true; a.demo_motion = true;
+    a.apply_command(C::Bind { presence_id: "p".into() });
+    assert!(!a.demo_motion);
+    a.apply_command(C::Unbind { presence_id: "p".into() });
+    assert!(a.visible && a.demo_motion);
 }

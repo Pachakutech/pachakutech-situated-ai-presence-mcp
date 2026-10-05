@@ -90,6 +90,10 @@ impl PresenceActor {
         Ok(())
     }
 
+    pub fn contains(&self, presence_id: &str) -> bool {
+        self.live.contains_key(presence_id)
+    }
+
     pub fn retire(&mut self, presence_id: &str) -> Result<(), String> {
         self.live
             .remove(presence_id)

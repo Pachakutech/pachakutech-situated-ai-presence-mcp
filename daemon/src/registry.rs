@@ -21,6 +21,10 @@ pub struct Registry {
     next_owner: u32,
     frame: u32,
     gpu_ranges: HashMap<String, GpuRange>,
+    /// Whether the daemon has a loaded avatar asset to hand out.
+    avatar_available: bool,
+    /// The single avatar body belongs to at most one presence at a time.
+    avatar_owner: Option<String>,
 }
 
 impl Registry {
@@ -33,6 +37,8 @@ impl Registry {
             next_owner: 1,
             frame: 1,
             gpu_ranges: HashMap::new(),
+            avatar_available: false,
+            avatar_owner: None,
         }
     }
 
@@ -46,22 +52,50 @@ impl Registry {
         );
     }
 
+    pub fn set_avatar_available(&mut self, available: bool) {
+        self.avatar_available = available;
+    }
+
+    /// Spawns the presence. Returns true if it was granted the avatar body
+    /// (one body exists; later presences are tracked but have no body).
     pub fn spawn_presence(
         &mut self,
         presence_id: &str,
         source_context: &str,
         style_hint: Option<&str>,
         artifact_id: Option<&str>,
-    ) {
+    ) -> bool {
         self.presence.spawn(&self.memory, presence_id, source_context, style_hint, artifact_id);
+        if self.avatar_available && self.avatar_owner.is_none() {
+            self.avatar_owner = Some(presence_id.to_string());
+        }
+        self.has_avatar(presence_id)
+    }
+
+    pub fn has_presence(&self, presence_id: &str) -> bool {
+        self.presence.contains(presence_id)
+    }
+
+    pub fn has_avatar(&self, presence_id: &str) -> bool {
+        self.avatar_owner.as_deref() == Some(presence_id) && self.presence.contains(presence_id)
+    }
+
+    pub fn avatar_owner(&self) -> Option<&str> {
+        self.avatar_owner.as_deref()
     }
 
     pub fn animate_presence(&mut self, presence_id: &str, text: &str) -> Result<(), String> {
         self.presence.animate(presence_id, text)
     }
 
-    pub fn retire_presence(&mut self, presence_id: &str) -> Result<(), String> {
-        self.presence.retire(presence_id)
+    /// Retires the presence. Returns true if it owned the avatar body (now released).
+    pub fn retire_presence(&mut self, presence_id: &str) -> Result<bool, String> {
+        self.presence.retire(presence_id)?;
+        let owned = self.avatar_owner.as_deref() == Some(presence_id);
+        if owned {
+            self.avatar_owner = None;
+        }
+        Ok(owned)
     }
 
     pub fn add_artifact(

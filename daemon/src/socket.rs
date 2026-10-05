@@ -51,6 +51,10 @@ impl SocketServer {
         })
     }
 
+    pub fn set_avatar_available(&mut self, available: bool) {
+        self.registry.lock().expect("registry mutex poisoned").set_avatar_available(available);
+    }
+
     pub fn take_avatar_commands(&mut self) -> Vec<AvatarCommand> {
         std::mem::take(&mut self.avatar_commands)
     }
@@ -206,40 +210,30 @@ fn dispatch(
             return (ProposalResult::ok(&proposal_id, None), false);
         }
         Proposal::AvatarSpeak { text, .. } => {
-            // Validate here so the client gets the error; synthesis happens off-thread.
+            // DEBUG path (no presence). Validate here so the client gets the error.
             if let Err(e) = crate::speech::pipeline::normalize_text(text) {
                 return (ProposalResult::err(&proposal_id, e), false);
             }
-            avatar_commands.push(AvatarCommand::Speak { text: text.clone() });
+            avatar_commands.push(AvatarCommand::Speak { presence_id: None, text: text.clone() });
             return (ProposalResult::ok(&proposal_id, None), false);
         }
         Proposal::AvatarStop { .. } => {
-            avatar_commands.push(AvatarCommand::StopSpeech);
+            avatar_commands.push(AvatarCommand::StopSpeech { presence_id: None });
             return (ProposalResult::ok(&proposal_id, None), false);
         }
         _ => {}
     }
     let mut reg = registry.lock().expect("registry mutex poisoned");
 
+    if let Some(result) = route_presence(&proposal, &mut reg, avatar_commands) {
+        return (result, false);
+    }
+
     let result = match proposal {
         Proposal::HighlightRegion { description, duration_seconds, .. } => {
             reg.highlight_region(vk, &description, duration_seconds);
             ProposalResult::ok(&proposal_id, Some(json!({ "regionId": format!("r-{proposal_id}") })))
         }
-        Proposal::SpawnPresence { presence_id, source_context, style_hint, artifact_id, .. } => {
-            reg.spawn_presence(&presence_id, &source_context, style_hint.as_deref(), artifact_id.as_deref());
-            ProposalResult::ok(&proposal_id, Some(json!({ "presenceId": presence_id })))
-        }
-        Proposal::AnimatePresence { presence_id, text, .. } => {
-            match reg.animate_presence(&presence_id, &text) {
-                Ok(()) => ProposalResult::ok(&proposal_id, None),
-                Err(e) => ProposalResult::err(&proposal_id, e),
-            }
-        }
-        Proposal::RetirePresence { presence_id, .. } => match reg.retire_presence(&presence_id) {
-            Ok(()) => ProposalResult::ok(&proposal_id, None),
-            Err(e) => ProposalResult::err(&proposal_id, e),
-        },
         Proposal::AddArtifact { artifact_id, description, source_uri, .. } => {
             reg.add_artifact(&artifact_id, &description, source_uri.as_deref(), pipeline);
             ProposalResult::ok(&proposal_id, Some(json!({ "artifactId": artifact_id })))
@@ -251,9 +245,148 @@ fn dispatch(
         Proposal::Shutdown { .. }
         | Proposal::AvatarRest { .. }
         | Proposal::AvatarFace { .. }
+        | Proposal::SpawnPresence { .. }
+        | Proposal::AnimatePresence { .. }
+        | Proposal::RetirePresence { .. }
+        | Proposal::StopPresence { .. }
         | Proposal::AvatarSpeak { .. }
         | Proposal::AvatarStop { .. }
         | Proposal::AvatarWalk { .. } => ProposalResult::ok(&proposal_id, None),
     };
     (result, false)
+}
+
+/// Presence-scoped control plane. Pure bookkeeping + command emission (no GPU),
+/// so it is unit-testable. Returns None for kinds it does not own.
+///
+/// - spawnPresence: creates the presence; if the (single) avatar body is free
+///   and loaded, binds it to this presence and shows it.
+/// - animatePresence: the text is SPOKEN by that presence's avatar.
+/// - stopPresence: stops that presence's speech, face to neutral.
+/// - retirePresence: stops its speech, releases and hides the body.
+pub fn route_presence(proposal: &Proposal, reg: &mut Registry, cmds: &mut Vec<AvatarCommand>) -> Option<ProposalResult> {
+    match proposal {
+        Proposal::SpawnPresence { proposal_id, presence_id, source_context, style_hint, artifact_id } => {
+            let granted = reg.spawn_presence(presence_id, source_context, style_hint.as_deref(), artifact_id.as_deref());
+            if granted {
+                cmds.push(AvatarCommand::Bind { presence_id: presence_id.clone() });
+            }
+            let note = if granted {
+                "avatar body bound"
+            } else if reg.avatar_owner().is_some() {
+                "no avatar body: it is bound to another presence (one body is supported)"
+            } else {
+                "no avatar body: avatar assets are not loaded"
+            };
+            Some(ProposalResult::ok(proposal_id, Some(json!({ "presenceId": presence_id, "avatar": granted, "note": note }))))
+        }
+        Proposal::AnimatePresence { proposal_id, presence_id, text } => {
+            if !reg.has_presence(presence_id) {
+                return Some(ProposalResult::err(proposal_id, format!("no live presence with id {presence_id}")));
+            }
+            if !reg.has_avatar(presence_id) {
+                return Some(ProposalResult::err(proposal_id, format!("presence {presence_id} has no avatar body to speak with")));
+            }
+            if let Err(e) = crate::speech::pipeline::normalize_text(text) {
+                return Some(ProposalResult::err(proposal_id, e));
+            }
+            let _ = reg.animate_presence(presence_id, text);
+            cmds.push(AvatarCommand::Speak { presence_id: Some(presence_id.clone()), text: text.clone() });
+            Some(ProposalResult::ok(proposal_id, None))
+        }
+        Proposal::StopPresence { proposal_id, presence_id } => {
+            if !reg.has_presence(presence_id) {
+                return Some(ProposalResult::err(proposal_id, format!("no live presence with id {presence_id}")));
+            }
+            if reg.has_avatar(presence_id) {
+                cmds.push(AvatarCommand::StopSpeech { presence_id: Some(presence_id.clone()) });
+            }
+            Some(ProposalResult::ok(proposal_id, None))
+        }
+        Proposal::RetirePresence { proposal_id, presence_id } => Some(match reg.retire_presence(presence_id) {
+            Ok(owned) => {
+                if owned {
+                    cmds.push(AvatarCommand::Unbind { presence_id: presence_id.clone() });
+                }
+                ProposalResult::ok(proposal_id, None)
+            }
+            Err(e) => ProposalResult::err(proposal_id, e),
+        }),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn p(json: &str) -> Proposal { serde_json::from_str(json).unwrap() }
+    fn run(reg: &mut Registry, cmds: &mut Vec<AvatarCommand>, json: &str) -> ProposalResult {
+        route_presence(&p(json), reg, cmds).expect("routed")
+    }
+    const SPAWN: &str = r#"{"kind":"spawnPresence","proposalId":"1","presenceId":"%ID%","sourceContext":"x"}"#;
+    fn spawn(id: &str) -> String { SPAWN.replace("%ID%", id) }
+
+    #[test]
+    fn speak_targets_a_presence_and_requires_its_body() {
+        let (mut reg, mut cmds) = (Registry::new(), vec![]);
+        reg.set_avatar_available(true);
+        let r = run(&mut reg, &mut cmds, &spawn("p-a"));
+        assert_eq!(r.status, "ok");
+        assert_eq!(r.detail.as_ref().unwrap()["avatar"], true);
+        assert!(matches!(cmds.as_slice(), [AvatarCommand::Bind { presence_id }] if presence_id == "p-a"));
+        cmds.clear();
+        let r = run(&mut reg, &mut cmds, r#"{"kind":"animatePresence","proposalId":"2","presenceId":"p-a","text":"Hello  there"}"#);
+        assert_eq!(r.status, "ok");
+        assert!(matches!(cmds.as_slice(), [AvatarCommand::Speak { presence_id: Some(id), text }] if id == "p-a" && text == "Hello  there"));
+        cmds.clear();
+        // unknown presence, empty text
+        assert_eq!(run(&mut reg, &mut cmds, r#"{"kind":"animatePresence","proposalId":"3","presenceId":"nope","text":"hi"}"#).status, "error");
+        assert_eq!(run(&mut reg, &mut cmds, r#"{"kind":"animatePresence","proposalId":"4","presenceId":"p-a","text":"   "}"#).status, "error");
+        assert!(cmds.is_empty());
+    }
+
+    #[test]
+    fn second_presence_has_no_body_and_cannot_speak() {
+        let (mut reg, mut cmds) = (Registry::new(), vec![]);
+        reg.set_avatar_available(true);
+        run(&mut reg, &mut cmds, &spawn("p-a"));
+        cmds.clear();
+        let r = run(&mut reg, &mut cmds, &spawn("p-b"));
+        assert_eq!(r.detail.as_ref().unwrap()["avatar"], false);
+        assert!(cmds.is_empty());
+        let r = run(&mut reg, &mut cmds, r#"{"kind":"animatePresence","proposalId":"2","presenceId":"p-b","text":"hi"}"#);
+        assert_eq!(r.status, "error");
+        assert!(r.error.unwrap().contains("no avatar body"));
+        // retiring the owner frees the body for the next spawn
+        let r = run(&mut reg, &mut cmds, r#"{"kind":"retirePresence","proposalId":"3","presenceId":"p-a"}"#);
+        assert_eq!(r.status, "ok");
+        assert!(matches!(cmds.as_slice(), [AvatarCommand::Unbind { presence_id }] if presence_id == "p-a"));
+        cmds.clear();
+        let r = run(&mut reg, &mut cmds, &spawn("p-c"));
+        assert_eq!(r.detail.as_ref().unwrap()["avatar"], true);
+    }
+
+    #[test]
+    fn stop_and_retire_are_scoped_and_idempotent_errors() {
+        let (mut reg, mut cmds) = (Registry::new(), vec![]);
+        reg.set_avatar_available(true);
+        run(&mut reg, &mut cmds, &spawn("p-a"));
+        cmds.clear();
+        assert_eq!(run(&mut reg, &mut cmds, r#"{"kind":"stopPresence","proposalId":"s","presenceId":"p-a"}"#).status, "ok");
+        assert!(matches!(cmds.as_slice(), [AvatarCommand::StopSpeech { presence_id: Some(id) }] if id == "p-a"));
+        cmds.clear();
+        assert_eq!(run(&mut reg, &mut cmds, r#"{"kind":"stopPresence","proposalId":"s","presenceId":"ghost"}"#).status, "error");
+        assert_eq!(run(&mut reg, &mut cmds, r#"{"kind":"retirePresence","proposalId":"r","presenceId":"p-a"}"#).status, "ok");
+        assert_eq!(run(&mut reg, &mut cmds, r#"{"kind":"retirePresence","proposalId":"r2","presenceId":"p-a"}"#).status, "error");
+    }
+
+    #[test]
+    fn without_loaded_assets_spawn_succeeds_but_has_no_body() {
+        let (mut reg, mut cmds) = (Registry::new(), vec![]);
+        let r = run(&mut reg, &mut cmds, &spawn("p-a"));
+        assert_eq!(r.status, "ok");
+        assert_eq!(r.detail.as_ref().unwrap()["avatar"], false);
+        assert!(cmds.is_empty());
+    }
 }

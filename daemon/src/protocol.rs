@@ -85,14 +85,24 @@ pub enum Proposal {
         #[serde(rename = "morphWeight")]
         morph_weight: Option<f32>,
     },
-    /// Speak `text`: local TTS -> Rhubarb -> audio + synced jaw/visemes. Cancels any current utterance.
+    /// Stop one presence's speech (audio and mouth) and return its face to neutral. Socket/CLI
+    /// only; the MCP contract has no such tool.
+    #[serde(rename = "stopPresence")]
+    StopPresence {
+        #[serde(rename = "proposalId")]
+        proposal_id: String,
+        #[serde(rename = "presenceId")]
+        presence_id: String,
+    },
+    /// DEBUG: speak on the default avatar without a presence. The product path is
+    /// `animatePresence` with a presenceId.
     #[serde(rename = "avatarSpeak")]
     AvatarSpeak {
         #[serde(rename = "proposalId")]
         proposal_id: String,
         text: String,
     },
-    /// Interrupt speech: stops audio and face together and cancels pending synthesis.
+    /// DEBUG: interrupt speech on the default avatar. Product path: `stopPresence`.
     #[serde(rename = "avatarStop")]
     AvatarStop {
         #[serde(rename = "proposalId")]
@@ -114,8 +124,13 @@ pub enum AvatarCommand {
     Rest,
     Face { jaw_open: f32, morph_index: Option<u32>, morph_weight: f32 },
     Walk { x: f32, z: f32 },
-    Speak { text: String },
-    StopSpeech,
+    /// `presence_id: None` is the debug path (avatarSpeak/avatarStop).
+    Speak { presence_id: Option<String>, text: String },
+    StopSpeech { presence_id: Option<String> },
+    /// A presence was granted the avatar body: show it, neutral pose.
+    Bind { presence_id: String },
+    /// The owning presence was retired: stop speech and hide the body.
+    Unbind { presence_id: String },
 }
 
 impl Proposal {
@@ -131,6 +146,7 @@ impl Proposal {
             | Proposal::AvatarRest { proposal_id }
             | Proposal::AvatarFace { proposal_id, .. }
             | Proposal::AvatarSpeak { proposal_id, .. }
+            | Proposal::StopPresence { proposal_id, .. }
             | Proposal::AvatarStop { proposal_id }
             | Proposal::AvatarWalk { proposal_id, .. } => proposal_id,
         }

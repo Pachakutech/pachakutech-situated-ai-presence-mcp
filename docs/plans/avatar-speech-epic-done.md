@@ -1,6 +1,8 @@
 # Avatar speech epic — done (device check pending)
 
-`presence avatar speak "Hello from the presence layer."` runs text through Piper (WAV), Rhubarb (mouth cues) and a faceanim track, plays the WAV through an external player, and drives `jawOpen` plus `viseme_*` morph weights from the audio clock. `presence avatar stop` and `avatar rest` stop the audio and return the face to neutral together. Not run on a GPU or speakers yet; see Device check.
+> **Superseded for the user-facing command by `docs/plans/cleanup-done.md`:** speech is presence-scoped (`presence presence speak <id> "text"`). The `avatarSpeak`/`avatarStop` socket kinds below remain as debug only.
+
+Speech runs text through Piper (WAV), Rhubarb (mouth cues) and a faceanim track, plays the WAV through an external player, and drives `jawOpen` plus `viseme_*` morph weights from the audio clock. `presence presence stop <id>` and `avatar rest` stop the audio and return the face to neutral together. Not run on a GPU or speakers yet; see Device check.
 
 ## Dependencies (all out of process; no GPL code is linked into the daemon)
 
@@ -21,10 +23,11 @@ Install used for testing: `pip install piper-tts`; voice `.onnx` + `.onnx.json` 
 export PRESENCE_PIPER_MODEL=~/voices/en_US-lessac-low.onnx
 export PRESENCE_RHUBARB_BIN=~/tools/Rhubarb-Lip-Sync-1.13.0-Linux/rhubarb
 ./daemon/target/release/presence-daemon
-presence avatar speak "Hello from the presence layer."
-presence avatar stop
+ID=$(presence presence spawn)
+presence presence speak "$ID" "Hello from the presence layer."
+presence presence stop "$ID"
 ```
-Socket: `{"kind":"avatarSpeak","proposalId":"s","text":"..."}` and `{"kind":"avatarStop","proposalId":"x"}`. The reply is `ok` as soon as the request is queued; synthesis and playback errors go to the daemon log (`[speech] ...`). Manual `avatarFace` also stops speech so the two do not fight.
+Debug socket kinds (no presence): `{"kind":"avatarSpeak","proposalId":"s","text":"..."}` and `{"kind":"avatarStop","proposalId":"x"}`. The reply is `ok` as soon as the request is queued; synthesis and playback errors go to the daemon log (`[speech] ...`). Manual `avatarFace` also stops speech so the two do not fight.
 
 ## How it works
 - `daemon/src/speech/pipeline.rs`: normalize whitespace (max 2000 chars) -> cache key -> Piper -> Rhubarb -> `faceanim.json`. Bundle: `speech.wav`, `rhubarb.json`, `faceanim.json`, `speech.json` (text, voice, timings), published atomically (temp dir + rename). Key covers normalized text, voice file name and size, rate, engine id, recognizer, and the viseme-map version. Identical requests never re-run Piper or Rhubarb.

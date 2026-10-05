@@ -117,20 +117,22 @@ function requestShutdown(path: string): Promise<void> {
   });
 }
 
-/** One JSON line on the daemon socket. Used by `presence avatar`. */
-export function sendProposal(payload: Record<string, unknown>): Promise<void> {
+export type ProposalReply = { status?: string; error?: string; detail?: Record<string, unknown> };
+
+/** One JSON line on the daemon socket; resolves with the daemon's reply. Used by `presence presence` and `presence avatar`. */
+export function sendProposal(payload: Record<string, unknown>): Promise<ProposalReply> {
   const path = socketPath();
   return new Promise((resolve, reject) => {
     const sock = createConnection({ path });
     let buf = "";
     let settled = false;
-    const finish = (err?: Error) => {
+    const finish = (err?: Error, reply?: ProposalReply) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       sock.destroy();
       if (err) reject(err);
-      else resolve();
+      else resolve(reply as ProposalReply);
     };
     const timer = setTimeout(() => finish(new Error("timed out")), 2000);
     sock.once("error", (err) => finish(err));
@@ -143,8 +145,8 @@ export function sendProposal(payload: Record<string, unknown>): Promise<void> {
       const nl = buf.indexOf("\n");
       if (nl === -1) return;
       try {
-        const result = JSON.parse(buf.slice(0, nl)) as { status?: string; error?: string };
-        if (result.status === "ok") finish();
+        const result = JSON.parse(buf.slice(0, nl)) as ProposalReply;
+        if (result.status === "ok") finish(undefined, result);
         else finish(new Error(result.error || "proposal refused"));
       } catch {
         finish(new Error("malformed proposal response"));

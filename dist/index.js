@@ -46,7 +46,8 @@ server.registerTool("spawnPresence", {
     description: "Instanced Manifestation, step 1 of 3 (spawn / animate / retire). Creates a " +
         "persistent presence derived from the given context (e.g. 'a character based " +
         "on what's on screen'). Optionally built from a held artifact (see addArtifact) " +
-        "rather than derived fresh. Returns a presenceId — pass it to animatePresence " +
+        "rather than derived fresh. The first live presence gets the daemon's avatar body. " +
+        "Returns a presenceId — pass it to animatePresence " +
         "and retirePresence. The generative work (what the presence actually looks " +
         "like) happens inside this contract; the contract itself never changes.",
     inputSchema: {
@@ -101,8 +102,10 @@ server.registerTool("retireArtifact", {
 });
 server.registerTool("animatePresence", {
     title: "Drive an existing presence",
-    description: "Instanced Manifestation, step 2 of 3. Feeds new content (e.g. words to say) " +
-        "to a presence created by spawnPresence.",
+    description: "Instanced Manifestation, step 2 of 3. Feeds new content to a presence created " +
+        "by spawnPresence. The text is spoken aloud by that presence (local voice, " +
+        "mouth synced to the audio); a new call interrupts the previous utterance. " +
+        "Errors if the presence has no avatar body.",
     inputSchema: {
         presenceId: z.string(),
         text: z.string().describe("What the presence should say or express next"),
