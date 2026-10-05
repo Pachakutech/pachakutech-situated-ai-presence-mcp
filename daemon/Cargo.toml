@@ -33,6 +33,8 @@ libc = "0.2"
 # capture path — same pattern as ash/wayland-client. Avoids the `gbm` crate's
 # build-time dependency on libclang (via drm-ffi/bindgen).
 libloading = "0.8"
+# Pure-Rust SHA-256 for splatbind topology-fingerprint validation.
+sha2 = "0.10"
 
 [dev-dependencies]
 # Used only in tests, to assert real struct field offsets (`offset_of!`)

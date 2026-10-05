@@ -1,4 +1,5 @@
 mod actors;
+mod avatar;
 mod overlay;
 mod pipeline;
 mod protocol;
@@ -26,6 +27,15 @@ fn socket_path() -> PathBuf {
 }
 
 fn main() {
+    let argv: Vec<String> = std::env::args().collect();
+    if argv.get(1).map(|s| s.as_str()) == Some("avatar-debug") {
+        // Headless: no Wayland/Vulkan needed. See avatar/debug.rs.
+        if let Err(e) = avatar::debug::run(&argv[2..]) {
+            eprintln!("[avatar-debug] {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
     println!("pachakutech-presence-daemon starting...");
 
     let mut overlay = match Overlay::connect() {
