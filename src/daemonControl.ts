@@ -117,6 +117,42 @@ function requestShutdown(path: string): Promise<void> {
   });
 }
 
+/** One JSON line on the daemon socket. Used by `presence avatar`. */
+export function sendProposal(payload: Record<string, unknown>): Promise<void> {
+  const path = socketPath();
+  return new Promise((resolve, reject) => {
+    const sock = createConnection({ path });
+    let buf = "";
+    let settled = false;
+    const finish = (err?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      sock.destroy();
+      if (err) reject(err);
+      else resolve();
+    };
+    const timer = setTimeout(() => finish(new Error("timed out")), 2000);
+    sock.once("error", (err) => finish(err));
+    sock.once("connect", () => {
+      sock.setEncoding("utf8");
+      sock.write(`${JSON.stringify(payload)}\n`);
+    });
+    sock.on("data", (chunk: string) => {
+      buf += chunk;
+      const nl = buf.indexOf("\n");
+      if (nl === -1) return;
+      try {
+        const result = JSON.parse(buf.slice(0, nl)) as { status?: string; error?: string };
+        if (result.status === "ok") finish();
+        else finish(new Error(result.error || "proposal refused"));
+      } catch {
+        finish(new Error("malformed proposal response"));
+      }
+    });
+  });
+}
+
 export async function startDaemon(): Promise<number> {
   const sock = socketPath();
   if (await socketReachable(sock)) {

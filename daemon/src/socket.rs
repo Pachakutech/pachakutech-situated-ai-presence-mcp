@@ -2,7 +2,7 @@
 //! MCP Binding is the only expected client, and it's a single local process.
 
 use crate::pipeline::SplatPipeline;
-use crate::protocol::{Proposal, ProposalResult};
+use crate::protocol::{AvatarCommand, Proposal, ProposalResult};
 use crate::registry::Registry;
 use crate::vulkan::VulkanContext;
 use serde_json::json;
@@ -23,6 +23,7 @@ pub struct SocketServer {
     path: PathBuf,
     clients: Vec<Client>,
     registry: Mutex<Registry>,
+    avatar_commands: Vec<AvatarCommand>,
 }
 
 enum ClientRead {
@@ -46,7 +47,12 @@ impl SocketServer {
             path: socket_path.to_path_buf(),
             clients: Vec::new(),
             registry: Mutex::new(Registry::new()),
+            avatar_commands: Vec::new(),
         })
+    }
+
+    pub fn take_avatar_commands(&mut self) -> Vec<AvatarCommand> {
+        std::mem::take(&mut self.avatar_commands)
     }
 
     pub fn listener_fd(&self) -> RawFd {
@@ -72,7 +78,7 @@ impl SocketServer {
 
         let mut i = 0;
         while i < self.clients.len() {
-            match read_client(&mut self.clients[i], vk, pipeline, &self.registry) {
+            match read_client(&mut self.clients[i], vk, pipeline, &self.registry, &mut self.avatar_commands) {
                 Ok(ClientRead::Keep) => i += 1,
                 Ok(ClientRead::Closed) | Err(_) => {
                     self.clients.remove(i);
@@ -126,6 +132,7 @@ fn read_client(
     vk: &VulkanContext,
     pipeline: &SplatPipeline,
     registry: &Mutex<Registry>,
+    avatar_commands: &mut Vec<AvatarCommand>,
 ) -> io::Result<ClientRead> {
     let mut tmp = [0u8; 4096];
     loop {
@@ -145,7 +152,7 @@ fn read_client(
             continue;
         }
         let (result, stop) = match serde_json::from_str::<Proposal>(line) {
-            Ok(proposal) => dispatch(proposal, vk, pipeline, registry),
+            Ok(proposal) => dispatch(proposal, vk, pipeline, registry, avatar_commands),
             Err(e) => {
                 eprintln!("[socket] malformed proposal: {e}");
                 (ProposalResult::err("unknown", format!("malformed proposal: {e}")), false)
@@ -175,10 +182,30 @@ fn dispatch(
     vk: &VulkanContext,
     pipeline: &SplatPipeline,
     registry: &Mutex<Registry>,
+    avatar_commands: &mut Vec<AvatarCommand>,
 ) -> (ProposalResult, bool) {
     let proposal_id = proposal.proposal_id().to_string();
     if matches!(proposal, Proposal::Shutdown { .. }) {
         return (ProposalResult::ok(&proposal_id, None), true);
+    }
+    match &proposal {
+        Proposal::AvatarRest { .. } => {
+            avatar_commands.push(AvatarCommand::Rest);
+            return (ProposalResult::ok(&proposal_id, None), false);
+        }
+        Proposal::AvatarFace { jaw_open, morph_index, morph_weight, .. } => {
+            avatar_commands.push(AvatarCommand::Face {
+                jaw_open: *jaw_open,
+                morph_index: *morph_index,
+                morph_weight: morph_weight.unwrap_or(0.0),
+            });
+            return (ProposalResult::ok(&proposal_id, None), false);
+        }
+        Proposal::AvatarWalk { x, z, .. } => {
+            avatar_commands.push(AvatarCommand::Walk { x: *x, z: *z });
+            return (ProposalResult::ok(&proposal_id, None), false);
+        }
+        _ => {}
     }
     let mut reg = registry.lock().expect("registry mutex poisoned");
 
@@ -209,7 +236,10 @@ fn dispatch(
             Ok(()) => ProposalResult::ok(&proposal_id, None),
             Err(e) => ProposalResult::err(&proposal_id, e),
         },
-        Proposal::Shutdown { .. } => ProposalResult::ok(&proposal_id, None),
+        Proposal::Shutdown { .. }
+        | Proposal::AvatarRest { .. }
+        | Proposal::AvatarFace { .. }
+        | Proposal::AvatarWalk { .. } => ProposalResult::ok(&proposal_id, None),
     };
     (result, false)
 }

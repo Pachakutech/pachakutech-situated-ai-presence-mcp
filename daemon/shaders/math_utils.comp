@@ -18,9 +18,13 @@
 //      "shortest path" sign fix DQB needs (see blend_bones() note).
 
 struct DualQuat {
-    vec4 real;  // Rotation quaternion (w, x, y, z)
-    vec4 dual;  // Translation + rotation coupling
+    vec4 real;  // Rotation quaternion (w, x, y, z): scalar in .x, vector in .yzw
+    vec4 dual;  // Same component order. dual = 0.5 * t_quat * real
 };
+
+// Products below are written in (x, y, z, w). Storage is (w, x, y, z).
+vec4 wxyz_to_xyzw(vec4 q) { return vec4(q.yzw, q.x); }
+vec4 xyzw_to_wxyz(vec4 q) { return vec4(q.w, q.xyz); }
 
 // Normalize a dual quaternion. Only enforces |real| == 1; a fully unit
 // dual quaternion also needs dot(real, dual) == 0, which this doesn't
@@ -35,14 +39,14 @@ DualQuat normalize_dq(DualQuat dq) {
     return dq;
 }
 
-// Transform a point using a Dual Quaternion. Unchanged from the original —
-// checked this one by hand against the standard t = 2*(dual * conj(real))
-// derivation and it's correct as given.
+// t = 2 * (dual * conj(real)), with the scalar in component 0.
 vec3 transform_point_dq(DualQuat dq, vec3 p) {
-    vec3 q = dq.real.xyz;
-    float w = dq.real.w;
+    vec4 real = wxyz_to_xyzw(dq.real);
+    vec4 dual = wxyz_to_xyzw(dq.dual);
+    vec3 q = real.xyz;
+    float w = real.w;
 
-    vec3 t = 2.0 * (dq.dual.xyz * w - dq.dual.w * q - cross(dq.dual.xyz, q));
+    vec3 t = 2.0 * (dual.xyz * w - dual.w * q - cross(dual.xyz, q));
 
     vec3 tmp = cross(q, p) + w * p;
     vec3 rotated = p + 2.0 * cross(q, tmp);
@@ -54,18 +58,25 @@ vec3 transform_point_dq(DualQuat dq, vec3 p) {
 // two terms the original dropped (b.dual.w * a.real.xyz and
 // a.dual.w * b.real.xyz).
 DualQuat multiply_dq(DualQuat a, DualQuat b) {
+    vec4 ar = wxyz_to_xyzw(a.real);
+    vec4 ad = wxyz_to_xyzw(a.dual);
+    vec4 br = wxyz_to_xyzw(b.real);
+    vec4 bd = wxyz_to_xyzw(b.dual);
+
+    vec4 real;
+    real.w = ar.w * br.w - dot(ar.xyz, br.xyz);
+    real.xyz = ar.w * br.xyz + br.w * ar.xyz + cross(ar.xyz, br.xyz);
+
+    vec4 dual;
+    dual.w = ar.w * bd.w + ad.w * br.w
+           - dot(ar.xyz, bd.xyz) - dot(ad.xyz, br.xyz);
+    dual.xyz = ar.w * bd.xyz + bd.w * ar.xyz
+             + br.w * ad.xyz + ad.w * br.xyz
+             + cross(ar.xyz, bd.xyz) + cross(ad.xyz, br.xyz);
+
     DualQuat result;
-
-    result.real.w = a.real.w * b.real.w - dot(a.real.xyz, b.real.xyz);
-    result.real.xyz = a.real.w * b.real.xyz + b.real.w * a.real.xyz + cross(a.real.xyz, b.real.xyz);
-
-    result.dual.w = a.real.w * b.dual.w + a.dual.w * b.real.w
-                  - dot(a.real.xyz, b.dual.xyz) - dot(a.dual.xyz, b.real.xyz);
-
-    result.dual.xyz = a.real.w * b.dual.xyz + b.dual.w * a.real.xyz
-                     + b.real.w * a.dual.xyz + a.dual.w * b.real.xyz
-                     + cross(a.real.xyz, b.dual.xyz) + cross(a.dual.xyz, b.real.xyz);
-
+    result.real = xyzw_to_wxyz(real);
+    result.dual = xyzw_to_wxyz(dual);
     return normalize_dq(result); // Drift prevention
 }
 
@@ -113,7 +124,7 @@ DualQuat blend_bones(DualQuat b0, DualQuat b1, DualQuat b2, DualQuat b3, vec4 we
 // quaternion-to-matrix derivation in daemon/src/actors/splat_io.rs exactly,
 // which is a good cross-check that both sides agree.
 mat3 extract_rotation_dq(DualQuat dq) {
-    vec4 q = dq.real;
+    vec4 q = wxyz_to_xyzw(dq.real);
     float x = q.x, y = q.y, z = q.z, w = q.w;
 
     return mat3(
@@ -125,9 +136,11 @@ mat3 extract_rotation_dq(DualQuat dq) {
 
 // Conjugate of a Dual Quaternion (useful for inversion). Unchanged.
 DualQuat conjugate_dq(DualQuat dq) {
+    vec4 real = wxyz_to_xyzw(dq.real);
+    vec4 dual = wxyz_to_xyzw(dq.dual);
     DualQuat res;
-    res.real = vec4(-dq.real.xyz, dq.real.w);
-    res.dual = vec4(-dq.dual.xyz, dq.dual.w);
+    res.real = xyzw_to_wxyz(vec4(-real.xyz, real.w));
+    res.dual = xyzw_to_wxyz(vec4(-dual.xyz, dual.w));
     return res;
 }
 
@@ -137,12 +150,14 @@ DualQuat inverse_dq(DualQuat dq) {
     return conjugate_dq(dq);
 }
 
-// Create a Dual Quaternion from a rotation quat and a translation vector.
-// Unchanged.
+// `rotation` is (w, x, y, z), the same order as `DualQuat.real`.
 DualQuat create_dq(vec4 rotation, vec3 translation) {
+    vec4 q = wxyz_to_xyzw(rotation);
+    vec4 dual;
+    dual.w = -0.5 * dot(translation, q.xyz);
+    dual.xyz = 0.5 * (q.w * translation + cross(translation, q.xyz));
     DualQuat dq;
     dq.real = rotation;
-    dq.dual.w = -0.5 * dot(translation, rotation.xyz);
-    dq.dual.xyz = 0.5 * (rotation.w * translation + cross(translation, rotation.xyz));
+    dq.dual = xyzw_to_wxyz(dual);
     return dq;
 }

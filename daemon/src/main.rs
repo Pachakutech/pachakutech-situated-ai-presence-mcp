@@ -5,6 +5,7 @@ mod pipeline;
 mod protocol;
 mod registry;
 mod socket;
+mod splat_sprites;
 mod vulkan;
 
 use overlay::{Overlay, OverlayGpu};
@@ -12,7 +13,26 @@ use pipeline::SplatPipeline;
 use std::path::PathBuf;
 use vulkan::VulkanContext;
 
-const PIPELINE_CAPACITY: u32 = 256;
+/// Artifact ingest keeps the low slots. The avatar cloud is uploaded at
+/// `ARTIFACT_SLOTS` and is not handed out by the registry.
+const ARTIFACT_SLOTS: u32 = 4096;
+const AVATAR_SLOTS: u32 = 50_000;
+const PIPELINE_CAPACITY: u32 = ARTIFACT_SLOTS + AVATAR_SLOTS;
+
+fn avatar_manifest() -> PathBuf {
+    if let Ok(over) = std::env::var("PRESENCE_AVATAR_MANIFEST") {
+        if !over.is_empty() {
+            return PathBuf::from(over);
+        }
+    }
+    let compiled = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../assets/avatar_manifest.json");
+    let candidates = [
+        PathBuf::from("assets/avatar_manifest.json"),
+        PathBuf::from("../assets/avatar_manifest.json"),
+        compiled.clone(),
+    ];
+    candidates.into_iter().find(|p| p.exists()).unwrap_or(compiled)
+}
 
 fn socket_path() -> PathBuf {
     // Same override the Node client reads, so `presence daemon stop` reaches
@@ -80,7 +100,7 @@ fn main() {
         }
     };
 
-    let pipeline = match SplatPipeline::new(&vk, PIPELINE_CAPACITY) {
+    let pipeline = match SplatPipeline::new(&vk, PIPELINE_CAPACITY, ARTIFACT_SLOTS) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("[pipeline] failed to create: {e}");
@@ -95,8 +115,39 @@ fn main() {
         }
     }
 
+    let manifest = avatar_manifest();
+    let mut avatar = match avatar::AvatarActor::load(&manifest) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("[avatar] failed to load {}: {e}", manifest.display());
+            gpu.destroy(&vk);
+            std::process::exit(1);
+        }
+    };
+    let Some(jaw) = avatar.jaw_joint else {
+        eprintln!("[avatar] jaw_joint is not a joint on {}", manifest.display());
+        gpu.destroy(&vk);
+        std::process::exit(1);
+    };
+    if avatar.splat_count() as u32 > AVATAR_SLOTS {
+        eprintln!(
+            "[avatar] cloud has {} splats; the reserved range holds {AVATAR_SLOTS}",
+            avatar.splat_count()
+        );
+        gpu.destroy(&vk);
+        std::process::exit(1);
+    }
+    println!(
+        "[avatar] {} splats | {} joints | jaw {} | {} | {}",
+        avatar.splat_count(),
+        avatar.rig.names.len(),
+        avatar.rig.names[jaw],
+        avatar.binding.fingerprint(),
+        manifest.display()
+    );
+
     let path = socket_path();
-    let result = overlay::run(&mut overlay, &mut gpu, &vk, &pipeline, &path);
+    let result = overlay::run(&mut overlay, &mut gpu, &vk, &pipeline, &path, &mut avatar);
     gpu.destroy(&vk);
     if let Err(e) = result {
         eprintln!("[overlay] {e}");

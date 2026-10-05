@@ -87,17 +87,17 @@ impl Registry {
         if cloud.splats.is_empty() {
             return;
         }
-        let remaining = pipeline.capacity().saturating_sub(self.next_slot);
+        let ceiling = pipeline.artifact_slot_limit();
+        let remaining = ceiling.saturating_sub(self.next_slot);
         if remaining == 0 {
-            eprintln!("[registry] GPU buffer full — {artifact_id} held in Scene Memory only");
+            eprintln!("[registry] artifact slot range full — {artifact_id} held in Scene Memory only");
             return;
         }
         let n = (cloud.splats.len() as u32).min(remaining);
         if n < cloud.splats.len() as u32 {
             eprintln!(
-                "[registry] {artifact_id}: truncated {} -> {n} splats (capacity {})",
-                cloud.splats.len(),
-                pipeline.capacity()
+                "[registry] {artifact_id}: truncated {} -> {n} splats (artifact slots {ceiling})",
+                cloud.splats.len()
             );
         }
         let owner = self.next_owner;
