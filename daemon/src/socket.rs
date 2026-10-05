@@ -205,6 +205,18 @@ fn dispatch(
             avatar_commands.push(AvatarCommand::Walk { x: *x, z: *z });
             return (ProposalResult::ok(&proposal_id, None), false);
         }
+        Proposal::AvatarSpeak { text, .. } => {
+            // Validate here so the client gets the error; synthesis happens off-thread.
+            if let Err(e) = crate::speech::pipeline::normalize_text(text) {
+                return (ProposalResult::err(&proposal_id, e), false);
+            }
+            avatar_commands.push(AvatarCommand::Speak { text: text.clone() });
+            return (ProposalResult::ok(&proposal_id, None), false);
+        }
+        Proposal::AvatarStop { .. } => {
+            avatar_commands.push(AvatarCommand::StopSpeech);
+            return (ProposalResult::ok(&proposal_id, None), false);
+        }
         _ => {}
     }
     let mut reg = registry.lock().expect("registry mutex poisoned");
@@ -239,6 +251,8 @@ fn dispatch(
         Proposal::Shutdown { .. }
         | Proposal::AvatarRest { .. }
         | Proposal::AvatarFace { .. }
+        | Proposal::AvatarSpeak { .. }
+        | Proposal::AvatarStop { .. }
         | Proposal::AvatarWalk { .. } => ProposalResult::ok(&proposal_id, None),
     };
     (result, false)

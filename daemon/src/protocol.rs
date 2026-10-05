@@ -85,6 +85,19 @@ pub enum Proposal {
         #[serde(rename = "morphWeight")]
         morph_weight: Option<f32>,
     },
+    /// Speak `text`: local TTS -> Rhubarb -> audio + synced jaw/visemes. Cancels any current utterance.
+    #[serde(rename = "avatarSpeak")]
+    AvatarSpeak {
+        #[serde(rename = "proposalId")]
+        proposal_id: String,
+        text: String,
+    },
+    /// Interrupt speech: stops audio and face together and cancels pending synthesis.
+    #[serde(rename = "avatarStop")]
+    AvatarStop {
+        #[serde(rename = "proposalId")]
+        proposal_id: String,
+    },
     /// Walk the root toward a point on the ground plane. No click-to-walk.
     #[serde(rename = "avatarWalk")]
     AvatarWalk {
@@ -101,6 +114,8 @@ pub enum AvatarCommand {
     Rest,
     Face { jaw_open: f32, morph_index: Option<u32>, morph_weight: f32 },
     Walk { x: f32, z: f32 },
+    Speak { text: String },
+    StopSpeech,
 }
 
 impl Proposal {
@@ -115,6 +130,8 @@ impl Proposal {
             | Proposal::Shutdown { proposal_id }
             | Proposal::AvatarRest { proposal_id }
             | Proposal::AvatarFace { proposal_id, .. }
+            | Proposal::AvatarSpeak { proposal_id, .. }
+            | Proposal::AvatarStop { proposal_id }
             | Proposal::AvatarWalk { proposal_id, .. } => proposal_id,
         }
     }

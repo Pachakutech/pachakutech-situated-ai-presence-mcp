@@ -59,6 +59,8 @@ pub struct AvatarActor {
     walk_target: Option<[f32; 2]>,
     /// When set, the tick sways yaw and opens the jaw. Socket controls clear it.
     pub demo_motion: bool,
+    /// Text -> audio -> face. Idle (no thread, no processes) until the first speak.
+    pub speech: crate::speech::Speaker,
     time: f32,
     posed_verts: Vec<[f32; 3]>,
     pub posed: Vec<GaussianSplat>,
@@ -104,6 +106,7 @@ impl AvatarActor {
             root: RootState { pos: [0.; 3], yaw: 0. },
             clip: None, clip_time: 0., clip_loop: true, walk_target: None,
             demo_motion: true, time: 0.,
+            speech: crate::speech::Speaker::new(crate::speech::SpeechConfig::from_env()),
             posed_verts: vec![], posed: vec![], stats: DeformStats::default(),
         };
         a.play("idle", true);
@@ -126,7 +129,17 @@ impl AvatarActor {
 
     pub fn apply_command(&mut self, cmd: AvatarCommand) {
         match cmd {
+            AvatarCommand::Speak { text } => {
+                self.demo_motion = false;
+                self.face = FaceFrame::default();
+                if let Err(e) = self.speech.speak(&text) { eprintln!("[speech] {e}"); }
+            }
+            AvatarCommand::StopSpeech => {
+                self.speech.stop();
+                self.face = FaceFrame::default();
+            }
             AvatarCommand::Rest => {
+                self.speech.stop();
                 self.demo_motion = false;
                 self.rest();
                 self.walk_target = None;
@@ -134,6 +147,7 @@ impl AvatarActor {
                 self.face = FaceFrame::default();
             }
             AvatarCommand::Face { jaw_open, morph_index, morph_weight } => {
+                self.speech.stop(); // manual face control wins over speech
                 self.demo_motion = false;
                 let mut morphs = vec![0.0; self.mesh.morph_names.len()];
                 if let Some(i) = morph_index {
@@ -170,6 +184,11 @@ impl AvatarActor {
                 self.root.pos[0] += self.root.yaw.sin() * step;
                 self.root.pos[2] += self.root.yaw.cos() * step;
             }
+        }
+        match self.speech.poll(&self.mesh.morph_names) {
+            crate::speech::SpeechPoll::Active(f) => { self.demo_motion = false; self.face = f; }
+            crate::speech::SpeechPoll::Finished => self.face = FaceFrame::default(),
+            crate::speech::SpeechPoll::Idle => {}
         }
         if self.demo_motion {
             if self.walk_target.is_none() {

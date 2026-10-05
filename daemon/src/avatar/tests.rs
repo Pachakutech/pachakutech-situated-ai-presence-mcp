@@ -4,7 +4,7 @@ use std::path::PathBuf;
 fn manifest() -> PathBuf { PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../assets/avatar_manifest.json") }
 
 fn ply_samples() -> Vec<([f32; 3], [f32; 3])> {
-    let d = std::fs::read(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../assets/humanoid_proxy_a_pose.samples.ply")).unwrap();
+    let d = std::fs::read(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../assets/humanoid_proxy_rigged.samples.ply")).unwrap();
     let h = d.windows(10).position(|w| w == b"end_header").unwrap() + 11;
     d[h..].chunks_exact(24).map(|c| {
         let f = |i: usize| f32::from_le_bytes([c[i * 4], c[i * 4 + 1], c[i * 4 + 2], c[i * 4 + 3]]);

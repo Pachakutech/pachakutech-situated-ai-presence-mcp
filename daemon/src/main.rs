@@ -5,6 +5,7 @@ mod pipeline;
 mod protocol;
 mod registry;
 mod socket;
+mod speech;
 mod splat_sprites;
 mod vulkan;
 

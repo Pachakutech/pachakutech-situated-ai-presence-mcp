@@ -34,6 +34,8 @@ function usage(): never {
       "  avatar jaw <0-1>     Set jaw open and stop demo motion",
       "  avatar walk <x> <z>  Walk the root on the ground plane",
       "  avatar morph <i> <w> Weight morph target i (jaw stays closed)",
+      "  avatar speak <text>  Speak text: local TTS, audio, and synced mouth",
+      "  avatar stop          Interrupt speech (audio and mouth stop together)",
     ].join("\n"),
   );
   process.exit(1);
@@ -167,6 +169,12 @@ async function avatarCommand(args: string[]): Promise<number> {
     const z = finite(b);
     if (x === undefined || z === undefined) usage();
     payload = { kind: "avatarWalk", proposalId: "cli-walk", x, z };
+  } else if (action === "speak") {
+    const text = args.slice(1).join(" ").trim();
+    if (!text) usage();
+    payload = { kind: "avatarSpeak", proposalId: "cli-speak", text };
+  } else if (action === "stop") {
+    payload = { kind: "avatarStop", proposalId: "cli-stop" };
   } else if (action === "morph") {
     const morphIndex = finite(a);
     const morphWeight = finite(b);
