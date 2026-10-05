@@ -29,7 +29,22 @@
     "$md-universal-$fe-$yn-max$mu-min$wg",
     "$md-universal-$ma-$yn-max$mu-min$wg",
     "$md-$fe-$yn-max$mu-min$wg-$un$pr",
-    "$md-$ma-$yn-max$mu-min$wg-$un$pr"
+    "$md-$ma-$yn-max$mu-min$wg-$un$pr",
+    "viseme_aa",
+    "viseme_CH",
+    "viseme_DD",
+    "viseme_E",
+    "viseme_FF",
+    "viseme_I",
+    "viseme_kk",
+    "viseme_nn",
+    "viseme_O",
+    "viseme_PP",
+    "viseme_RR",
+    "viseme_sil",
+    "viseme_SS",
+    "viseme_TH",
+    "viseme_U"
   ],
   "splatbind": "/home/ahb/Projects/pachakutech-situated-ai-presence-mcp/assets/humanoid_proxy_a_pose.splatbind",
   "notes_for_avatar_manifest": {
