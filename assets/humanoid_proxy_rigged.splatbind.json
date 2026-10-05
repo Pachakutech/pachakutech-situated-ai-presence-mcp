@@ -5,7 +5,7 @@
   "mesh_name": "base",
   "mesh_index": 0,
   "primitive_index": 0,
-  "has_skin": false,
+  "has_skin": true,
   "vertex_count": 21833,
   "triangle_count": 36972,
   "valid_triangles": 36972,
