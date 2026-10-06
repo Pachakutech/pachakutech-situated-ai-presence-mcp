@@ -3,6 +3,7 @@
 //! whole present: the screen quad is not drawn under it. Isotropic on
 //! purpose: the projection compute already collapsed each Gaussian to a radius.
 
+use crate::screen_patch::PatchBind;
 use ash::vk;
 
 const VERT_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/splat_disc.vert.spv"));
@@ -12,7 +13,8 @@ const FRAG_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/splat_disc.fra
 struct DiscPush {
     extent: [f32; 2],
     base_slot: u32,
-    _pad: u32,
+    /// Bit 0: draw the debug bake palette instead of the screen tiles.
+    flags: u32,
 }
 
 pub struct SplatSprites {
@@ -29,19 +31,36 @@ impl SplatSprites {
         render_pass: vk::RenderPass,
         projected: vk::Buffer,
         projected_bytes: vk::DeviceSize,
+        patches: &PatchBind,
     ) -> Result<Self, String> {
-        let binding = vk::DescriptorSetLayoutBinding::default()
-            .binding(0)
-            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-            .descriptor_count(1)
-            .stage_flags(vk::ShaderStageFlags::VERTEX);
-        let bindings = [binding];
+        let bindings = [
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(0)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::VERTEX),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(1)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::VERTEX),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(2)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(3)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+        ];
         let dsl_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
         let set_layout = unsafe { device.create_descriptor_set_layout(&dsl_info, None) }
             .map_err(|e| format!("splat disc set layout: {e:?}"))?;
 
         let push = vk::PushConstantRange::default()
-            .stage_flags(vk::ShaderStageFlags::VERTEX)
+            .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
             .offset(0)
             .size(std::mem::size_of::<DiscPush>() as u32);
         let sets = [set_layout];
@@ -100,7 +119,10 @@ impl SplatSprites {
             device.destroy_shader_module(frag, None);
         }
 
-        let pool_sizes = [vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 1 }];
+        let pool_sizes = [
+            vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 3 },
+            vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: 1 },
+        ];
         let pool_info = vk::DescriptorPoolCreateInfo::default().pool_sizes(&pool_sizes).max_sets(1);
         let pool = unsafe { device.create_descriptor_pool(&pool_info, None) }
             .map_err(|e| format!("splat disc pool: {e:?}"))?;
@@ -108,13 +130,37 @@ impl SplatSprites {
         let alloc = vk::DescriptorSetAllocateInfo::default().descriptor_pool(pool).set_layouts(&layouts);
         let set = unsafe { device.allocate_descriptor_sets(&alloc) }
             .map_err(|e| format!("splat disc set: {e:?}"))?[0];
-        let info = [vk::DescriptorBufferInfo { buffer: projected, offset: 0, range: projected_bytes }];
-        let write = vk::WriteDescriptorSet::default()
-            .dst_set(set)
-            .dst_binding(0)
-            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-            .buffer_info(&info);
-        unsafe { device.update_descriptor_sets(&[write], &[]) };
+        let proj_info = [vk::DescriptorBufferInfo { buffer: projected, offset: 0, range: projected_bytes }];
+        let patch_info = [vk::DescriptorBufferInfo { buffer: patches.patches, offset: 0, range: patches.patch_bytes }];
+        let region_info = [vk::DescriptorBufferInfo { buffer: patches.regions, offset: 0, range: patches.region_bytes }];
+        let atlas_info = [vk::DescriptorImageInfo {
+            sampler: patches.atlas_sampler,
+            image_view: patches.atlas_view,
+            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        }];
+        let writes = [
+            vk::WriteDescriptorSet::default()
+                .dst_set(set)
+                .dst_binding(0)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&proj_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(set)
+                .dst_binding(1)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&patch_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(set)
+                .dst_binding(2)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&region_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(set)
+                .dst_binding(3)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(&atlas_info),
+        ];
+        unsafe { device.update_descriptor_sets(&writes, &[]) };
 
         Ok(Self { layout, pipeline: pipelines[0], set_layout, pool, set })
     }
@@ -126,6 +172,7 @@ impl SplatSprites {
         extent: vk::Extent2D,
         base_slot: u32,
         count: u32,
+        use_bake: bool,
     ) {
         if count == 0 {
             return;
@@ -133,7 +180,7 @@ impl SplatSprites {
         let push = DiscPush {
             extent: [extent.width as f32, extent.height as f32],
             base_slot,
-            _pad: 0,
+            flags: if use_bake { 1 } else { 0 },
         };
         unsafe {
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
@@ -141,7 +188,7 @@ impl SplatSprites {
             device.cmd_push_constants(
                 cmd,
                 self.layout,
-                vk::ShaderStageFlags::VERTEX,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                 0,
                 std::slice::from_raw_parts(&push as *const DiscPush as *const u8, std::mem::size_of::<DiscPush>()),
             );

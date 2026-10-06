@@ -6,6 +6,7 @@
 //!
 //! The overlay loop ticks this at 30 Hz and draws the projected discs. Speech
 //! stays out: `FaceFrame` is demo motion or a socket command.
+pub mod appearance;
 pub mod debug;
 pub mod deform;
 pub mod glb;
@@ -47,6 +48,7 @@ pub struct AvatarActor {
     pub rig: Rig,
     pub binding: SplatBinding,
     recon: Reconstructor,
+    pub appearance: appearance::Appearance,
     pub jaw_joint: Option<usize>,
     pub jaw_axis: [f32; 3],
     pub jaw_max_rad: f32,
@@ -101,13 +103,14 @@ impl AvatarActor {
         let binding = SplatBinding::parse(&bind_bytes)?;
         binding.validate(&mesh.rest, &mesh.indices)?;
         let recon = Reconstructor::new(&mesh, &binding);
+        let appearance = appearance::Appearance::from_mesh(&mesh, &rig, &binding);
         let axis = man["jaw_axis"].as_array().map(|a| [0, 1, 2].map(|i| a[i].as_f64().unwrap_or(0.) as f32)).unwrap_or([1., 0., 0.]);
         let mut a = AvatarActor {
             jaw_joint: man["jaw_joint"].as_str().and_then(|n| rig.joint(n)),
             jaw_axis: axis,
             jaw_max_rad: (man["jaw_max_open_deg"].as_f64().unwrap_or(25.0) as f32).to_radians(),
             ground_offset: man["ground_offset_y"].as_f64().unwrap_or(0.0) as f32,
-            mesh, rig, binding, recon,
+            mesh, rig, binding, recon, appearance,
             face: FaceFrame::default(),
             root: RootState { pos: [0.; 3], yaw: 0. },
             clip: None, clip_time: 0., clip_loop: true, walk_target: None,

@@ -1,6 +1,8 @@
 **Epic B — Screen-derived appearance (solid-color patchwork)**  
-**Status:** Ready for tickets  
-**Goal:** Soft, roughly equal-area (possibly overlapping) body regions are opportunistically and sequentially repainted with solid colors sampled from random screen rectangles. One region at a time, stochastic ~2–3 s lifetime, face gets chrome-grey blend. Patterns / near-screenshots deferred.
+**Status:** In progress — GPU snapshots, not CPU color picks  
+**Goal:** Soft, roughly equal-area (possibly overlapping) body regions are opportunistically and sequentially repainted from random screen rectangles. One region at a time, stochastic ~2–3 s lifetime, face gets chrome-grey blend. Patterns / near-screenshots deferred.
+
+> The paint is a static GPU copy of the rectangle into an atlas tile, sampled by the disc shader. The CPU chooses the region and the integer rectangle only. It does not read pixels or set a sampled color. See `screen_derived_colors_gpu.md`.
 
 Below is the matching ticket breakdown.
 

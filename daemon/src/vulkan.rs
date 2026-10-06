@@ -155,9 +155,16 @@ impl VulkanContext {
             vk::QUEUE_FAMILY_EXTERNAL
         };
 
+        // R8G8B8A8 storage images (the screen-tile atlas) require this
+        // feature. Every other feature stays off, matching the previous
+        // device (pEnabledFeatures was null).
+        let supported = unsafe { instance.get_physical_device_features(physical_device) };
+        let mut enabled_features = vk::PhysicalDeviceFeatures::default();
+        enabled_features.shader_storage_image_extended_formats = supported.shader_storage_image_extended_formats;
         let device_create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_create_infos)
-            .enabled_extension_names(&enabled_extensions);
+            .enabled_extension_names(&enabled_extensions)
+            .enabled_features(&enabled_features);
 
         let device = unsafe { instance.create_device(physical_device, &device_create_info, None) }
             .map_err(|e| format!("vkCreateDevice failed: {e:?}"))?;
@@ -531,7 +538,7 @@ impl VulkanContext {
             device.cmd_pipeline_barrier(
                 cmd,
                 vk::PipelineStageFlags::ALL_COMMANDS,
-                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::PipelineStageFlags::FRAGMENT_SHADER | vk::PipelineStageFlags::COMPUTE_SHADER,
                 vk::DependencyFlags::empty(),
                 &[],
                 &[],

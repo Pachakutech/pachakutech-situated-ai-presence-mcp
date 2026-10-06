@@ -1,5 +1,7 @@
 **Code-focused gameplan — Epic B: Screen-derived appearance (solid-color patchwork)**
 
+> Paint path: a GPU copy of a screen rectangle into a per-region tile, sampled by the disc shader. The CPU does not read or write those pixels. See `screen_derived_colors_gpu.md`.
+
 **Target:** Opportunistic, sequential, random replacement of soft body regions with colors sampled from the screen capture.  
 **v1 only:** solid / simple colors + messy one-at-a-time scheduler.  
 **Follow-on (separate or M2):** patterns + near-screenshot tiles.

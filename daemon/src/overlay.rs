@@ -592,6 +592,8 @@ pub struct OverlayGpu {
     splat_base: u32,
     splat_count: u32,
     projected: Option<(vk::Buffer, vk::DeviceSize)>,
+    /// Static screen-rectangle atlas sampled by the avatar discs.
+    patches: crate::screen_patch::ScreenPatches,
 }
 
 /// Which screen-feeding strategy is active. Both variants expose the same
@@ -649,6 +651,7 @@ struct ScreenFeed {
     descriptor_pool: vk::DescriptorPool,
     descriptor_set: vk::DescriptorSet,
     image_layout: vk::ImageLayout,
+    has_frame: bool,
 }
 
 /// One-copy dmabuf screen feed. Manages a rotating pair of imported
@@ -671,6 +674,7 @@ struct DmabufScreenFeed {
     current: Option<DmabufImportedImage>,
     previous: Option<DmabufImportedImage>,
     needs_transition: bool,
+    has_frame: bool,
 }
 
 impl OverlayGpu {
@@ -738,6 +742,7 @@ impl OverlayGpu {
             splat_base: 0,
             splat_count: 0,
             projected: None,
+            patches: crate::screen_patch::ScreenPatches::new(vk)?,
         })
     }
 
@@ -773,7 +778,8 @@ impl OverlayGpu {
         self.pipeline_layout = layout;
         self.pipeline = pipeline;
         if let Some((buffer, bytes)) = self.projected {
-            self.splats = Some(SplatSprites::new(&vk.device, self.render_pass, buffer, bytes)?);
+            let bind = self.patches.bind();
+            self.splats = Some(SplatSprites::new(&vk.device, self.render_pass, buffer, bytes, &bind)?);
         }
         Ok(())
     }
@@ -799,8 +805,46 @@ impl OverlayGpu {
             old.destroy(&vk.device);
         }
         self.projected = Some((buffer, bytes));
-        self.splats = Some(SplatSprites::new(&vk.device, self.render_pass, buffer, bytes)?);
+        let bind = self.patches.bind();
+        self.splats = Some(SplatSprites::new(&vk.device, self.render_pass, buffer, bytes, &bind)?);
         Ok(())
+    }
+
+    /// Pixel size of a capture that is actually resident, for the scheduler.
+    pub fn capture_extent(&self) -> Option<(u32, u32)> {
+        match &self.screen {
+            ScreenFeedKind::Shm(f) if f.has_frame => Some((f.width, f.height)),
+            ScreenFeedKind::Dmabuf(f) if f.has_frame => f.current.as_ref().map(|img| (img.width, img.height)),
+            _ => None,
+        }
+    }
+
+    fn capture_view(&self) -> Option<crate::screen_patch::CaptureView> {
+        match &self.screen {
+            ScreenFeedKind::Shm(f) if f.has_frame && f.image_layout == vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL => {
+                Some(crate::screen_patch::CaptureView {
+                    view: f.view,
+                    width: f.width,
+                    height: f.height,
+                    y_invert: false,
+                })
+            }
+            ScreenFeedKind::Dmabuf(f) if f.has_frame => f.current.as_ref().map(|img| crate::screen_patch::CaptureView {
+                view: img.view,
+                width: img.width,
+                height: img.height,
+                y_invert: img.y_invert,
+            }),
+            _ => None,
+        }
+    }
+
+    pub fn enqueue_patch(&mut self, job: crate::avatar::appearance::PatchJob) {
+        self.patches.enqueue(job);
+    }
+
+    pub fn sync_appearance(&mut self, appearance: &crate::avatar::appearance::Appearance) {
+        self.patches.sync(appearance);
     }
 
     pub fn set_splat_range(&mut self, base: u32, count: u32) {
@@ -932,8 +976,9 @@ impl OverlayGpu {
             self.pending_update = false;
         }
 
-        // Projection compute already finished (its fence was waited). This
-        // makes those projected-disc writes visible to the vertex shader.
+        // Projection compute already finished (its fence was waited). Host
+        // writes of the patch table and the projected discs become visible
+        // to the vertex and fragment shaders.
         let splat_barrier = vk::MemoryBarrier::default()
             .src_access_mask(vk::AccessFlags::SHADER_WRITE | vk::AccessFlags::HOST_WRITE)
             .dst_access_mask(vk::AccessFlags::SHADER_READ);
@@ -941,13 +986,16 @@ impl OverlayGpu {
             vk.device.cmd_pipeline_barrier(
                 self.command_buffer,
                 vk::PipelineStageFlags::COMPUTE_SHADER | vk::PipelineStageFlags::HOST,
-                vk::PipelineStageFlags::VERTEX_SHADER,
+                vk::PipelineStageFlags::VERTEX_SHADER | vk::PipelineStageFlags::FRAGMENT_SHADER,
                 vk::DependencyFlags::empty(),
                 &[splat_barrier],
                 &[],
                 &[],
             );
         }
+
+        let capture = self.capture_view();
+        self.patches.record(&vk.device, self.command_buffer, capture.as_ref());
 
         let clear = vk::ClearValue { color: vk::ClearColorValue { float32: [0.0, 0.0, 0.0, 0.0] } };
         let render_area = vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent: self.extent };
@@ -983,6 +1031,7 @@ impl OverlayGpu {
                         self.extent,
                         self.splat_base,
                         self.splat_count,
+                        self.patches.show_bake(),
                     );
                 }
             } else {
@@ -1069,6 +1118,7 @@ impl OverlayGpu {
             if let Some(sprites) = self.splats.take() {
                 sprites.destroy(&vk.device);
             }
+            self.patches.destroy(&vk.device);
             self.destroy_swapchain_resources(&vk.device);
             vk.device.destroy_pipeline(self.pipeline, None);
             vk.device.destroy_pipeline_layout(self.pipeline_layout, None);
@@ -1135,6 +1185,7 @@ impl DmabufScreenFeed {
             current: None,
             previous: None,
             needs_transition: false,
+            has_frame: false,
         })
     }
 
@@ -1164,6 +1215,7 @@ impl DmabufScreenFeed {
         unsafe { vk.device.update_descriptor_sets(&[write], &[]) };
 
         self.needs_transition = true;
+        self.has_frame = true;
         Ok(())
     }
 
@@ -1332,6 +1384,7 @@ impl ScreenFeed {
             descriptor_pool,
             descriptor_set,
             image_layout: vk::ImageLayout::UNDEFINED,
+            has_frame: false,
         })
     }
 
@@ -1347,6 +1400,7 @@ impl ScreenFeed {
                 std::ptr::copy_nonoverlapping(src, dst, w * 4);
             }
         }
+        self.has_frame = true;
     }
 
     fn record_upload(&mut self, device: &ash::Device, cmd: vk::CommandBuffer) {
@@ -1403,7 +1457,7 @@ impl ScreenFeed {
             device.cmd_pipeline_barrier(
                 cmd,
                 vk::PipelineStageFlags::TRANSFER,
-                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::PipelineStageFlags::FRAGMENT_SHADER | vk::PipelineStageFlags::COMPUTE_SHADER,
                 vk::DependencyFlags::empty(),
                 &[],
                 &[],
@@ -1852,6 +1906,10 @@ fn tick_avatar(
     }
     let started = Instant::now();
     avatar.advance(dt);
+    if let Some(job) = avatar.appearance.tick(dt, gpu.capture_extent()) {
+        gpu.enqueue_patch(job);
+    }
+    gpu.sync_appearance(&avatar.appearance);
     avatar.evaluate();
     let count = avatar.splat_count() as u32;
     pipeline.clear_projected(base, count);

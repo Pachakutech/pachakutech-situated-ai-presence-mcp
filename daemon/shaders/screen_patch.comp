@@ -1,0 +1,34 @@
+#version 450
+// Copy one rectangle of the already-sampled screen image into an atlas
+// tile. The screen image never leaves the GPU. Tile layout matches
+// daemon/src/avatar/appearance.rs: 16 columns, 2 pages, 64px tiles.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform sampler2D screen_img;
+layout(set = 0, binding = 1, rgba8) uniform writeonly image2D atlas;
+
+layout(push_constant) uniform PC {
+    vec4 src_rect;      // x, y, w, h in screen pixels
+    vec2 screen_size;
+    vec2 atlas_size;
+    ivec2 tile_origin;
+    int tile_size;
+    float y_invert;
+} pc;
+
+void main() {
+    ivec2 local = ivec2(gl_GlobalInvocationID.xy);
+    if (local.x >= pc.tile_size || local.y >= pc.tile_size) {
+        return;
+    }
+    vec2 in_tile = (vec2(local) + 0.5) / max(float(pc.tile_size), 1.0);
+    vec2 px = pc.src_rect.xy + in_tile * pc.src_rect.zw;
+    vec2 uv = px / max(pc.screen_size, vec2(1.0));
+    if (pc.y_invert > 0.5) {
+        uv.y = 1.0 - uv.y;
+    }
+    uv = clamp(uv, vec2(0.0), vec2(1.0));
+    vec3 color = texture(screen_img, uv).rgb;
+    imageStore(atlas, pc.tile_origin + local, vec4(color, 1.0));
+}
