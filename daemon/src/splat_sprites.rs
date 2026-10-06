@@ -15,6 +15,8 @@ struct DiscPush {
     base_slot: u32,
     /// Bit 0: draw the debug bake palette instead of the screen tiles.
     flags: u32,
+    /// Seconds, for the glass streak and the few twinkles.
+    time: f32,
 }
 
 pub struct SplatSprites {
@@ -173,6 +175,7 @@ impl SplatSprites {
         base_slot: u32,
         count: u32,
         use_bake: bool,
+        time: f32,
     ) {
         if count == 0 {
             return;
@@ -181,6 +184,7 @@ impl SplatSprites {
             extent: [extent.width as f32, extent.height as f32],
             base_slot,
             flags: if use_bake { 1 } else { 0 },
+            time,
         };
         unsafe {
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);

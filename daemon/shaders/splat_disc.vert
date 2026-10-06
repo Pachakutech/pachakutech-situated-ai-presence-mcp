@@ -31,12 +31,15 @@ layout(push_constant) uniform Push {
     vec2 extent;
     uint base_slot;
     uint flags; // bit 0: debug bake palette, do not sample captures
+    float time;
 } pc;
 
 layout(location = 0) out vec2 v_uv;
 layout(location = 1) out vec4 v_color;
 layout(location = 2) out vec2 v_patch_uv;
 layout(location = 3) flat out uint v_region;
+layout(location = 4) flat out vec2 v_anchor;
+layout(location = 5) flat out uint v_id;
 
 void main() {
     uint corner = uint(gl_VertexIndex) % 6u;
@@ -54,6 +57,8 @@ void main() {
     v_color = s.color;
     v_patch_uv = vec2(p.u, p.v);
     v_region = p.region;
+    v_anchor = s.screen_center / max(pc.extent, vec2(1.0));
+    v_id = s.splat_id;
 
     if (s.radius_pixels <= 0.5 || s.depth < 0.1) {
         gl_Position = vec4(2.0, 2.0, 0.0, 1.0);

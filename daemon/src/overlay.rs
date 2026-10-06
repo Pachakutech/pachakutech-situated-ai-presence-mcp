@@ -594,6 +594,8 @@ pub struct OverlayGpu {
     projected: Option<(vk::Buffer, vk::DeviceSize)>,
     /// Static screen-rectangle atlas sampled by the avatar discs.
     patches: crate::screen_patch::ScreenPatches,
+    /// Seconds the glass streak and twinkles have been running.
+    glass_time: f32,
 }
 
 /// Which screen-feeding strategy is active. Both variants expose the same
@@ -743,7 +745,12 @@ impl OverlayGpu {
             splat_count: 0,
             projected: None,
             patches: crate::screen_patch::ScreenPatches::new(vk)?,
+            glass_time: 0.0,
         })
+    }
+
+    pub fn advance_glass(&mut self, dt: f32) {
+        self.glass_time = (self.glass_time + dt.max(0.0)) % 3600.0;
     }
 
     pub fn recreate(&mut self, vk: &VulkanContext, extent: vk::Extent2D) -> Result<(), String> {
@@ -1032,6 +1039,7 @@ impl OverlayGpu {
                         self.splat_base,
                         self.splat_count,
                         self.patches.show_bake(),
+                        self.glass_time,
                     );
                 }
             } else {
@@ -1906,6 +1914,7 @@ fn tick_avatar(
     }
     let started = Instant::now();
     avatar.advance(dt);
+    gpu.advance_glass(dt);
     if let Some(job) = avatar.appearance.tick(dt, gpu.capture_extent()) {
         gpu.enqueue_patch(job);
     }

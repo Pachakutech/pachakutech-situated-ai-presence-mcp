@@ -15,6 +15,10 @@ pub const ATLAS_W: u32 = TILE * MAX_REGIONS as u32;
 pub const ATLAS_H: u32 = TILE * 2;
 pub const MAX_PATCH_SPLATS: usize = 50_000;
 pub const FADE_SECS: f32 = 0.45;
+/// If the face has worn one tile this long, the next snapshot is the face
+/// again. Otherwise it waits in the same lottery as the body and the head
+/// sits on the debug palette.
+pub const FACE_STALE_SECS: f32 = 6.0;
 pub const CHROME: [f32; 3] = [0.78, 0.81, 0.84];
 /// How far a face sample moves toward chrome grey. The captured desktop
 /// stays in front: 0.22 is a cool tint, not a grey wash.
@@ -70,6 +74,8 @@ pub struct RegionState {
     pub incoming_page: u32,
     pub shown_valid: bool,
     pub incoming_valid: bool,
+    /// Seconds since this region was last chosen.
+    pub idle: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -97,6 +103,7 @@ impl RegionState {
             incoming_page: 0,
             shown_valid: false,
             incoming_valid: false,
+            idle: 0.0,
         }
     }
 }
@@ -192,8 +199,12 @@ impl Appearance {
             })
             .collect();
 
-        let face_n = regions.iter().filter(|r| r.is_face).count();
-        println!("[appearance] {} screen-capture regions (face {face_n})", regions.len());
+        let face_at = regions.iter().position(|r| r.is_face);
+        println!(
+            "[appearance] {} screen-capture regions (face region {})",
+            regions.len(),
+            face_at.map(|i| i.to_string()).unwrap_or_else(|| "none".into())
+        );
         Self {
             regions,
             patches,
@@ -230,6 +241,9 @@ impl Appearance {
         let Some((width, height)) = screen.filter(|&(w, h)| w > 0 && h > 0) else {
             return None;
         };
+        for region in &mut self.regions {
+            region.idle += dt;
+        }
         if self.wait > 0.0 {
             self.wait = (self.wait - dt).max(0.0);
             if self.wait > 0.0 {
@@ -246,13 +260,24 @@ impl Appearance {
         if eligible.is_empty() {
             return None;
         }
-        let pick = eligible[self.next_u32() as usize % eligible.len()];
+        // The head leaves the debug palette on the first capture, and is
+        // chosen again once it has been idle, instead of waiting out the
+        // full round of body regions.
+        let pick = eligible
+            .iter()
+            .copied()
+            .find(|&i| {
+                let region = &self.regions[i];
+                region.is_face && (!region.shown_valid || region.idle >= FACE_STALE_SECS)
+            })
+            .unwrap_or_else(|| eligible[self.next_u32() as usize % eligible.len()]);
         let rect = random_screen_rect(&mut self.rng, width, height);
         let region = &mut self.regions[pick];
         let page = if region.shown_valid { 1 - (region.shown_page & 1) } else { 0 };
         region.incoming_page = page;
         region.incoming_valid = true;
         region.fade = 0.0;
+        region.idle = 0.0;
         let jitter = self.next_u32() as f32 / u32::MAX as f32;
         self.wait = 2.0 + jitter;
         Some(PatchJob { region: pick as u32, page, rect })
@@ -499,6 +524,21 @@ mod tests {
     }
 
     #[test]
+    fn face_leaves_the_debug_palette_first_and_comes_back() {
+        let mut a = Appearance::new_regions(8, 4, 3);
+        let first = a.tick(0.0, Some((1920, 1080))).unwrap();
+        assert_eq!(first.region, 4, "the face is the first snapshot");
+        a.tick(0.5, Some((1920, 1080)));
+        assert!(a.regions[4].shown_valid);
+
+        a.wait = 0.0;
+        a.regions[4].idle = FACE_STALE_SECS;
+        a.regions[4].fade = 1.0;
+        let again = a.tick(0.0, Some((1920, 1080))).unwrap();
+        assert_eq!(again.region, 4, "a stale face is chosen ahead of the body");
+    }
+
+    #[test]
     fn face_flag_reaches_the_uniform() {
         let a = Appearance::new_regions(3, 1, 1);
         let u = a.region_uniforms();
@@ -529,6 +569,7 @@ mod tests {
         let mut app = actor.appearance;
         app.show_bake = false;
         let job = app.tick(0.0, Some((1920, 1080))).unwrap();
+        assert_eq!(job.region, face as u32, "the face is the first snapshot");
         assert_eq!(transitioning(&app), 1);
         assert!(app.tick(0.016, Some((1920, 1080))).is_none());
         assert!(job.rect.w >= 32 && job.rect.h >= 32);
