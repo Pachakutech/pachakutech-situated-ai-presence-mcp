@@ -19,7 +19,7 @@
 
 use crate::actors::ingress::screen_dmabuf::DmabufScreenSource;
 use crate::actors::ingress::screen_wlr::WlrScreenSource;
-use crate::actors::ingress::webcam_dmabuf::{self, WebcamMsg};
+use crate::actors::ingress::webcam_dmabuf::{self, WebcamMsg, WEBCAM_YIELD_ACK};
 use crate::actors::ingress::{DmabufFrame, DmabufPlane, FrameSource, IngressFrame, DRM_FORMAT_RG88};
 use crate::avatar::AvatarActor;
 use crate::pipeline::SplatPipeline;
@@ -572,6 +572,9 @@ struct WebcamSlot {
     retire: Vec<u32>,
     requeue: Option<std::sync::mpsc::Sender<u32>>,
     failed: bool,
+    /// The capture thread asked to close the device. Imports stay until the
+    /// present fence has signaled, then they are destroyed and the ack is sent.
+    drop_pending: bool,
 }
 
 impl Default for WebcamSlot {
@@ -582,6 +585,7 @@ impl Default for WebcamSlot {
             retire: Vec::new(),
             requeue: None,
             failed: false,
+            drop_pending: false,
         }
     }
 }
@@ -923,6 +927,9 @@ impl OverlayGpu {
         stride: u32,
         fds: Vec<OwnedFd>,
     ) -> Result<(), String> {
+        if self.webcam.drop_pending {
+            return Err("webcam release is still closing the previous import".into());
+        }
         if self.webcam.failed || !self.webcam.images.is_empty() {
             return Ok(());
         }
@@ -965,7 +972,7 @@ impl OverlayGpu {
     /// `flush_webcam_retire`, which runs after the fence of the draw that
     /// sampled it.
     pub fn note_webcam_frame(&mut self, index: u32) -> bool {
-        if self.webcam.failed {
+        if self.webcam.drop_pending || self.webcam.failed {
             return false;
         }
         let index_us = index as usize;
@@ -986,9 +993,35 @@ impl OverlayGpu {
         }
     }
 
+    /// The capture thread is blocked until the dma-buf imports are destroyed.
+    /// Clears the current frame immediately so new patches stay on the desktop.
+    /// Returns webcam jobs that were still queued, so the caller can leave
+    /// those regions on the tile they already show.
+    pub fn begin_webcam_yield(&mut self) -> Vec<(u32, u32)> {
+        self.webcam.drop_pending = true;
+        self.webcam.current = None;
+        self.patches.cancel_webcam_jobs()
+    }
+
     /// Return buffers the GPU has finished reading. Call after
     /// `wait_for_present`, before the next draw records a sample.
-    pub fn flush_webcam_retire(&mut self) {
+    /// A pending yield destroys every import and sends `WEBCAM_YIELD_ACK`
+    /// instead of queueing indexes: the thread is closing the device.
+    pub fn flush_webcam_retire(&mut self, vk: &VulkanContext) {
+        if self.webcam.drop_pending {
+            for image in &mut self.webcam.images {
+                vk.destroy_dmabuf_import(image);
+            }
+            self.webcam.images.clear();
+            self.webcam.current = None;
+            self.webcam.retire.clear();
+            self.webcam.drop_pending = false;
+            self.webcam.failed = false;
+            if let Some(tx) = &self.webcam.requeue {
+                let _ = tx.send(WEBCAM_YIELD_ACK);
+            }
+            return;
+        }
         let Some(tx) = &self.webcam.requeue else { return };
         for index in self.webcam.retire.drain(..) {
             if tx.send(index).is_err() {
@@ -2045,6 +2078,36 @@ impl CaptureSource {
     }
 }
 
+/// Apply one message from the webcam thread. A yield waits out the present
+/// fence before the imported dma-bufs are destroyed, including while the
+/// session is hidden and `tick_avatar` is not running.
+fn take_webcam_msg(avatar: &mut Option<AvatarActor>, gpu: &mut OverlayGpu, vk: &VulkanContext, msg: WebcamMsg) {
+    match msg {
+        WebcamMsg::Started { width, height, stride, fds } => {
+            if let Err(e) = gpu.adopt_webcam(vk, width, height, stride, fds) {
+                eprintln!("[webcam] import failed: {e} — avatar keeps sampling the desktop");
+            }
+        }
+        WebcamMsg::Frame(index) => {
+            if !gpu.note_webcam_frame(index) {
+                gpu.requeue_webcam(index);
+            }
+        }
+        WebcamMsg::Yielded => {
+            let pending = gpu.begin_webcam_yield();
+            if let Some(avatar) = avatar.as_mut() {
+                for (region, page) in pending {
+                    avatar.appearance.revert_incoming(region, page);
+                }
+            }
+            if let Err(e) = gpu.wait_for_present(vk) {
+                eprintln!("[webcam] fence wait before releasing the camera: {e}");
+            }
+            gpu.flush_webcam_retire(vk);
+        }
+    }
+}
+
 /// One avatar step: pose, deform, project. Fails the process the first time
 /// the layer camera leaves the cloud with fewer than 1000 live discs.
 fn tick_avatar(
@@ -2058,7 +2121,7 @@ fn tick_avatar(
     projection_checked: &mut bool,
 ) -> Result<(), String> {
     gpu.wait_for_present(vk)?;
-    gpu.flush_webcam_retire();
+    gpu.flush_webcam_retire(vk);
     let base = pipeline.avatar_slot_base();
     let commands = server.take_avatar_commands();
     let Some(avatar) = avatar.as_mut() else {
@@ -2346,6 +2409,12 @@ pub fn run(
         was_hide = hide;
 
         if hide {
+            // The capture thread blocks on the yield ack. Drain it here too:
+            // this branch does not tick, and a Yielded left in the channel
+            // would keep the camera open for the whole time we are hidden.
+            while let Ok(msg) = webcam_rx.try_recv() {
+                take_webcam_msg(avatar, gpu, vk, msg);
+            }
             if !parked {
                 overlay.park_offscreen();
                 parked = true;
@@ -2392,18 +2461,7 @@ pub fn run(
                 got = true;
             }
             while let Ok(msg) = webcam_rx.try_recv() {
-                match msg {
-                    WebcamMsg::Started { width, height, stride, fds } => {
-                        if let Err(e) = gpu.adopt_webcam(vk, width, height, stride, fds) {
-                            eprintln!("[webcam] import failed: {e} — avatar keeps sampling the desktop");
-                        }
-                    }
-                    WebcamMsg::Frame(index) => {
-                        if !gpu.note_webcam_frame(index) {
-                            gpu.requeue_webcam(index);
-                        }
-                    }
-                }
+                take_webcam_msg(avatar, gpu, vk, msg);
             }
             let avatar_due = last_avatar.elapsed() >= AVATAR_TICK;
             if avatar_due {

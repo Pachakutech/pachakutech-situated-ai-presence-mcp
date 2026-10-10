@@ -3,8 +3,9 @@
 // never leave the GPU. Source 0 is the desktop (sampled RGBA, optional
 // y-invert). Source 1 is the webcam: YUYV stored as R8G8, so .r is Y and
 // .g is U on even x and V on odd x. This camera reports quantization
-// default, which for YUYV is limited-range BT.601. The tile is RGBA
-// either way, so the disc shader does not learn about the camera.
+// default, which for YUYV is limited-range BT.601. Desktop rectangles fill
+// the tile. A webcam rectangle is copied with a uniform fit and no upscale,
+// anchored at the tile origin; texels outside that content are left alone.
 // Tile layout matches daemon/src/avatar/appearance.rs: 16 columns, 2 pages, 64px tiles.
 
 layout(local_size_x = 8, local_size_y = 8) in;
@@ -21,6 +22,8 @@ layout(push_constant) uniform PC {
     int tile_size;
     float y_invert;
     float source;       // 0 desktop, 1 webcam
+    float content_w;    // 0 = fill the tile. Webcam: texels written at the origin.
+    float content_h;
 } pc;
 
 vec3 desktop_rgb(vec2 px) {
@@ -55,9 +58,22 @@ void main() {
     if (local.x >= pc.tile_size || local.y >= pc.tile_size) {
         return;
     }
-    vec2 in_tile = (vec2(local) + 0.5) / max(float(pc.tile_size), 1.0);
-    vec2 px = pc.src_rect.xy + in_tile * pc.src_rect.zw;
     // `source` is a push constant, so the branch is dynamically uniform.
-    vec3 color = pc.source > 0.5 ? webcam_rgb(px) : desktop_rgb(px);
+    bool webcam = pc.source > 0.5;
+    if (webcam && (float(local.x) >= pc.content_w || float(local.y) >= pc.content_h)) {
+        return;
+    }
+    vec2 px;
+    if (webcam) {
+        // Same fit as `webcam_content_texels`: uniform, and never above 1.
+        float src_w = max(pc.src_rect.z, 1.0);
+        float src_h = max(pc.src_rect.w, 1.0);
+        float fit = min(1.0, min(float(pc.tile_size) / src_w, float(pc.tile_size) / src_h));
+        px = pc.src_rect.xy + (vec2(local) + 0.5) / fit;
+    } else {
+        vec2 in_tile = (vec2(local) + 0.5) / max(float(pc.tile_size), 1.0);
+        px = pc.src_rect.xy + in_tile * pc.src_rect.zw;
+    }
+    vec3 color = webcam ? webcam_rgb(px) : desktop_rgb(px);
     imageStore(atlas, pc.tile_origin + local, vec4(color, 1.0));
 }

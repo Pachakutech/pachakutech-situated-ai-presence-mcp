@@ -2,8 +2,8 @@
 //! image and writes one tile. Nothing is mapped back to the CPU.
 
 use crate::avatar::appearance::{
-    PatchJob, RegionGpu, SplatPatchGpu, ATLAS_H, ATLAS_W, MAX_PATCH_SPLATS, MAX_REGIONS, SOURCE_WEBCAM,
-    TILE,
+    webcam_content_texels, PatchJob, RegionGpu, SplatPatchGpu, ATLAS_H, ATLAS_W, MAX_PATCH_SPLATS,
+    MAX_REGIONS, SOURCE_WEBCAM, TILE,
 };
 use crate::vulkan::VulkanContext;
 use ash::vk;
@@ -21,9 +21,13 @@ struct PatchPush {
     y_invert: f32,
     /// 0 desktop, 1 webcam. A float so it matches the GLSL push-constant layout.
     source: f32,
+    /// Webcam content size in texels. Two scalars, not a vec2: GLSL would
+    /// align a vec2 to 8 and the offsets would disagree. 0 means fill the tile.
+    content_w: f32,
+    content_h: f32,
 }
 
-const _: () = assert!(std::mem::size_of::<PatchPush>() == 52);
+const _: () = assert!(std::mem::size_of::<PatchPush>() == 60);
 
 pub struct CaptureView {
     pub image: vk::Image,
@@ -243,6 +247,21 @@ impl ScreenPatches {
         self.jobs.push(job);
     }
 
+    /// Drop webcam copies that have not been recorded yet. The caller reverts
+    /// those regions so they stay on the tile they already show.
+    pub fn cancel_webcam_jobs(&mut self) -> Vec<(u32, u32)> {
+        let mut pending = Vec::new();
+        self.jobs.retain(|job| {
+            if job.source == SOURCE_WEBCAM {
+                pending.push((job.region, job.page));
+                false
+            } else {
+                true
+            }
+        });
+        pending
+    }
+
     pub fn sync(&mut self, appearance: &crate::avatar::appearance::Appearance) {
         self.show_bake = appearance.show_bake;
         if !self.patches_uploaded && !appearance.patches.is_empty() {
@@ -358,6 +377,12 @@ impl ScreenPatches {
                 "[appearance] region {} page {} <- {name} {},{} {}x{}",
                 job.region, job.page, job.rect.x, job.rect.y, job.rect.w, job.rect.h
             );
+            let (content_w, content_h) = if job.source == SOURCE_WEBCAM {
+                let content = webcam_content_texels(job.rect.w, job.rect.h);
+                (content[0] as f32, content[1] as f32)
+            } else {
+                (0.0, 0.0)
+            };
             let push = PatchPush {
                 src_rect: [job.rect.x as f32, job.rect.y as f32, job.rect.w as f32, job.rect.h as f32],
                 screen_size: [capture.width as f32, capture.height as f32],
@@ -366,6 +391,8 @@ impl ScreenPatches {
                 tile_size: TILE as i32,
                 y_invert: if capture.y_invert { 1.0 } else { 0.0 },
                 source: if job.source == SOURCE_WEBCAM { 1.0 } else { 0.0 },
+                content_w,
+                content_h,
             };
             unsafe {
                 device.cmd_push_constants(

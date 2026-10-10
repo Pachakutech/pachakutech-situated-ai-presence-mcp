@@ -60,14 +60,46 @@ impl IngressSource {
 
 const BODY_BINS: usize = 11;
 
-/// std430, 16 bytes. `flags` is `FLAG_FACE | FLAG_SHOWN | FLAG_INCOMING`.
-#[repr(C)]
+/// std430, 48 bytes. `uvec2` aligns to 8, so the struct is padded to 48
+/// and declared `align(8)` — a 40-byte Rust struct would stride at 40
+/// while GLSL would stride at 48.
+///
+/// `shown_content` / `incoming_content` are the texels of that page that
+/// hold a webcam rectangle, anchored at the tile origin. `[0, 0]` means
+/// the page is a desktop fill: the disc shader stretches the whole tile.
+/// A webcam page is placed once, at the rectangle's own aspect, and cropped
+/// to the region. It is not repeated.
+/// `bbox_aspect` is the region's rest-pose width divided by its height.
+#[repr(C, align(8))]
 #[derive(Clone, Copy, Debug)]
 pub struct RegionGpu {
     pub fade: f32,
     pub shown_page: u32,
     pub incoming_page: u32,
     pub flags: u32,
+    pub shown_content: [u32; 2],
+    pub incoming_content: [u32; 2],
+    pub bbox_aspect: f32,
+    pub _pad0: f32,
+    pub _pad1: f32,
+    pub _pad2: f32,
+}
+
+impl RegionGpu {
+    const fn zero() -> Self {
+        Self {
+            fade: 0.0,
+            shown_page: 0,
+            incoming_page: 0,
+            flags: 0,
+            shown_content: [0, 0],
+            incoming_content: [0, 0],
+            bbox_aspect: 1.0,
+            _pad0: 0.0,
+            _pad1: 0.0,
+            _pad2: 0.0,
+        }
+    }
 }
 
 /// std430, 16 bytes. One per avatar splat, parallel to the upload order.
@@ -106,6 +138,13 @@ pub struct RegionState {
     pub incoming_page: u32,
     pub shown_valid: bool,
     pub incoming_valid: bool,
+    /// Texels of the shown page that hold a webcam rectangle. `[0, 0]` is a desktop fill.
+    pub shown_content: [u32; 2],
+    /// Texels of the incoming page. `[0, 0]` is a desktop fill.
+    pub incoming_content: [u32; 2],
+    /// Rest-pose bbox width / height. The disc shader uses this so a webcam
+    /// rectangle keeps square pixels on a non-square region.
+    pub bbox_aspect: f32,
     /// Seconds since this region was last chosen.
     pub idle: f32,
 }
@@ -135,6 +174,9 @@ impl RegionState {
             incoming_page: 0,
             shown_valid: false,
             incoming_valid: false,
+            shown_content: [0, 0],
+            incoming_content: [0, 0],
+            bbox_aspect: 1.0,
             idle: 0.0,
         }
     }
@@ -220,6 +262,13 @@ impl Appearance {
             max_xy[region][0] = max_xy[region][0].max(xy[0]);
             max_xy[region][1] = max_xy[region][1].max(xy[1]);
         }
+        for (i, region) in regions.iter_mut().enumerate() {
+            if min_xy[i][0] <= max_xy[i][0] && min_xy[i][1] <= max_xy[i][1] {
+                let dx = (max_xy[i][0] - min_xy[i][0]).max(1e-5);
+                let dy = (max_xy[i][1] - min_xy[i][1]).max(1e-5);
+                region.bbox_aspect = dx / dy;
+            }
+        }
         let patches = points
             .into_iter()
             .map(|(region, xy)| {
@@ -263,6 +312,7 @@ impl Appearance {
                 region.fade = (region.fade + dt / FADE_SECS).min(1.0);
                 if region.fade >= 1.0 {
                     region.shown_page = region.incoming_page;
+                    region.shown_content = region.incoming_content;
                     region.shown_valid = true;
                 }
             }
@@ -313,6 +363,11 @@ impl Appearance {
         let region = &mut self.regions[pick];
         let page = if region.shown_valid { 1 - (region.shown_page & 1) } else { 0 };
         region.incoming_page = page;
+        region.incoming_content = if source.id == SOURCE_WEBCAM {
+            webcam_content_texels(rect.w, rect.h)
+        } else {
+            [0, 0]
+        };
         region.incoming_valid = true;
         region.fade = 0.0;
         region.idle = 0.0;
@@ -321,8 +376,19 @@ impl Appearance {
         Some(PatchJob { region: pick as u32, page, rect, source: source.id })
     }
 
+    /// The copy for this page never landed (the camera was released first).
+    /// Keep the region on the tile it already shows.
+    pub fn revert_incoming(&mut self, region: u32, page: u32) {
+        let Some(region) = self.regions.get_mut(region as usize) else { return };
+        if region.incoming_valid && region.incoming_page == page && region.fade < 1.0 {
+            region.incoming_valid = false;
+            region.incoming_content = [0, 0];
+            region.fade = 1.0;
+        }
+    }
+
     pub fn region_uniforms(&self) -> [RegionGpu; MAX_REGIONS] {
-        let mut out = [RegionGpu { fade: 0.0, shown_page: 0, incoming_page: 0, flags: 0 }; MAX_REGIONS];
+        let mut out = [RegionGpu::zero(); MAX_REGIONS];
         for (i, region) in self.regions.iter().enumerate().take(MAX_REGIONS) {
             let mut flags = 0;
             if region.is_face {
@@ -339,6 +405,12 @@ impl Appearance {
                 shown_page: region.shown_page,
                 incoming_page: region.incoming_page,
                 flags,
+                shown_content: region.shown_content,
+                incoming_content: region.incoming_content,
+                bbox_aspect: region.bbox_aspect,
+                _pad0: 0.0,
+                _pad1: 0.0,
+                _pad2: 0.0,
             };
         }
         out
@@ -361,6 +433,35 @@ impl Appearance {
 /// this in `splat_disc.frag` with the same constants; this is the tested copy.
 pub fn blend_with_chrome(color: [f32; 3]) -> [f32; 3] {
     std::array::from_fn(|i| color[i] * (1.0 - CHROME_MIX) + CHROME[i] * CHROME_MIX)
+}
+
+/// Texels a webcam rectangle occupies in a tile. Uniform fit, never an
+/// upscale: a 40×30 rect stays 40×30, and an 80×40 rect becomes 64×32.
+/// The disc shader reads only this rectangle and places it once.
+pub fn webcam_content_texels(rect_w: u32, rect_h: u32) -> [u32; 2] {
+    let w = rect_w.max(1) as f32;
+    let h = rect_h.max(1) as f32;
+    let fit = (TILE as f32 / w).min(TILE as f32 / h).min(1.0);
+    [
+        (w * fit).round().clamp(1.0, TILE as f32) as u32,
+        (h * fit).round().clamp(1.0, TILE as f32) as u32,
+    ]
+}
+
+/// 0..1 point inside a webcam tile's content for one region UV.
+/// One placement, uniform scale, centered. The part of the rectangle that
+/// does not fit the region is cropped. Lens UVs outside 0..1 clamp, so the
+/// picture does not repeat. Matches `sample_tile` in `splat_disc.frag`.
+pub fn webcam_cover_local(uv: [f32; 2], bbox_aspect: f32, content_w: u32, content_h: u32) -> [f32; 2] {
+    let region_aspect = bbox_aspect.max(1e-4);
+    let rect_aspect = content_w.max(1) as f32 / content_h.max(1) as f32;
+    let stamp_h = 1.0f32.max(region_aspect / rect_aspect);
+    let stamp_w = stamp_h * rect_aspect;
+    let origin_x = (region_aspect - stamp_w) * 0.5;
+    let origin_y = (1.0 - stamp_h) * 0.5;
+    let lx = ((uv[0] * region_aspect - origin_x) / stamp_w).clamp(0.0, 1.0);
+    let ly = ((uv[1] - origin_y) / stamp_h).clamp(0.0, 1.0);
+    [lx, ly]
 }
 
 pub fn random_screen_rect(rng: &mut u32, width: u32, height: u32) -> Rect {
@@ -486,11 +587,66 @@ mod tests {
     }
 
     #[test]
-    fn gpu_structs_are_16_bytes() {
-        assert_eq!(std::mem::size_of::<RegionGpu>(), 16);
+    fn gpu_structs_match_std430() {
+        assert_eq!(std::mem::size_of::<RegionGpu>(), 48);
+        assert_eq!(std::mem::align_of::<RegionGpu>(), 8);
+        let sample = RegionGpu {
+            shown_content: [1, 2],
+            incoming_content: [3, 4],
+            bbox_aspect: 1.5,
+            ..RegionGpu::zero()
+        };
+        let base = &sample as *const RegionGpu as usize;
+        assert_eq!(&sample.shown_content as *const [u32; 2] as usize - base, 16);
+        assert_eq!(&sample.incoming_content as *const [u32; 2] as usize - base, 24);
+        assert_eq!(&sample.bbox_aspect as *const f32 as usize - base, 32);
         assert_eq!(std::mem::size_of::<SplatPatchGpu>(), 16);
         assert_eq!(ATLAS_W, 1024);
         assert_eq!(ATLAS_H, 128);
+    }
+
+    #[test]
+    fn webcam_content_fits_without_upscale_or_stretch() {
+        assert_eq!(webcam_content_texels(80, 40), [64, 32]);
+        assert_eq!(webcam_content_texels(40, 30), [40, 30]);
+        assert_eq!(webcam_content_texels(100, 100), [64, 64]);
+        let wide = webcam_content_texels(80, 40);
+        let aspect = wide[0] as f32 / wide[1] as f32;
+        assert!((aspect - 2.0).abs() < 0.02, "{aspect}");
+    }
+
+    #[test]
+    fn webcam_placement_is_one_patch_and_does_not_repeat() {
+        // A matching aspect maps the rectangle onto the region once.
+        assert_eq!(webcam_cover_local([0.0, 0.0], 2.0, 64, 32), [0.0, 0.0]);
+        assert_eq!(webcam_cover_local([1.0, 1.0], 2.0, 64, 32), [1.0, 1.0]);
+        assert_eq!(webcam_cover_local([0.5, 0.5], 1.0, 40, 40), [0.5, 0.5]);
+        // A square stamp on a region twice as wide is cropped, not stretched or tiled.
+        let top = webcam_cover_local([0.0, 0.0], 2.0, 64, 64);
+        let bot = webcam_cover_local([1.0, 1.0], 2.0, 64, 64);
+        assert!((top[0] - 0.0).abs() < 1e-5 && (top[1] - 0.25).abs() < 1e-5, "{top:?}");
+        assert!((bot[0] - 1.0).abs() < 1e-5 && (bot[1] - 0.75).abs() < 1e-5, "{bot:?}");
+        // Lens shear past the region holds the edge. It does not wrap.
+        assert_eq!(webcam_cover_local([-0.2, 1.3], 1.0, 64, 64), [0.0, 1.0]);
+    }
+
+    #[test]
+    fn webcam_tick_stores_content_and_desktop_tick_does_not() {
+        let mut cam = Appearance::new_regions(1, 0, 5);
+        let job = cam.tick(0.0, &[IngressSource::webcam(640, 480)]).unwrap();
+        let content = cam.regions[0].incoming_content;
+        assert!(content[0] > 0 && content[1] > 0 && content[0] <= TILE && content[1] <= TILE);
+        let rect_aspect = job.rect.w as f32 / job.rect.h as f32;
+        let content_aspect = content[0] as f32 / content[1] as f32;
+        assert!((content_aspect - rect_aspect).abs() / rect_aspect < 0.15, "{content:?} vs {}", job.rect.w);
+        assert_eq!(cam.region_uniforms()[0].incoming_content, content);
+        cam.tick(FADE_SECS, &[IngressSource::webcam(640, 480)]);
+        assert_eq!(cam.regions[0].shown_content, content);
+
+        let mut desk = Appearance::new_regions(1, 0, 5);
+        let _ = desk.tick(0.0, &[IngressSource::desktop(1920, 1080)]).unwrap();
+        assert_eq!(desk.regions[0].incoming_content, [0, 0]);
+        assert_eq!(desk.region_uniforms()[0].bbox_aspect, 1.0);
     }
 
     #[test]
@@ -651,6 +807,7 @@ mod tests {
         assert!((8..=MAX_REGIONS).contains(&app.regions.len()), "regions {}", app.regions.len());
         assert_eq!(app.regions.iter().filter(|r| r.is_face).count(), 1);
         let face = app.regions.iter().position(|r| r.is_face).unwrap();
+        assert!(app.regions[face].bbox_aspect > 0.0, "face bbox aspect");
         assert!(app.patches.iter().any(|p| p.region == face as u32));
         assert_eq!(app.patches.len(), actor.binding.records.len());
         for patch in &app.patches {

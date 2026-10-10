@@ -17,6 +17,12 @@ struct Region {
     uint shown_page;
     uint incoming_page;
     uint flags;
+    uvec2 shown_content;
+    uvec2 incoming_content;
+    float bbox_aspect;
+    float pad0;
+    float pad1;
+    float pad2;
 };
 
 layout(std430, set = 0, binding = 2) readonly buffer Regions {
@@ -38,11 +44,28 @@ const float ATLAS_H = 128.0;
 const vec3 CHROME = vec3(0.78, 0.81, 0.84);
 const float CHROME_MIX = 0.22;
 
-vec3 sample_tile(uint region, uint page, vec2 uv) {
+// Desktop content is (0, 0): the whole tile is stretched across the region.
+// Webcam content is the rectangle's texels at the tile origin. That rectangle
+// is placed once, at its own aspect, and cropped to the region. It does not
+// repeat. The formula matches `webcam_cover_local` in appearance.rs.
+vec2 tile_local(vec2 uv, uvec2 content, float aspect) {
+    if (content.x == 0u || content.y == 0u) {
+        return clamp(uv, vec2(0.0), vec2(1.0)) * (TILE - 1.0) + 0.5;
+    }
+    float region_aspect = max(aspect, 1e-4);
+    float rect_aspect = float(content.x) / float(content.y);
+    float stamp_h = max(1.0, region_aspect / rect_aspect);
+    float stamp_w = stamp_h * rect_aspect;
+    vec2 origin = vec2((region_aspect - stamp_w) * 0.5, (1.0 - stamp_h) * 0.5);
+    vec2 iso = vec2(uv.x * region_aspect, uv.y);
+    vec2 placed = clamp((iso - origin) / vec2(stamp_w, stamp_h), vec2(0.0), vec2(1.0));
+    return placed * vec2(float(content.x) - 1.0, float(content.y) - 1.0) + 0.5;
+}
+
+vec3 sample_tile(uint region, uint page, vec2 uv, uvec2 content, float aspect) {
     region = min(region, 15u);
     page = page & 1u;
-    vec2 local = clamp(uv, vec2(0.0), vec2(1.0)) * (TILE - 1.0) + 0.5;
-    vec2 px = vec2(float(region) * TILE, float(page) * TILE) + local;
+    vec2 px = vec2(float(region) * TILE, float(page) * TILE) + tile_local(uv, content, aspect);
     return texture(atlas, px / vec2(ATLAS_W, ATLAS_H)).rgb;
 }
 
@@ -67,11 +90,11 @@ vec2 chroma_of(vec2 uv) {
     return n * rim * 0.032;
 }
 
-vec3 sample_glass(uint region, uint page, vec2 uv, vec2 chroma) {
+vec3 sample_glass(uint region, uint page, vec2 uv, vec2 chroma, uvec2 content, float aspect) {
     return vec3(
-        sample_tile(region, page, uv + chroma).r,
-        sample_tile(region, page, uv).g,
-        sample_tile(region, page, uv - chroma).b
+        sample_tile(region, page, uv + chroma, content, aspect).r,
+        sample_tile(region, page, uv, content, aspect).g,
+        sample_tile(region, page, uv - chroma, content, aspect).b
     );
 }
 
@@ -89,8 +112,8 @@ void main() {
         Region reg = regions[min(v_region, 15u)];
         bool shown = (reg.flags & 2u) != 0u;
         bool incoming = (reg.flags & 4u) != 0u;
-        vec3 src = shown ? sample_glass(v_region, reg.shown_page, bent, chroma) : v_color.rgb;
-        vec3 dst = incoming ? sample_glass(v_region, reg.incoming_page, bent, chroma) : src;
+        vec3 src = shown ? sample_glass(v_region, reg.shown_page, bent, chroma, reg.shown_content, reg.bbox_aspect) : v_color.rgb;
+        vec3 dst = incoming ? sample_glass(v_region, reg.incoming_page, bent, chroma, reg.incoming_content, reg.bbox_aspect) : src;
         rgb = mix(src, dst, reg.fade);
         if ((reg.flags & 1u) != 0u) {
             float captured = 0.0;
