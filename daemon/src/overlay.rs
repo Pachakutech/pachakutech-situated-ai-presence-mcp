@@ -19,7 +19,8 @@
 
 use crate::actors::ingress::screen_dmabuf::DmabufScreenSource;
 use crate::actors::ingress::screen_wlr::WlrScreenSource;
-use crate::actors::ingress::{DmabufFrame, FrameSource, IngressFrame};
+use crate::actors::ingress::webcam_dmabuf::{self, WebcamMsg};
+use crate::actors::ingress::{DmabufFrame, DmabufPlane, FrameSource, IngressFrame, DRM_FORMAT_RG88};
 use crate::avatar::AvatarActor;
 use crate::pipeline::SplatPipeline;
 use crate::socket::SocketServer;
@@ -27,7 +28,7 @@ use crate::splat_sprites::SplatSprites;
 use crate::vulkan::{DmabufImportedImage, VulkanContext};
 use ash::{khr, vk};
 use std::io;
-use std::os::fd::{AsFd, AsRawFd};
+use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -561,6 +562,30 @@ wayland_client::delegate_noop!(OverlayState: ignore zwlr_screencopy_manager_v1::
 // GPU: swapchain + looking-glass pipeline targeting the layer-shell surface
 // ===========================================================================
 
+/// Webcam buffers imported once. `current` is the index the next patch may
+/// sample. `retire` holds indexes whose sampling fence has signaled and
+/// that can go back to the camera. The camera thread owns the device;
+/// this slot never maps a buffer.
+struct WebcamSlot {
+    images: Vec<DmabufImportedImage>,
+    current: Option<usize>,
+    retire: Vec<u32>,
+    requeue: Option<std::sync::mpsc::Sender<u32>>,
+    failed: bool,
+}
+
+impl Default for WebcamSlot {
+    fn default() -> Self {
+        Self {
+            images: Vec::new(),
+            current: None,
+            retire: Vec::new(),
+            requeue: None,
+            failed: false,
+        }
+    }
+}
+
 /// Swapchain + looking-glass pipeline targeting the layer-shell surface.
 /// The screen feed can be either SHM-based (CPU upload via staging buffer)
 /// or dmabuf-based (zero-copy Vulkan import), selected at construction
@@ -596,6 +621,7 @@ pub struct OverlayGpu {
     patches: crate::screen_patch::ScreenPatches,
     /// Seconds the glass streak and twinkles have been running.
     glass_time: f32,
+    webcam: WebcamSlot,
 }
 
 /// Which screen-feeding strategy is active. Both variants expose the same
@@ -746,6 +772,7 @@ impl OverlayGpu {
             projected: None,
             patches: crate::screen_patch::ScreenPatches::new(vk)?,
             glass_time: 0.0,
+            webcam: WebcamSlot::default(),
         })
     }
 
@@ -830,6 +857,7 @@ impl OverlayGpu {
         match &self.screen {
             ScreenFeedKind::Shm(f) if f.has_frame && f.image_layout == vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL => {
                 Some(crate::screen_patch::CaptureView {
+                    image: f.image,
                     view: f.view,
                     width: f.width,
                     height: f.height,
@@ -837,12 +865,135 @@ impl OverlayGpu {
                 })
             }
             ScreenFeedKind::Dmabuf(f) if f.has_frame => f.current.as_ref().map(|img| crate::screen_patch::CaptureView {
+                image: img.image,
                 view: img.view,
                 width: img.width,
                 height: img.height,
                 y_invert: img.y_invert,
             }),
             _ => None,
+        }
+    }
+
+    /// Pixel size of the webcam buffer the GPU may sample. None until the
+    /// first dequeued frame, so the scheduler does not copy an unfilled buffer.
+    pub fn webcam_extent(&self) -> Option<(u32, u32)> {
+        let index = self.webcam.current?;
+        let image = self.webcam.images.get(index)?;
+        (image.width > 0 && image.height > 0).then_some((image.width, image.height))
+    }
+
+    fn webcam_view(&self) -> Option<crate::screen_patch::CaptureView> {
+        let index = self.webcam.current?;
+        let image = self.webcam.images.get(index)?;
+        Some(crate::screen_patch::CaptureView {
+            image: image.image,
+            view: image.view,
+            width: image.width,
+            height: image.height,
+            y_invert: false,
+        })
+    }
+
+    /// Desktop, then webcam, and only the ones that have a frame. One entry
+    /// means every sample comes from it.
+    pub fn appearance_sources(&self) -> Vec<crate::avatar::appearance::IngressSource> {
+        let mut sources = Vec::new();
+        if let Some((w, h)) = self.capture_extent() {
+            sources.push(crate::avatar::appearance::IngressSource::desktop(w, h));
+        }
+        if let Some((w, h)) = self.webcam_extent() {
+            sources.push(crate::avatar::appearance::IngressSource::webcam(w, h));
+        }
+        sources
+    }
+
+    pub fn set_webcam_requeue(&mut self, tx: std::sync::mpsc::Sender<u32>) {
+        self.webcam.requeue = Some(tx);
+    }
+
+    /// Import each exported fd once. On failure the imported images are
+    /// dropped and the desktop keeps painting. The fds themselves close
+    /// with the `DmabufFrame`s; Vulkan holds its own dup.
+    pub fn adopt_webcam(
+        &mut self,
+        vk: &VulkanContext,
+        width: u32,
+        height: u32,
+        stride: u32,
+        fds: Vec<OwnedFd>,
+    ) -> Result<(), String> {
+        if self.webcam.failed || !self.webcam.images.is_empty() {
+            return Ok(());
+        }
+        if fds.is_empty() || width == 0 || height == 0 || stride < width * 2 {
+            self.webcam.failed = true;
+            return Err(format!(
+                "webcam buffers are unusable ({width}x{height} stride {stride}, {} fds)",
+                fds.len()
+            ));
+        }
+        let mut images = Vec::with_capacity(fds.len());
+        for fd in fds {
+            let frame = DmabufFrame {
+                width,
+                height,
+                drm_format: DRM_FORMAT_RG88,
+                modifier: 0,
+                y_invert: false,
+                planes: vec![DmabufPlane { fd, stride, offset: 0, plane_index: 0 }],
+            };
+            match vk.import_dmabuf(&frame) {
+                Ok(image) => images.push(image),
+                Err(e) => {
+                    for mut image in images {
+                        vk.destroy_dmabuf_import(&mut image);
+                    }
+                    self.webcam.failed = true;
+                    return Err(e);
+                }
+            }
+        }
+        let n = images.len();
+        self.webcam.images = images;
+        println!("[webcam] imported {n} YUYV buffers");
+        Ok(())
+    }
+
+    /// Make `index` the buffer the next webcam patch samples. The previous
+    /// index is retired and must not be queued again until
+    /// `flush_webcam_retire`, which runs after the fence of the draw that
+    /// sampled it.
+    pub fn note_webcam_frame(&mut self, index: u32) -> bool {
+        if self.webcam.failed {
+            return false;
+        }
+        let index_us = index as usize;
+        if index_us >= self.webcam.images.len() {
+            return false;
+        }
+        if let Some(prev) = self.webcam.current.replace(index_us) {
+            if prev != index_us {
+                self.webcam.retire.push(prev as u32);
+            }
+        }
+        true
+    }
+
+    pub fn requeue_webcam(&self, index: u32) {
+        if let Some(tx) = &self.webcam.requeue {
+            let _ = tx.send(index);
+        }
+    }
+
+    /// Return buffers the GPU has finished reading. Call after
+    /// `wait_for_present`, before the next draw records a sample.
+    pub fn flush_webcam_retire(&mut self) {
+        let Some(tx) = &self.webcam.requeue else { return };
+        for index in self.webcam.retire.drain(..) {
+            if tx.send(index).is_err() {
+                break;
+            }
         }
     }
 
@@ -1001,8 +1152,16 @@ impl OverlayGpu {
             );
         }
 
-        let capture = self.capture_view();
-        self.patches.record(&vk.device, self.command_buffer, capture.as_ref());
+        let desktop = self.capture_view();
+        let webcam = self.webcam_view();
+        self.patches.record(
+            &vk.device,
+            self.command_buffer,
+            desktop.as_ref(),
+            webcam.as_ref(),
+            vk.dmabuf_src_queue_family,
+            vk.graphics_queue_family,
+        );
 
         let clear = vk::ClearValue { color: vk::ClearColorValue { float32: [0.0, 0.0, 0.0, 0.0] } };
         let render_area = vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent: self.extent };
@@ -1127,6 +1286,10 @@ impl OverlayGpu {
                 sprites.destroy(&vk.device);
             }
             self.patches.destroy(&vk.device);
+            for image in &mut self.webcam.images {
+                vk.destroy_dmabuf_import(image);
+            }
+            self.webcam.images.clear();
             self.destroy_swapchain_resources(&vk.device);
             vk.device.destroy_pipeline(self.pipeline, None);
             vk.device.destroy_pipeline_layout(self.pipeline_layout, None);
@@ -1895,6 +2058,7 @@ fn tick_avatar(
     projection_checked: &mut bool,
 ) -> Result<(), String> {
     gpu.wait_for_present(vk)?;
+    gpu.flush_webcam_retire();
     let base = pipeline.avatar_slot_base();
     let commands = server.take_avatar_commands();
     let Some(avatar) = avatar.as_mut() else {
@@ -1915,7 +2079,8 @@ fn tick_avatar(
     let started = Instant::now();
     avatar.advance(dt);
     gpu.advance_glass(dt);
-    if let Some(job) = avatar.appearance.tick(dt, gpu.capture_extent()) {
+    let sources = gpu.appearance_sources();
+    if let Some(job) = avatar.appearance.tick(dt, &sources) {
         gpu.enqueue_patch(job);
     }
     gpu.sync_appearance(&avatar.appearance);
@@ -2080,6 +2245,15 @@ pub fn run(
             if use_dmabuf { "dmabuf" } else { "SHM" });
     }
 
+    let (requeue_tx, requeue_rx) = std::sync::mpsc::channel();
+    gpu.set_webcam_requeue(requeue_tx);
+    let webcam_rx = webcam_dmabuf::spawn(
+        webcam_dmabuf::device_path(),
+        capture_enabled.clone(),
+        capture_wake.clone(),
+        requeue_rx,
+    );
+
     let (projected, projected_bytes) = pipeline.projected_buffer();
     gpu.attach_splats(vk, projected, projected_bytes)?;
     tick_avatar(
@@ -2216,6 +2390,20 @@ pub fn run(
                     }
                 }
                 got = true;
+            }
+            while let Ok(msg) = webcam_rx.try_recv() {
+                match msg {
+                    WebcamMsg::Started { width, height, stride, fds } => {
+                        if let Err(e) = gpu.adopt_webcam(vk, width, height, stride, fds) {
+                            eprintln!("[webcam] import failed: {e} — avatar keeps sampling the desktop");
+                        }
+                    }
+                    WebcamMsg::Frame(index) => {
+                        if !gpu.note_webcam_frame(index) {
+                            gpu.requeue_webcam(index);
+                        }
+                    }
+                }
             }
             let avatar_due = last_avatar.elapsed() >= AVATAR_TICK;
             if avatar_due {

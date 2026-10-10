@@ -1,6 +1,7 @@
-//! Soft body regions and the scheduler that points each one at a screen
-//! rectangle. This module never sees pixels: a rectangle is four integers,
-//! and the GPU copies that rectangle into an atlas tile.
+//! Soft body regions and the scheduler that points each one at a rectangle
+//! of one ingress picture. This module never sees pixels: a rectangle is
+//! four integers plus which source it came from, and the GPU copies that
+//! rectangle into an atlas tile.
 //!
 //! Atlas layout (must match `screen_patch.comp` and `splat_disc.frag`):
 //! `MAX_REGIONS` columns by 2 rows of `TILE`×`TILE` pixels.
@@ -31,6 +32,31 @@ pub const CHROME_MIX: f32 = 0.22;
 pub const FLAG_FACE: u32 = 1;
 pub const FLAG_SHOWN: u32 = 2;
 pub const FLAG_INCOMING: u32 = 4;
+
+/// Desktop capture. A later picture source takes the next id.
+pub const SOURCE_DESKTOP: u32 = 0;
+/// Webcam, YUYV on the GPU. Absent from the scheduler until a frame is current.
+pub const SOURCE_WEBCAM: u32 = 1;
+
+/// One picture the scheduler can copy a rectangle from. The rectangle is
+/// in this source's pixels. A source with no frame is left out of the list,
+/// so one live source gets every sample.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IngressSource {
+    pub id: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl IngressSource {
+    pub fn desktop(width: u32, height: u32) -> Self {
+        Self { id: SOURCE_DESKTOP, width, height }
+    }
+
+    pub fn webcam(width: u32, height: u32) -> Self {
+        Self { id: SOURCE_WEBCAM, width, height }
+    }
+}
 
 const BODY_BINS: usize = 11;
 
@@ -67,6 +93,8 @@ pub struct PatchJob {
     pub region: u32,
     pub page: u32,
     pub rect: Rect,
+    /// `SOURCE_DESKTOP` or `SOURCE_WEBCAM`. The rect is in that picture.
+    pub source: u32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -225,10 +253,10 @@ impl Appearance {
         Self { regions, patches: Vec::new(), rng: seed, wait: 0.0, show_bake: false }
     }
 
-    /// Advance fades. When `screen` is a real capture and the timer has
-    /// elapsed, queue one rectangle for one region. No screen: the timer
-    /// does not move.
-    pub fn tick(&mut self, dt: f32, screen: Option<(u32, u32)>) -> Option<PatchJob> {
+    /// Advance fades. When at least one source has a frame and the timer
+    /// has elapsed, queue one rectangle for one region. The source is a
+    /// uniform draw over that list. No source: the timer does not move.
+    pub fn tick(&mut self, dt: f32, sources: &[IngressSource]) -> Option<PatchJob> {
         let dt = dt.max(0.0);
         for region in &mut self.regions {
             if region.incoming_valid && region.fade < 1.0 {
@@ -242,9 +270,14 @@ impl Appearance {
         if self.show_bake || self.regions.is_empty() {
             return None;
         }
-        let Some((width, height)) = screen.filter(|&(w, h)| w > 0 && h > 0) else {
+        let available: Vec<IngressSource> = sources
+            .iter()
+            .copied()
+            .filter(|s| s.width > 0 && s.height > 0)
+            .collect();
+        if available.is_empty() {
             return None;
-        };
+        }
         for region in &mut self.regions {
             region.idle += dt;
         }
@@ -275,7 +308,8 @@ impl Appearance {
                 region.is_face && (!region.shown_valid || region.idle >= FACE_STALE_SECS)
             })
             .unwrap_or_else(|| eligible[self.next_u32() as usize % eligible.len()]);
-        let rect = random_screen_rect(&mut self.rng, width, height);
+        let source = available[self.next_u32() as usize % available.len()];
+        let rect = random_screen_rect(&mut self.rng, source.width, source.height);
         let region = &mut self.regions[pick];
         let page = if region.shown_valid { 1 - (region.shown_page & 1) } else { 0 };
         region.incoming_page = page;
@@ -284,7 +318,7 @@ impl Appearance {
         region.idle = 0.0;
         let jitter = self.next_u32() as f32 / u32::MAX as f32;
         self.wait = WAIT_MIN + jitter * WAIT_SPAN;
-        Some(PatchJob { region: pick as u32, page, rect })
+        Some(PatchJob { region: pick as u32, page, rect, source: source.id })
     }
 
     pub fn region_uniforms(&self) -> [RegionGpu; MAX_REGIONS] {
@@ -473,8 +507,8 @@ mod tests {
     fn rects_stay_inside_and_repeat_for_a_seed() {
         let mut a = Appearance::new_regions(1, 0, 42);
         let mut b = Appearance::new_regions(1, 0, 42);
-        let ja = a.tick(0.0, Some((800, 600))).unwrap();
-        let jb = b.tick(0.0, Some((800, 600))).unwrap();
+        let ja = a.tick(0.0, &[IngressSource::desktop(800, 600)]).unwrap();
+        let jb = b.tick(0.0, &[IngressSource::desktop(800, 600)]).unwrap();
         assert_eq!(ja.rect, jb.rect);
         assert!((WAIT_MIN..=WAIT_MIN + WAIT_SPAN).contains(&a.wait), "wait {}", a.wait);
 
@@ -483,7 +517,7 @@ mod tests {
             for region in &mut a.regions {
                 region.fade = 1.0;
             }
-            let job = a.tick(0.0, Some((100, 80))).unwrap();
+            let job = a.tick(0.0, &[IngressSource::desktop(100, 80)]).unwrap();
             assert!(job.rect.x + job.rect.w <= 100, "{:?}", job.rect);
             assert!(job.rect.y + job.rect.h <= 80, "{:?}", job.rect);
             assert!((32..=100).contains(&job.rect.w), "{:?}", job.rect);
@@ -495,22 +529,22 @@ mod tests {
     #[test]
     fn one_region_per_tick_and_the_timer_waits_for_a_screen() {
         let mut a = Appearance::new_regions(4, 0, 7);
-        assert!(a.tick(0.0, None).is_none(), "no capture, no snapshot");
+        assert!(a.tick(0.0, &[]).is_none(), "no capture, no snapshot");
         assert_eq!(a.wait, 0.0, "the timer does not run without a screen");
-        let first = a.tick(0.0, Some((1920, 1080))).unwrap();
+        let first = a.tick(0.0, &[IngressSource::desktop(1920, 1080)]).unwrap();
         assert_eq!(transitioning(&a), 1);
-        assert!(a.tick(0.05, Some((1920, 1080))).is_none());
+        assert!(a.tick(0.05, &[IngressSource::desktop(1920, 1080)]).is_none());
         assert_eq!(transitioning(&a), 1);
         assert!((0.0..1.0).contains(&a.regions[first.region as usize].fade));
-        a.tick(0.40, Some((1920, 1080)));
+        a.tick(0.40, &[IngressSource::desktop(1920, 1080)]);
         assert!(a.regions[first.region as usize].shown_valid);
         assert_eq!(transitioning(&a), 0);
-        assert!(a.tick(0.02, Some((1920, 1080))).is_none(), "still inside the wait");
-        let second = a.tick(WAIT_MIN + WAIT_SPAN, Some((1920, 1080))).unwrap();
+        assert!(a.tick(0.02, &[IngressSource::desktop(1920, 1080)]).is_none(), "still inside the wait");
+        let second = a.tick(WAIT_MIN + WAIT_SPAN, &[IngressSource::desktop(1920, 1080)]).unwrap();
         assert_eq!(transitioning(&a), 1);
         let _ = second;
         let mut live = 0;
-        a.tick(0.0, Some((1920, 1080)));
+        a.tick(0.0, &[IngressSource::desktop(1920, 1080)]);
         for region in &a.regions {
             if region.incoming_valid && region.fade < 1.0 {
                 live += 1;
@@ -523,22 +557,22 @@ mod tests {
     fn bake_mode_queues_nothing() {
         let mut a = Appearance::new_regions(3, 1, 1);
         a.show_bake = true;
-        assert!(a.tick(1.0, Some((640, 480))).is_none());
+        assert!(a.tick(1.0, &[IngressSource::desktop(640, 480)]).is_none());
         assert!(a.regions.iter().all(|r| !r.incoming_valid));
     }
 
     #[test]
     fn face_leaves_the_debug_palette_first_and_comes_back() {
         let mut a = Appearance::new_regions(8, 4, 3);
-        let first = a.tick(0.0, Some((1920, 1080))).unwrap();
+        let first = a.tick(0.0, &[IngressSource::desktop(1920, 1080)]).unwrap();
         assert_eq!(first.region, 4, "the face is the first snapshot");
-        a.tick(0.5, Some((1920, 1080)));
+        a.tick(0.5, &[IngressSource::desktop(1920, 1080)]);
         assert!(a.regions[4].shown_valid);
 
         a.wait = 0.0;
         a.regions[4].idle = FACE_STALE_SECS;
         a.regions[4].fade = 1.0;
-        let again = a.tick(0.0, Some((1920, 1080))).unwrap();
+        let again = a.tick(0.0, &[IngressSource::desktop(1920, 1080)]).unwrap();
         assert_eq!(again.region, 4, "a stale face is chosen ahead of the body");
     }
 
@@ -548,6 +582,65 @@ mod tests {
         let u = a.region_uniforms();
         assert_eq!(u[1].flags & FLAG_FACE, FLAG_FACE);
         assert_eq!(u[0].flags & FLAG_FACE, 0);
+    }
+
+    #[test]
+    fn samples_are_split_evenly_across_live_sources() {
+        let desktop = IngressSource::desktop(1920, 1080);
+        let webcam = IngressSource::webcam(640, 480);
+
+        let mut none = Appearance::new_regions(2, 0, 1);
+        assert!(none.tick(0.0, &[IngressSource::desktop(0, 10), IngressSource::webcam(0, 0)]).is_none());
+        assert_eq!(none.wait, 0.0, "an empty source list does not start the timer");
+
+        let mut only_desk = Appearance::new_regions(4, 0, 9);
+        for _ in 0..20 {
+            only_desk.wait = 0.0;
+            for region in &mut only_desk.regions {
+                region.fade = 1.0;
+            }
+            let job = only_desk.tick(0.0, &[desktop]).unwrap();
+            assert_eq!(job.source, SOURCE_DESKTOP);
+            assert!(job.rect.x + job.rect.w <= desktop.width, "{:?}", job.rect);
+            assert!(job.rect.y + job.rect.h <= desktop.height, "{:?}", job.rect);
+        }
+
+        let mut only_cam = Appearance::new_regions(4, 1, 9);
+        for _ in 0..20 {
+            only_cam.wait = 0.0;
+            for region in &mut only_cam.regions {
+                region.fade = 1.0;
+            }
+            let job = only_cam.tick(0.0, &[webcam]).unwrap();
+            assert_eq!(job.source, SOURCE_WEBCAM);
+            assert!(job.rect.x + job.rect.w <= webcam.width, "{:?}", job.rect);
+            assert!(job.rect.y + job.rect.h <= webcam.height, "{:?}", job.rect);
+        }
+
+        let mut both = Appearance::new_regions(4, 2, 11);
+        let mut saw_desk = false;
+        let mut saw_cam = false;
+        for _ in 0..40 {
+            both.wait = 0.0;
+            for region in &mut both.regions {
+                region.fade = 1.0;
+            }
+            let job = both.tick(0.0, &[desktop, webcam]).unwrap();
+            let (width, height) = match job.source {
+                SOURCE_DESKTOP => {
+                    saw_desk = true;
+                    (desktop.width, desktop.height)
+                }
+                SOURCE_WEBCAM => {
+                    saw_cam = true;
+                    (webcam.width, webcam.height)
+                }
+                other => panic!("unknown source {other}"),
+            };
+            assert!(job.rect.x + job.rect.w <= width, "{:?} source {}", job.rect, job.source);
+            assert!(job.rect.y + job.rect.h <= height, "{:?} source {}", job.rect, job.source);
+        }
+        assert!(saw_desk && saw_cam, "desktop {saw_desk} webcam {saw_cam}");
     }
 
     #[test]
@@ -572,10 +665,11 @@ mod tests {
 
         let mut app = actor.appearance;
         app.show_bake = false;
-        let job = app.tick(0.0, Some((1920, 1080))).unwrap();
+        let job = app.tick(0.0, &[IngressSource::desktop(1920, 1080)]).unwrap();
         assert_eq!(job.region, face as u32, "the face is the first snapshot");
+        assert_eq!(job.source, SOURCE_DESKTOP);
         assert_eq!(transitioning(&app), 1);
-        assert!(app.tick(0.016, Some((1920, 1080))).is_none());
+        assert!(app.tick(0.016, &[IngressSource::desktop(1920, 1080)]).is_none());
         assert!(job.rect.w >= 32 && job.rect.h >= 32);
         assert!(job.rect.x + job.rect.w <= 1920 && job.rect.y + job.rect.h <= 1080);
     }

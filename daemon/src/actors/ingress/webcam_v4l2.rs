@@ -1,5 +1,7 @@
 #![allow(dead_code)] // real code, compile-verified only — not yet called from main.rs (no ingress-tick loop exists to wire it into). See module doc comment for the honest real-vs-tested boundary.
-//! Webcam capture via raw V4L2 `ioctl(2)` calls — no client library needed
+//! Webcam capture via raw V4L2 `ioctl(2)` calls — no client library needed.
+//! Avatar colors do not use this module: it mmaps RGB24. Coloration uses
+//! `webcam_dmabuf`, which exports YUYV dma-bufs and never reads a pixel.
 
 //! at all (V4L2 talks to a `/dev/videoN` file descriptor directly), so
 //! unlike the Wayland screen-capture backend this has zero runtime

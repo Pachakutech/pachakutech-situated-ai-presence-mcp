@@ -2,7 +2,8 @@
 //! image and writes one tile. Nothing is mapped back to the CPU.
 
 use crate::avatar::appearance::{
-    PatchJob, RegionGpu, SplatPatchGpu, ATLAS_H, ATLAS_W, MAX_PATCH_SPLATS, MAX_REGIONS, TILE,
+    PatchJob, RegionGpu, SplatPatchGpu, ATLAS_H, ATLAS_W, MAX_PATCH_SPLATS, MAX_REGIONS, SOURCE_WEBCAM,
+    TILE,
 };
 use crate::vulkan::VulkanContext;
 use ash::vk;
@@ -18,13 +19,24 @@ struct PatchPush {
     tile_origin: [i32; 2],
     tile_size: i32,
     y_invert: f32,
+    /// 0 desktop, 1 webcam. A float so it matches the GLSL push-constant layout.
+    source: f32,
 }
 
+const _: () = assert!(std::mem::size_of::<PatchPush>() == 52);
+
 pub struct CaptureView {
+    pub image: vk::Image,
     pub view: vk::ImageView,
     pub width: u32,
     pub height: u32,
     pub y_invert: bool,
+}
+
+struct OwnedImage {
+    image: vk::Image,
+    memory: vk::DeviceMemory,
+    view: vk::ImageView,
 }
 
 pub struct PatchBind {
@@ -42,6 +54,10 @@ pub struct ScreenPatches {
     atlas_view: vk::ImageView,
     atlas_sampler: vk::Sampler,
     screen_sampler: vk::Sampler,
+    webcam_sampler: vk::Sampler,
+    /// 1×1 images so a sampler the shader does not take this dispatch is still valid.
+    dummy_rgba: OwnedImage,
+    dummy_rg: Option<OwnedImage>,
     layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
     set_layout: vk::DescriptorSetLayout,
@@ -93,8 +109,17 @@ impl ScreenPatches {
         let atlas_mem = alloc(vk, img_req, vk::MemoryPropertyFlags::DEVICE_LOCAL)?;
         unsafe { device.bind_image_memory(atlas, atlas_mem, 0) }.map_err(|e| format!("atlas bind: {e:?}"))?;
         let atlas_view = view(device, atlas, vk::Format::R8G8B8A8_UNORM)?;
-        let atlas_sampler = sampler(device)?;
-        let screen_sampler = sampler(device)?;
+        let atlas_sampler = sampler(device, vk::Filter::LINEAR)?;
+        let screen_sampler = sampler(device, vk::Filter::LINEAR)?;
+        let webcam_sampler = sampler(device, vk::Filter::NEAREST)?;
+        let dummy_rgba = sampled_image(vk, vk::Format::R8G8B8A8_UNORM)?;
+        let dummy_rg = match sampled_image(vk, vk::Format::R8G8_UNORM) {
+            Ok(image) => Some(image),
+            Err(e) => {
+                eprintln!("[appearance] R8G8 dummy image unavailable ({e})");
+                None
+            }
+        };
 
         let (patch_buf, patch_mem, patch_ptr) = host_buffer(
             vk,
@@ -118,6 +143,11 @@ impl ScreenPatches {
                 .stage_flags(vk::ShaderStageFlags::COMPUTE),
             vk::DescriptorSetLayoutBinding::default()
                 .binding(1)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(2)
                 .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::COMPUTE),
@@ -126,7 +156,7 @@ impl ScreenPatches {
         let set_layout = unsafe { device.create_descriptor_set_layout(&dsl_info, None) }
             .map_err(|e| format!("patch set layout: {e:?}"))?;
         let pool_sizes = [
-            vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: 1 },
+            vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: 2 },
             vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_IMAGE, descriptor_count: 1 },
         ];
         let pool_info = vk::DescriptorPoolCreateInfo::default().max_sets(1).pool_sizes(&pool_sizes);
@@ -142,7 +172,7 @@ impl ScreenPatches {
             .image_layout(vk::ImageLayout::GENERAL)];
         let atlas_write = vk::WriteDescriptorSet::default()
             .dst_set(set)
-            .dst_binding(1)
+            .dst_binding(2)
             .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
             .image_info(&atlas_info);
         unsafe { device.update_descriptor_sets(&[atlas_write], &[]) };
@@ -173,6 +203,9 @@ impl ScreenPatches {
             atlas_view,
             atlas_sampler,
             screen_sampler,
+            webcam_sampler,
+            dummy_rgba,
+            dummy_rg,
             layout,
             pipeline,
             set_layout,
@@ -225,27 +258,83 @@ impl ScreenPatches {
         }
     }
 
-    /// Clear the atlas once, then copy any queued rectangles from `capture`.
-    /// Jobs stay queued when the screen image is not ready yet.
-    pub fn record(&mut self, device: &ash::Device, cmd: vk::CommandBuffer, capture: Option<&CaptureView>) {
+    /// Clear the atlas once, then copy queued rectangles whose source has a
+    /// frame. A job whose picture is missing stays queued. Both samplers are
+    /// written once per command buffer: updating one binding between
+    /// dispatches would make every dispatch see the last write.
+    pub fn record(
+        &mut self,
+        device: &ash::Device,
+        cmd: vk::CommandBuffer,
+        desktop: Option<&CaptureView>,
+        webcam: Option<&CaptureView>,
+        foreign_queue: u32,
+        graphics_queue: u32,
+    ) {
         if !self.cleared {
             self.clear(device, cmd);
             self.cleared = true;
         }
-        let Some(capture) = capture else { return };
         if self.jobs.is_empty() {
             return;
         }
-        let screen_info = [vk::DescriptorImageInfo::default()
+        let mut later = Vec::new();
+        let mut ready = Vec::new();
+        for job in self.jobs.drain(..) {
+            let have = if job.source == SOURCE_WEBCAM {
+                webcam.is_some()
+            } else {
+                desktop.is_some()
+            };
+            if have {
+                ready.push(job);
+            } else {
+                later.push(job);
+            }
+        }
+        self.jobs = later;
+        if ready.is_empty() {
+            return;
+        }
+
+        let sample_webcam = ready.iter().any(|job| job.source == SOURCE_WEBCAM);
+        let sample_desktop = ready.iter().any(|job| job.source != SOURCE_WEBCAM);
+        // Bind the real image only for a source this batch samples. The other
+        // binding stays on a 1×1 dummy that is already in SHADER_READ, so a
+        // desktop-only batch does not acquire the camera buffer.
+        let desktop_view = if sample_desktop { desktop.unwrap().view } else { self.dummy_rgba.view };
+        let webcam_view = if sample_webcam { webcam.unwrap().view } else { self.webcam_dummy_view() };
+        let desktop_info = [vk::DescriptorImageInfo::default()
             .sampler(self.screen_sampler)
-            .image_view(capture.view)
+            .image_view(desktop_view)
             .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
-        let write = vk::WriteDescriptorSet::default()
-            .dst_set(self.set)
-            .dst_binding(0)
-            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-            .image_info(&screen_info);
-        unsafe { device.update_descriptor_sets(&[write], &[]) };
+        let webcam_info = [vk::DescriptorImageInfo::default()
+            .sampler(self.webcam_sampler)
+            .image_view(webcam_view)
+            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+        let writes = [
+            vk::WriteDescriptorSet::default()
+                .dst_set(self.set)
+                .dst_binding(0)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(&desktop_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(self.set)
+                .dst_binding(1)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(&webcam_info),
+        ];
+        unsafe { device.update_descriptor_sets(&writes, &[]) };
+
+        if sample_webcam {
+            VulkanContext::record_dmabuf_transition(
+                device,
+                cmd,
+                webcam.unwrap().image,
+                foreign_queue,
+                graphics_queue,
+            );
+        }
 
         image_barrier(
             device,
@@ -262,9 +351,11 @@ impl ScreenPatches {
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.pipeline);
             device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::COMPUTE, self.layout, 0, &[self.set], &[]);
         }
-        for job in self.jobs.drain(..) {
+        for job in &ready {
+            let capture = if job.source == SOURCE_WEBCAM { webcam.unwrap() } else { desktop.unwrap() };
+            let name = if job.source == SOURCE_WEBCAM { "webcam" } else { "desktop" };
             println!(
-                "[appearance] region {} page {} <- {},{} {}x{}",
+                "[appearance] region {} page {} <- {name} {},{} {}x{}",
                 job.region, job.page, job.rect.x, job.rect.y, job.rect.w, job.rect.h
             );
             let push = PatchPush {
@@ -274,6 +365,7 @@ impl ScreenPatches {
                 tile_origin: [job.region as i32 * TILE as i32, job.page as i32 * TILE as i32],
                 tile_size: TILE as i32,
                 y_invert: if capture.y_invert { 1.0 } else { 0.0 },
+                source: if job.source == SOURCE_WEBCAM { 1.0 } else { 0.0 },
             };
             unsafe {
                 device.cmd_push_constants(
@@ -297,9 +389,35 @@ impl ScreenPatches {
             vk::AccessFlags::SHADER_WRITE,
             vk::AccessFlags::SHADER_READ,
         );
+        if sample_webcam {
+            VulkanContext::record_dmabuf_release(
+                device,
+                cmd,
+                webcam.unwrap().image,
+                graphics_queue,
+                foreign_queue,
+            );
+        }
+    }
+
+    fn webcam_dummy_view(&self) -> vk::ImageView {
+        self.dummy_rg.as_ref().map(|image| image.view).unwrap_or(self.dummy_rgba.view)
     }
 
     fn clear(&self, device: &ash::Device, cmd: vk::CommandBuffer) {
+        for image in [Some(self.dummy_rgba.image), self.dummy_rg.as_ref().map(|d| d.image)].into_iter().flatten() {
+            image_barrier(
+                device,
+                cmd,
+                image,
+                vk::ImageLayout::UNDEFINED,
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::AccessFlags::empty(),
+                vk::AccessFlags::SHADER_READ,
+            );
+        }
         image_barrier(
             device,
             cmd,
@@ -340,6 +458,11 @@ impl ScreenPatches {
             device.destroy_descriptor_set_layout(self.set_layout, None);
             device.destroy_sampler(self.atlas_sampler, None);
             device.destroy_sampler(self.screen_sampler, None);
+            device.destroy_sampler(self.webcam_sampler, None);
+            destroy_owned(device, &self.dummy_rgba);
+            if let Some(image) = &self.dummy_rg {
+                destroy_owned(device, image);
+            }
             device.destroy_image_view(self.atlas_view, None);
             device.destroy_image(self.atlas, None);
             device.free_memory(self.atlas_mem, None);
@@ -396,14 +519,43 @@ fn view(device: &ash::Device, image: vk::Image, format: vk::Format) -> Result<vk
     unsafe { device.create_image_view(&info, None) }.map_err(|e| format!("atlas view: {e:?}"))
 }
 
-fn sampler(device: &ash::Device) -> Result<vk::Sampler, String> {
+fn sampler(device: &ash::Device, filter: vk::Filter) -> Result<vk::Sampler, String> {
     let info = vk::SamplerCreateInfo::default()
-        .mag_filter(vk::Filter::LINEAR)
-        .min_filter(vk::Filter::LINEAR)
+        .mag_filter(filter)
+        .min_filter(filter)
         .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
         .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
         .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE);
     unsafe { device.create_sampler(&info, None) }.map_err(|e| format!("atlas sampler: {e:?}"))
+}
+
+fn sampled_image(vk: &VulkanContext, format: vk::Format) -> Result<OwnedImage, String> {
+    let device = &vk.device;
+    let image_info = vk::ImageCreateInfo::default()
+        .image_type(vk::ImageType::TYPE_2D)
+        .format(format)
+        .extent(vk::Extent3D { width: 1, height: 1, depth: 1 })
+        .mip_levels(1)
+        .array_layers(1)
+        .samples(vk::SampleCountFlags::TYPE_1)
+        .tiling(vk::ImageTiling::OPTIMAL)
+        .usage(vk::ImageUsageFlags::SAMPLED)
+        .sharing_mode(vk::SharingMode::EXCLUSIVE)
+        .initial_layout(vk::ImageLayout::UNDEFINED);
+    let image = unsafe { device.create_image(&image_info, None) }.map_err(|e| format!("dummy image: {e:?}"))?;
+    let req = unsafe { device.get_image_memory_requirements(image) };
+    let memory = alloc(vk, req, vk::MemoryPropertyFlags::DEVICE_LOCAL)?;
+    unsafe { device.bind_image_memory(image, memory, 0) }.map_err(|e| format!("dummy bind: {e:?}"))?;
+    let image_view = view(device, image, format)?;
+    Ok(OwnedImage { image, memory, view: image_view })
+}
+
+fn destroy_owned(device: &ash::Device, image: &OwnedImage) {
+    unsafe {
+        device.destroy_image_view(image.view, None);
+        device.destroy_image(image.image, None);
+        device.free_memory(image.memory, None);
+    }
 }
 
 fn host_buffer(

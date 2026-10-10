@@ -238,6 +238,9 @@ pub fn drm_to_vk_format(drm_format: u32) -> vk::Format {
         | crate::actors::ingress::DRM_FORMAT_ARGB8888 => vk::Format::B8G8R8A8_UNORM,
         crate::actors::ingress::DRM_FORMAT_XBGR8888
         | crate::actors::ingress::DRM_FORMAT_ABGR8888 => vk::Format::R8G8B8A8_UNORM,
+        // YUYV exported as two UNORM bytes. The patch shader reads .r as Y
+        // and .g as the shared chroma. GR88 would swap those and is not used.
+        crate::actors::ingress::DRM_FORMAT_RG88 => vk::Format::R8G8_UNORM,
         _ => vk::Format::UNDEFINED,
     }
 }
@@ -282,8 +285,7 @@ impl VulkanContext {
         let vk_format = drm_to_vk_format(frame.drm_format);
         if vk_format == vk::Format::UNDEFINED {
             eprintln!(
-                "[dmabuf_import] unsupported DRM format 0x{:08X} — \
-                 only XRGB/ARGB/XBGR/ABGR 8888 are accepted in this build",
+                "[dmabuf_import] unsupported DRM format 0x{:08X}",
                 frame.drm_format
             );
             return Err(format!("unsupported DRM format 0x{:08X}", frame.drm_format));
@@ -539,6 +541,48 @@ impl VulkanContext {
                 cmd,
                 vk::PipelineStageFlags::ALL_COMMANDS,
                 vk::PipelineStageFlags::FRAGMENT_SHADER | vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                std::slice::from_ref(&barrier),
+            );
+        }
+    }
+
+    /// Hand a sampled dmabuf back to the device that writes it (the webcam).
+    /// The previous acquire left the image in `SHADER_READ_ONLY_OPTIMAL`.
+    /// `GENERAL` is what a foreign producer writes, and the contents stay:
+    /// this is not an `UNDEFINED` discard. Call it after the dispatch that
+    /// sampled the image, and do not queue the buffer again until the
+    /// fence for this command buffer has signaled.
+    pub fn record_dmabuf_release(
+        device: &ash::Device,
+        cmd: vk::CommandBuffer,
+        image: vk::Image,
+        src_queue_family: u32,
+        dst_queue_family: u32,
+    ) {
+        let barrier = vk::ImageMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::SHADER_READ)
+            .dst_access_mask(vk::AccessFlags::empty())
+            .old_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .new_layout(vk::ImageLayout::GENERAL)
+            .src_queue_family_index(src_queue_family)
+            .dst_queue_family_index(dst_queue_family)
+            .image(image)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            });
+
+        unsafe {
+            device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::FRAGMENT_SHADER | vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::PipelineStageFlags::ALL_COMMANDS,
                 vk::DependencyFlags::empty(),
                 &[],
                 &[],

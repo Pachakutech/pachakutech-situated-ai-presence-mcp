@@ -13,6 +13,7 @@
 
 pub mod screen_dmabuf;
 pub mod screen_wlr;
+pub mod webcam_dmabuf;
 pub mod webcam_v4l2;
 
 use super::gpu_layout::{AnimatedSplatGpu, FLAG_ACTIVE, FLAG_TEXTURED_BILLBOARD};
@@ -52,7 +53,8 @@ pub struct DmabufPlane {
 ///
 /// **Initial constraints** (see the correct_screen_ingress PDF):
 /// - Accept only one exported object / one fd (single-plane).
-/// - Accept only single-plane XRGB/ARGB/XBGR/ABGR formats.
+/// - Accept only single-plane XRGB/ARGB/XBGR/ABGR formats, plus `RG88`
+///   for the webcam's YUYV buffers.
 /// - Accept only DRM modifiers the Vulkan physical device reports as
 ///   importable for that format.
 /// Multi-plane YUV / multi-object support should be added deliberately.
@@ -87,6 +89,9 @@ pub const DRM_FORMAT_XRGB8888: u32 = 0x34325258; // 'X','R','2','4'
 pub const DRM_FORMAT_ARGB8888: u32 = 0x34325241; // 'A','R','2','4'
 pub const DRM_FORMAT_XBGR8888: u32 = 0x34324258; // 'X','B','2','4'
 pub const DRM_FORMAT_ABGR8888: u32 = 0x34324241; // 'A','B','2','4'
+/// `fourcc_code('R','G','8','8')`. First byte in R, second in G.
+/// YUYV lands here: R is Y, G is U on even x and V on odd x.
+pub const DRM_FORMAT_RG88: u32 = 0x38384752;
 pub const DRM_FORMAT_MOD_INVALID: u64 = 0x00FFFFFFFFFFFFFF;
 
 /// A capture backend: `next_frame` returns the latest frame if one is

@@ -1,21 +1,54 @@
 #version 450
-// Copy one rectangle of the already-sampled screen image into an atlas
-// tile. The screen image never leaves the GPU. Tile layout matches
-// daemon/src/avatar/appearance.rs: 16 columns, 2 pages, 64px tiles.
+// Copy one rectangle of an ingress image into an atlas tile. The images
+// never leave the GPU. Source 0 is the desktop (sampled RGBA, optional
+// y-invert). Source 1 is the webcam: YUYV stored as R8G8, so .r is Y and
+// .g is U on even x and V on odd x. This camera reports quantization
+// default, which for YUYV is limited-range BT.601. The tile is RGBA
+// either way, so the disc shader does not learn about the camera.
+// Tile layout matches daemon/src/avatar/appearance.rs: 16 columns, 2 pages, 64px tiles.
 
 layout(local_size_x = 8, local_size_y = 8) in;
 
-layout(set = 0, binding = 0) uniform sampler2D screen_img;
-layout(set = 0, binding = 1, rgba8) uniform writeonly image2D atlas;
+layout(set = 0, binding = 0) uniform sampler2D desktop_img;
+layout(set = 0, binding = 1) uniform sampler2D webcam_img;
+layout(set = 0, binding = 2, rgba8) uniform writeonly image2D atlas;
 
 layout(push_constant) uniform PC {
-    vec4 src_rect;      // x, y, w, h in screen pixels
+    vec4 src_rect;      // x, y, w, h in source pixels
     vec2 screen_size;
     vec2 atlas_size;
     ivec2 tile_origin;
     int tile_size;
     float y_invert;
+    float source;       // 0 desktop, 1 webcam
 } pc;
+
+vec3 desktop_rgb(vec2 px) {
+    vec2 uv = px / max(pc.screen_size, vec2(1.0));
+    if (pc.y_invert > 0.5) {
+        uv.y = 1.0 - uv.y;
+    }
+    uv = clamp(uv, vec2(0.0), vec2(1.0));
+    return texture(desktop_img, uv).rgb;
+}
+
+vec3 webcam_rgb(vec2 px) {
+    ivec2 p = ivec2(clamp(floor(px), vec2(0.0), pc.screen_size - vec2(1.0)));
+    float y = texelFetch(webcam_img, p, 0).r;
+    int x_even = p.x & ~1;
+    int x_odd = min(x_even + 1, int(pc.screen_size.x) - 1);
+    float u = texelFetch(webcam_img, ivec2(x_even, p.y), 0).g;
+    float v = texelFetch(webcam_img, ivec2(x_odd, p.y), 0).g;
+    // Limited-range BT.601. UNORM 0..1 stands in for 0..255.
+    float cy = (y - 16.0 / 255.0) * (255.0 / 219.0);
+    float cu = (u - 128.0 / 255.0) * (255.0 / 224.0);
+    float cv = (v - 128.0 / 255.0) * (255.0 / 224.0);
+    return clamp(vec3(
+        cy + 1.402 * cv,
+        cy - 0.344136 * cu - 0.714136 * cv,
+        cy + 1.772 * cu
+    ), vec3(0.0), vec3(1.0));
+}
 
 void main() {
     ivec2 local = ivec2(gl_GlobalInvocationID.xy);
@@ -24,11 +57,7 @@ void main() {
     }
     vec2 in_tile = (vec2(local) + 0.5) / max(float(pc.tile_size), 1.0);
     vec2 px = pc.src_rect.xy + in_tile * pc.src_rect.zw;
-    vec2 uv = px / max(pc.screen_size, vec2(1.0));
-    if (pc.y_invert > 0.5) {
-        uv.y = 1.0 - uv.y;
-    }
-    uv = clamp(uv, vec2(0.0), vec2(1.0));
-    vec3 color = texture(screen_img, uv).rgb;
+    // `source` is a push constant, so the branch is dynamically uniform.
+    vec3 color = pc.source > 0.5 ? webcam_rgb(px) : desktop_rgb(px);
     imageStore(atlas, pc.tile_origin + local, vec4(color, 1.0));
 }
