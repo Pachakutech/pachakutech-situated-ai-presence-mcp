@@ -15,10 +15,14 @@ pub const ATLAS_W: u32 = TILE * MAX_REGIONS as u32;
 pub const ATLAS_H: u32 = TILE * 2;
 pub const MAX_PATCH_SPLATS: usize = 50_000;
 pub const FADE_SECS: f32 = 0.45;
+/// Gap before the next region. The back of the figure is off-camera, so a
+/// short gap keeps the visible side changing. Stays above `FADE_SECS`.
+pub const WAIT_MIN: f32 = 0.55;
+pub const WAIT_SPAN: f32 = 0.35;
 /// If the face has worn one tile this long, the next snapshot is the face
 /// again. Otherwise it waits in the same lottery as the body and the head
 /// sits on the debug palette.
-pub const FACE_STALE_SECS: f32 = 6.0;
+pub const FACE_STALE_SECS: f32 = 3.0;
 pub const CHROME: [f32; 3] = [0.78, 0.81, 0.84];
 /// How far a face sample moves toward chrome grey. The captured desktop
 /// stays in front: 0.22 is a cool tint, not a grey wash.
@@ -279,7 +283,7 @@ impl Appearance {
         region.fade = 0.0;
         region.idle = 0.0;
         let jitter = self.next_u32() as f32 / u32::MAX as f32;
-        self.wait = 2.0 + jitter;
+        self.wait = WAIT_MIN + jitter * WAIT_SPAN;
         Some(PatchJob { region: pick as u32, page, rect })
     }
 
@@ -472,7 +476,7 @@ mod tests {
         let ja = a.tick(0.0, Some((800, 600))).unwrap();
         let jb = b.tick(0.0, Some((800, 600))).unwrap();
         assert_eq!(ja.rect, jb.rect);
-        assert!((2.0..=3.0).contains(&a.wait), "wait {}", a.wait);
+        assert!((WAIT_MIN..=WAIT_MIN + WAIT_SPAN).contains(&a.wait), "wait {}", a.wait);
 
         for _ in 0..30 {
             a.wait = 0.0;
@@ -495,14 +499,14 @@ mod tests {
         assert_eq!(a.wait, 0.0, "the timer does not run without a screen");
         let first = a.tick(0.0, Some((1920, 1080))).unwrap();
         assert_eq!(transitioning(&a), 1);
-        assert!(a.tick(0.1, Some((1920, 1080))).is_none());
+        assert!(a.tick(0.05, Some((1920, 1080))).is_none());
         assert_eq!(transitioning(&a), 1);
         assert!((0.0..1.0).contains(&a.regions[first.region as usize].fade));
-        a.tick(0.5, Some((1920, 1080)));
+        a.tick(0.40, Some((1920, 1080)));
         assert!(a.regions[first.region as usize].shown_valid);
         assert_eq!(transitioning(&a), 0);
-        assert!(a.tick(0.2, Some((1920, 1080))).is_none(), "still inside the 2s wait");
-        let second = a.tick(3.0, Some((1920, 1080))).unwrap();
+        assert!(a.tick(0.02, Some((1920, 1080))).is_none(), "still inside the wait");
+        let second = a.tick(WAIT_MIN + WAIT_SPAN, Some((1920, 1080))).unwrap();
         assert_eq!(transitioning(&a), 1);
         let _ = second;
         let mut live = 0;

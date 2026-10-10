@@ -8,7 +8,7 @@ The ticket text that averages a rectangle on the CPU (`sample_solid_color` into 
 
 - At load, group triangles into soft regions. The face region is every triangle whose dominant joint is `head`, `jaw`, or a descendant of those. The other joints are binned by area into the remaining regions (about a dozen total).
 - Each splat stores a region id and a UV across that region's rest-pose bounds. That is geometry, computed once.
-- On the avatar tick, advance fade factors. The face is the first snapshot, and it is chosen again once it has worn a tile for about 6 seconds, so the head does not sit on the debug palette. Other turns, about every 2–3 seconds, choose one region and one integer rectangle (32–128 px, anywhere on the screen, clipped to the capture). No spatial link between the rectangle and the body part.
+- On the avatar tick, advance fade factors. The face is the first snapshot, and it is chosen again once it has worn a tile for about 3 seconds, so the head does not sit on the debug palette. Other turns, about every 0.55–0.9 seconds, choose one region and one integer rectangle (32–128 px, anywhere on the screen, clipped to the capture). The back of the figure is off-camera, so the short gap is what keeps the visible side moving. No spatial link between the rectangle and the body part.
 
 ## GPU
 
