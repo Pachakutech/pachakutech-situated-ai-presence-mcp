@@ -43,18 +43,20 @@ const float ATLAS_W = 1024.0;
 const float ATLAS_H = 128.0;
 const vec3 CHROME = vec3(0.78, 0.81, 0.84);
 const float CHROME_MIX = 0.22;
+const float WEBCAM_PLACE_SCALE = 2.0;
 
 // Desktop content is (0, 0): the whole tile is stretched across the region.
 // Webcam content is the rectangle's texels at the tile origin. That rectangle
-// is placed once, at its own aspect, and cropped to the region. It does not
-// repeat. The formula matches `webcam_cover_local` in appearance.rs.
+// is placed once, at its own aspect, magnified by WEBCAM_PLACE_SCALE, and
+// cropped to the region. It does not repeat. The formula matches
+// `webcam_cover_local` in appearance.rs.
 vec2 tile_local(vec2 uv, uvec2 content, float aspect) {
     if (content.x == 0u || content.y == 0u) {
         return clamp(uv, vec2(0.0), vec2(1.0)) * (TILE - 1.0) + 0.5;
     }
     float region_aspect = max(aspect, 1e-4);
     float rect_aspect = float(content.x) / float(content.y);
-    float stamp_h = max(1.0, region_aspect / rect_aspect);
+    float stamp_h = WEBCAM_PLACE_SCALE * max(1.0, region_aspect / rect_aspect);
     float stamp_w = stamp_h * rect_aspect;
     vec2 origin = vec2((region_aspect - stamp_w) * 0.5, (1.0 - stamp_h) * 0.5);
     vec2 iso = vec2(uv.x * region_aspect, uv.y);

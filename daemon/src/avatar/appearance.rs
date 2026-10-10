@@ -28,6 +28,9 @@ pub const CHROME: [f32; 3] = [0.78, 0.81, 0.84];
 /// How far a face sample moves toward chrome grey. The captured desktop
 /// stays in front: 0.22 is a cool tint, not a grey wash.
 pub const CHROME_MIX: f32 = 0.22;
+/// Webcam rectangle magnification on the body region. Two shows the center
+/// half of the rectangle, still at its own aspect. The atlas copy stays 1:1.
+pub const WEBCAM_PLACE_SCALE: f32 = 2.0;
 
 pub const FLAG_FACE: u32 = 1;
 pub const FLAG_SHOWN: u32 = 2;
@@ -449,13 +452,14 @@ pub fn webcam_content_texels(rect_w: u32, rect_h: u32) -> [u32; 2] {
 }
 
 /// 0..1 point inside a webcam tile's content for one region UV.
-/// One placement, uniform scale, centered. The part of the rectangle that
-/// does not fit the region is cropped. Lens UVs outside 0..1 clamp, so the
-/// picture does not repeat. Matches `sample_tile` in `splat_disc.frag`.
+/// One placement, uniform scale, centered, then magnified by
+/// `WEBCAM_PLACE_SCALE`. The part of the rectangle that does not fit the
+/// region is cropped. Lens UVs outside 0..1 clamp, so the picture does not
+/// repeat. Matches `sample_tile` in `splat_disc.frag`.
 pub fn webcam_cover_local(uv: [f32; 2], bbox_aspect: f32, content_w: u32, content_h: u32) -> [f32; 2] {
     let region_aspect = bbox_aspect.max(1e-4);
     let rect_aspect = content_w.max(1) as f32 / content_h.max(1) as f32;
-    let stamp_h = 1.0f32.max(region_aspect / rect_aspect);
+    let stamp_h = WEBCAM_PLACE_SCALE * 1.0f32.max(region_aspect / rect_aspect);
     let stamp_w = stamp_h * rect_aspect;
     let origin_x = (region_aspect - stamp_w) * 0.5;
     let origin_y = (1.0 - stamp_h) * 0.5;
@@ -617,17 +621,19 @@ mod tests {
 
     #[test]
     fn webcam_placement_is_one_patch_and_does_not_repeat() {
-        // A matching aspect maps the rectangle onto the region once.
-        assert_eq!(webcam_cover_local([0.0, 0.0], 2.0, 64, 32), [0.0, 0.0]);
-        assert_eq!(webcam_cover_local([1.0, 1.0], 2.0, 64, 32), [1.0, 1.0]);
+        // A matching aspect, magnified 2x, shows the center half of the rectangle.
+        assert_eq!(webcam_cover_local([0.0, 0.0], 2.0, 64, 32), [0.25, 0.25]);
+        assert_eq!(webcam_cover_local([1.0, 1.0], 2.0, 64, 32), [0.75, 0.75]);
         assert_eq!(webcam_cover_local([0.5, 0.5], 1.0, 40, 40), [0.5, 0.5]);
         // A square stamp on a region twice as wide is cropped, not stretched or tiled.
         let top = webcam_cover_local([0.0, 0.0], 2.0, 64, 64);
         let bot = webcam_cover_local([1.0, 1.0], 2.0, 64, 64);
-        assert!((top[0] - 0.0).abs() < 1e-5 && (top[1] - 0.25).abs() < 1e-5, "{top:?}");
-        assert!((bot[0] - 1.0).abs() < 1e-5 && (bot[1] - 0.75).abs() < 1e-5, "{bot:?}");
-        // Lens shear past the region holds the edge. It does not wrap.
-        assert_eq!(webcam_cover_local([-0.2, 1.3], 1.0, 64, 64), [0.0, 1.0]);
+        assert!((top[0] - 0.25).abs() < 1e-5 && (top[1] - 0.375).abs() < 1e-5, "{top:?}");
+        assert!((bot[0] - 0.75).abs() < 1e-5 && (bot[1] - 0.625).abs() < 1e-5, "{bot:?}");
+        // A little past the region is still inside the magnified rectangle.
+        // Farther than that holds the edge. Neither case wraps.
+        assert_eq!(webcam_cover_local([-0.25, 1.25], 1.0, 64, 64), [0.125, 0.875]);
+        assert_eq!(webcam_cover_local([-0.75, 1.75], 1.0, 64, 64), [0.0, 1.0]);
     }
 
     #[test]
