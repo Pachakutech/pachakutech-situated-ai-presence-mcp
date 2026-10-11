@@ -1,6 +1,6 @@
 # Ticket A5 — float the disc to the cold spot
 
-The seated figure stays as it is. This ticket only slides the 220×220 layer. No clips, no legs, no yaw, no path finding. It does not wait on the IK work.
+The seated figure stays as it is. This ticket only slides the 330×330 layer. No clips, no legs, no yaw, no path finding. It does not wait on the IK work.
 
 The picture already lives on the GPU: the desktop capture is a dmabuf, sampled by `screen_patch.comp`, about ten times a second. `capture_output` is called with the cursor flag off, so that image does not contain the pointer. `set_bubble_pos` already moves the layer by its margins. The figure starts in the center from `center_margins`.
 
@@ -30,7 +30,7 @@ The weights are push constants, so they can be tuned without rewriting the shade
 
 Motion is remembered as the previous cell values, a few kilobytes, not a second copy of the frame. Ten captures a second is enough to see a video. It will not see a flicker shorter than one capture.
 
-A candidate is scored by the mean heat in a window of one and a half times the disc's area (`269×269` against `220×220`), centered on where the disc would sit, skipping cells under the layer. The coolest legal top-left wins. The top-left is clamped so the disc stays on the output. The earlier twice-area window was wide enough that a small calm rectangle lost to the text beside it.
+A candidate is scored by the mean heat in a window of one and a half times the disc's area (`404×404` against `330×330`), centered on where the disc would sit, skipping cells under the layer. The coolest legal top-left wins. The top-left is clamped so the disc stays on the output. The earlier twice-area window was wide enough that a small calm rectangle lost to the text beside it.
 
 ## What the CPU is allowed to see
 

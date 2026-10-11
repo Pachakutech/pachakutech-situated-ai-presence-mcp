@@ -1,4 +1,4 @@
-//! Slide the 220 layer toward a quiet part of the screen.
+//! Slide the 330 layer toward a quiet part of the screen.
 //!
 //! The GPU writes one heat value per cell. [`crate::actors::quietude`] keeps
 //! the area under that field for a short span. This module reads that memory
@@ -18,11 +18,11 @@
 use crate::actors::quietude::QuietudeMemory;
 
 /// Layer edge, in output pixels. Matches `BUBBLE_PX` in the overlay.
-pub const DISC_PX: i32 = 220;
+pub const DISC_PX: i32 = 330;
 /// Side of the square whose area is one and a half times the disc.
-/// 220 * sqrt(1.5), rounded. Tight enough that a small calm rectangle
+/// 330 * sqrt(1.5), rounded. Tight enough that a small calm rectangle
 /// is not averaged together with the text beside it.
-pub const NEIGHBOR_SIDE: i32 = 269;
+pub const NEIGHBOR_SIDE: i32 = 404;
 const STABLE_SECS: f32 = 0.4;
 /// How long a better spot has to remain better before a glide changes course.
 /// One capture is noise. This is not the 800 ms departure window.
@@ -597,10 +597,12 @@ mod tests {
     #[test]
     fn sustained_heat_leaves_and_a_narrow_gap_does_not() {
         let hot = desktop(1.0);
+        // The block has to cover the whole judged window, or the mean
+        // picks up the hot cells beside a disc this size.
         let mut barely = desktop(1.0);
-        paint(&mut barely, 0, 0, 8, 8, 0.85);
+        paint(&mut barely, 0, 0, 14, 14, 0.85);
         let mut clear = desktop(1.0);
-        paint(&mut clear, 0, 0, 8, 8, 0.84);
+        paint(&mut clear, 0, 0, 14, 14, 0.84);
 
         let mut stay = Placement::at(850, 430);
         feed(&mut stay, &barely, 8, 0.1, false);

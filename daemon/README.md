@@ -16,7 +16,7 @@ for how the two talk to each other.
   creates a process-lifetime pipeline, smokes one splat, then keeps the
   buffer for Control ingest (`addArtifact` uploads `.splat`/`.ply` clouds).
   `Drop` tears GPU objects down.
-- `src/overlay.rs` — disc-sized `wlr-layer-shell` (220×220, not fullscreen),
+- `src/overlay.rs` — disc-sized `wlr-layer-shell` (330×330, not fullscreen),
   empty input region, `exclusive_zone = -1`. Looking-glass samples the full
   output. When the Vulkan device supports zero-copy dmabuf import
   (`VK_EXT_image_drm_format_modifier` + `VK_KHR_external_memory_fd` +

@@ -184,16 +184,20 @@ fn layer_camera_frames_the_body_upright() {
     assert!((chest[2] - 2.55).abs() < 1e-3, "chest depth: {chest:?}");
     let nose = camera_space([0.0, 0.90, 0.08]);
     assert!(nose[2] < chest[2] - 0.05, "face (+Z) should be nearer the camera");
-    let focal = 220.0_f32 * 1.2;
+    let side = crate::placement::DISC_PX as f32;
+    let focal = side * 1.2;
+    let mid_px = side * 0.5;
     let project = |p: [f32; 3]| {
         let c = camera_space(p);
-        [focal * c[0] / c[2] + 110.0, -focal * c[1] / c[2] + 110.0]
+        [focal * c[0] / c[2] + mid_px, -focal * c[1] / c[2] + mid_px]
     };
     let head = project([0.0, 1.62, 0.0]);
     let mid = project([0.0, 0.90, 0.0]);
     let feet = project([0.0, 0.05, 0.0]);
+    let lo = side * 4.0 / 220.0;
+    let hi = side * 216.0 / 220.0;
     for (name, s) in [("head", head), ("chest", mid), ("feet", feet)] {
-        assert!(s[0] > 4.0 && s[0] < 216.0 && s[1] > 4.0 && s[1] < 216.0, "{name} off the 220 disc: {s:?}");
+        assert!(s[0] > lo && s[0] < hi && s[1] > lo && s[1] < hi, "{name} off the disc: {s:?}");
     }
     assert!(head[1] < mid[1] && mid[1] < feet[1], "head {head:?} chest {mid:?} feet {feet:?} should stack top to bottom");
 }

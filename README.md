@@ -132,7 +132,7 @@ second npm package. `npm publish` runs it via `prepublishOnly`. `npm install`
 does not.
 
 See [`daemon/README.md`](daemon/README.md) for the overlay and ingress
-details. The daemon presents a 220×220 layer-shell disc
+details. The daemon presents a 330×330 layer-shell disc
 (`exclusive_zone = -1`). Do not leave an older fullscreen-capture build
 running; that exhausted Hyprland's memory.
 
@@ -180,7 +180,7 @@ The MCP surface — schemas, Policy Gate, CLI, and the Unix-socket client —
 is real. With `presence-daemon` up, tool calls hit the Rust registry; without
 it, they hit `notify-send` plus `~/.local/state/pachakutech-presence/log.jsonl`.
 The daemon owns a Vulkan device and a compute splat pipeline that smokes on
-startup, and it presents a 220×220 layer-shell disc on Hyprland. Screen
+startup, and it presents a 330×330 layer-shell disc on Hyprland. Screen
 ingress imports a dmabuf when the device and compositor allow it, and
 otherwise falls back to a shared-memory copy at about 10 fps. `addArtifact`'s
 `sourceUri` is a local `.splat`/`.ply` path the daemon reads from disk —

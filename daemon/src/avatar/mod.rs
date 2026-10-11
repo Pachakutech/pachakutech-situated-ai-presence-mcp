@@ -241,7 +241,8 @@ impl AvatarActor {
         }
     }
 
-    /// Camera for the 220px layer: body centered, facing the disc, +Y up.
+    /// Camera for the layer: body centered, facing the disc, +Y up.
+    /// Focal length tracks the layer edge, so a larger surface is a larger figure.
     pub fn layer_camera(width: f32, height: f32, frame: u32) -> ProjectionUniformsGpu {
         let focal = width.max(height) * 1.2;
         ProjectionUniformsGpu::new(

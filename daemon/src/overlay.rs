@@ -55,7 +55,7 @@ const OVERLAY_FRAG_SPV: &[u8] =
 
 /// Looking-glass diameter in pixels. Small enough not to dominate 1080p,
 /// large enough to read the refraction. `placement::DISC_PX` is the same edge.
-const BUBBLE_PX: u32 = 220;
+const BUBBLE_PX: u32 = 330;
 const _: () = assert!(crate::placement::DISC_PX as u32 == BUBBLE_PX);
 /// Capture/present ceiling. The OOM was a 16ms fullscreen copy+present spin.
 const CAPTURE_INTERVAL: Duration = Duration::from_millis(100);

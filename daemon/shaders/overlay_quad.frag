@@ -2,7 +2,7 @@
 // Disc-sized present surface; the sampled texture is the *full* screen
 // capture (what actors also see). Fisheye maps that whole frame into the
 // glass — same appearance as XR, where the input is the entire sensor.
-// Layer position is independent: the compositor just moves this 220px
+// Layer position is independent: the compositor just moves this disc-sized
 // surface; UV is always the full capture.
 
 layout(push_constant) uniform PC {
