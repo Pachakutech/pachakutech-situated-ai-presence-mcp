@@ -14,7 +14,7 @@ The ticket text that averages a rectangle on the CPU (`sample_solid_color` into 
 
 - The desktop capture is already a sampled image (dmabuf import, or the SHM path's uploaded image). The webcam, when it is up, is a second sampled image: YUYV imported as `R8G8` and converted to RGB in the patch shader. `screen_patch.comp` samples one rectangle of the chosen source and writes it into that region's atlas tile. The tile stays until that region is chosen again.
 - The disc shader samples the tile at the splat's UV and cross-fades from the previous tile (about 0.45 s). The face sample is mixed in the shader toward chrome grey: 0.22 toward rgb `(0.78, 0.81, 0.84)`, so the desktop capture stays in front of the tint.
-- The same shader treats each region as a glass lens: the tile UV magnifies toward the region center and shears at the rim, with a light chromatic fringe. A pillow normal darkens one side of the part, a bezel and a pale rim mark its edge, and a single streak plus a few twinkles travel across the figure. No backdrop texture is sampled.
+- The same shader treats each region as a glass lens: the tile UV magnifies toward the region center and shears at the rim, with a light chromatic fringe. A pillow normal darkens one side of the part, a bezel and a pale rim mark its edge, and a single streak plus glass sparks travel across the figure. Each spark fades through about half its cycle. The body stays sparse. The head carries many more of the same sparks. No backdrop texture is sampled.
 - `gpu_layout.rs`, the splat binding, skinning, the jaw, and speech are unchanged. Bake palette colors still ride along in the existing color field and are what the shader shows before a region's first snapshot.
 
 ## Not this
