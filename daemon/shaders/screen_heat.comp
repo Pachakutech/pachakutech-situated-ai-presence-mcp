@@ -1,8 +1,12 @@
 #version 450
 // One cell of the quietude grid. The desktop image stays on the GPU.
 // A cell whose center lies in either disc rect is the layer itself: its heat
-// is written as 0 and its remembered color is left alone, so the glass does
-// not become motion when the layer moves off it.
+// is written as 0 and its remembered color is left alone. Samples that fall
+// inside either rect are skipped, so a cell that only overlaps the disc is
+// measured from the desktop part of that cell. A cell that has never been
+// sampled stores a negative luma and does not report motion on the frame the
+// layer uncovers it. The glass is not heat, and neither is the first step
+// off a cell we had not measured.
 //
 // text: fine horizontal luma changes, more than the vertical ones. Not OCR.
 // selection: that text on a saturated, coarsely flat patch.
@@ -54,6 +58,19 @@ bool in_rect(vec2 p, vec4 r) {
     return r.z > 1.0 && p.x >= r.x && p.y >= r.y && p.x < r.x + r.z && p.y < r.y + r.w;
 }
 
+bool in_disc(vec2 p) {
+    return in_rect(p, pc.mask_a) || in_rect(p, pc.mask_b);
+}
+
+// All-zero is the buffer's initial value, not a measured black cell we can
+// trust once the layer has been sitting on it since the first frame.
+void keep_unseen(uint id) {
+    cells[id].heat = 0.0;
+    if (cells[id].luma == 0.0 && cells[id].cb == 0.0 && cells[id].cr == 0.0) {
+        cells[id].luma = -1.0;
+    }
+}
+
 void main() {
     uint col = gl_GlobalInvocationID.x;
     uint row = gl_GlobalInvocationID.y;
@@ -63,13 +80,12 @@ void main() {
     uint id = row * pc.cols + col;
     vec2 origin = vec2(float(col), float(row)) * pc.cell_size;
     vec2 center = origin + vec2(pc.cell_size * 0.5);
-    if (in_rect(center, pc.mask_a) || in_rect(center, pc.mask_b)) {
-        cells[id].heat = 0.0;
+    if (in_disc(center)) {
+        keep_unseen(id);
         return;
     }
 
     float step = max(pc.cell_size / 8.0, 1.0);
-    float horiz = 0.0;
     float vert = 0.0;
     float sum_l = 0.0;
     float sum_cb = 0.0;
@@ -78,78 +94,155 @@ void main() {
     float sum_sat2 = 0.0;
     float prev_row[8];
     float row_l[8];
+    bool prev_ok_row[8];
+    bool row_ok[8];
     for (int i = 0; i < 8; i++) {
         prev_row[i] = 0.0;
+        prev_ok_row[i] = false;
+        row_ok[i] = false;
     }
     bool have_row = false;
+    int n = 0;
+    int vert_n = 0;
+    // Busiest row, not the whole cell. One line of type is a few crossings
+    // on that row. A vertical rule is one crossing, repeated down the cell.
+    float best_h = 0.0;
+    float best_cov = 0.0;
     for (int y = 0; y < 8; y++) {
         float prev_l = 0.0;
+        bool prev_ok = false;
+        float row_horiz = 0.0;
+        int row_steps = 0;
+        int row_pairs = 0;
         for (int x = 0; x < 8; x++) {
             vec2 px = origin + (vec2(float(x), float(y)) + 0.5) * step;
+            if (in_disc(px)) {
+                prev_ok = false;
+                row_ok[x] = false;
+                row_l[x] = 0.0;
+                continue;
+            }
             vec3 rgb = desktop_rgb(px);
             float l = luma_of(rgb);
             float cb = rgb.b - l;
             float cr = rgb.r - l;
             float sat = length(rgb - vec3(l));
             row_l[x] = l;
+            row_ok[x] = true;
             sum_l += l;
             sum_cb += cb;
             sum_cr += cr;
             sum_sat += sat;
             sum_sat2 += sat * sat;
-            if (x > 0) {
-                horiz += abs(l - prev_l);
+            n++;
+            if (prev_ok) {
+                float dlt = abs(l - prev_l);
+                row_horiz += dlt;
+                row_pairs++;
+                if (dlt > 0.06) row_steps++;
             }
-            if (have_row) {
+            if (have_row && prev_ok_row[x]) {
                 vert += abs(l - prev_row[x]);
+                vert_n++;
             }
             prev_l = l;
+            prev_ok = true;
+        }
+        if (row_pairs > 0) {
+            float pairs = float(row_pairs);
+            float row_cov = float(row_steps) / pairs;
+            if (row_cov >= best_cov) {
+                best_cov = row_cov;
+                best_h = row_horiz / pairs;
+            }
         }
         for (int x = 0; x < 8; x++) {
             prev_row[x] = row_l[x];
+            prev_ok_row[x] = row_ok[x];
         }
         have_row = true;
     }
 
-    float h = horiz / 56.0;
-    float v = vert / 56.0;
-    float text = clamp((h - 0.45 * v) * 6.0, 0.0, 1.0);
+    // Mostly the disc. Scoring the sliver that sticks out just heats our edge.
+    if (n < 24) {
+        keep_unseen(id);
+        return;
+    }
+
+    float v = vert / max(float(vert_n), 1.0);
+    // Two crossings on a row of about seven is a thick rule. Four is type.
+    float glyphs = smoothstep(0.34, 0.55, best_cov);
+    float text = clamp((best_h - 0.45 * v) * 6.0 * glyphs, 0.0, 1.0);
 
     float d = pc.cell_size * 0.28;
-    float s00 = luma_of(desktop_rgb(center + vec2(-d, -d)));
-    float s10 = luma_of(desktop_rgb(center + vec2(0.0, -d)));
-    float s20 = luma_of(desktop_rgb(center + vec2(d, -d)));
-    float s01 = luma_of(desktop_rgb(center + vec2(-d, 0.0)));
-    float s21 = luma_of(desktop_rgb(center + vec2(d, 0.0)));
-    float s02 = luma_of(desktop_rgb(center + vec2(-d, d)));
-    float s12 = luma_of(desktop_rgb(center + vec2(0.0, d)));
-    float s22 = luma_of(desktop_rgb(center + vec2(d, d)));
-    float gx = -s00 - 2.0 * s01 - s02 + s20 + 2.0 * s21 + s22;
-    float gy = -s00 - 2.0 * s10 - s20 + s02 + 2.0 * s12 + s22;
-    float edge = clamp(length(vec2(gx, gy)) * 0.85, 0.0, 1.0);
+    vec2 t00 = center + vec2(-d, -d);
+    vec2 t10 = center + vec2(0.0, -d);
+    vec2 t20 = center + vec2(d, -d);
+    vec2 t01 = center + vec2(-d, 0.0);
+    vec2 t21 = center + vec2(d, 0.0);
+    vec2 t02 = center + vec2(-d, d);
+    vec2 t12 = center + vec2(0.0, d);
+    vec2 t22 = center + vec2(d, d);
+    float edge = 0.0;
+    bool edge_ok = !in_disc(t00) && !in_disc(t10) && !in_disc(t20)
+        && !in_disc(t01) && !in_disc(t21)
+        && !in_disc(t02) && !in_disc(t12) && !in_disc(t22);
+    if (edge_ok) {
+        float s00 = luma_of(desktop_rgb(t00));
+        float s10 = luma_of(desktop_rgb(t10));
+        float s20 = luma_of(desktop_rgb(t20));
+        float s01 = luma_of(desktop_rgb(t01));
+        float s21 = luma_of(desktop_rgb(t21));
+        float s02 = luma_of(desktop_rgb(t02));
+        float s12 = luma_of(desktop_rgb(t12));
+        float s22 = luma_of(desktop_rgb(t22));
+        float gx = -s00 - 2.0 * s01 - s02 + s20 + 2.0 * s21 + s22;
+        float gy = -s00 - 2.0 * s10 - s20 + s02 + 2.0 * s12 + s22;
+        edge = clamp(length(vec2(gx, gy)) * 0.85, 0.0, 1.0);
+    }
 
-    float sat_mean = sum_sat / 64.0;
-    float sat_var = max(sum_sat2 / 64.0 - sat_mean * sat_mean, 0.0);
+    float inv_n = 1.0 / float(n);
+    float sat_mean = sum_sat * inv_n;
+    float sat_var = max(sum_sat2 * inv_n - sat_mean * sat_mean, 0.0);
     float color = clamp(sqrt(sat_var) * 5.0, 0.0, 1.0);
     float colorful = clamp(sat_mean * 3.5, 0.0, 1.0);
 
     float sat_out = 0.0;
+    float sat_out_n = 0.0;
     vec2 nudge = vec2(pc.cell_size * 0.75, 0.0);
-    sat_out += length(desktop_rgb(center + nudge) - vec3(luma_of(desktop_rgb(center + nudge))));
-    sat_out += length(desktop_rgb(center - nudge) - vec3(luma_of(desktop_rgb(center - nudge))));
-    sat_out += length(desktop_rgb(center + nudge.yx) - vec3(luma_of(desktop_rgb(center + nudge.yx))));
-    sat_out += length(desktop_rgb(center - nudge.yx) - vec3(luma_of(desktop_rgb(center - nudge.yx))));
-    float boost = clamp((sat_mean - sat_out * 0.25) * 4.0, 0.0, 1.0);
+    vec2 o0 = center + nudge;
+    vec2 o1 = center - nudge;
+    vec2 o2 = center + nudge.yx;
+    vec2 o3 = center - nudge.yx;
+    if (!in_disc(o0)) { vec3 c = desktop_rgb(o0); sat_out += length(c - vec3(luma_of(c))); sat_out_n += 1.0; }
+    if (!in_disc(o1)) { vec3 c = desktop_rgb(o1); sat_out += length(c - vec3(luma_of(c))); sat_out_n += 1.0; }
+    if (!in_disc(o2)) { vec3 c = desktop_rgb(o2); sat_out += length(c - vec3(luma_of(c))); sat_out_n += 1.0; }
+    if (!in_disc(o3)) { vec3 c = desktop_rgb(o3); sat_out += length(c - vec3(luma_of(c))); sat_out_n += 1.0; }
+    float boost = sat_out_n > 0.0 ? clamp((sat_mean - sat_out / sat_out_n) * 4.0, 0.0, 1.0) : 0.0;
     float coarse_flat = 1.0 - edge;
     float selection = clamp(text * max(boost, colorful * 0.65) * (0.35 + 0.65 * coarse_flat), 0.0, 1.0);
+    // A flat saturated patch with no text is an empty highlight, or a blank
+    // tinted pane. It is as cold as the grey around it. Its color and the
+    // edges of the bar must not become a reason to go sit on real text.
+    float blank_highlight = (1.0 - smoothstep(0.04, 0.20, text))
+        * smoothstep(0.22, 0.50, colorful)
+        * smoothstep(0.35, 0.75, coarse_flat);
+    edge *= 1.0 - blank_highlight;
+    color *= 1.0 - blank_highlight;
+    selection *= 1.0 - blank_highlight;
 
-    float mean_l = sum_l / 64.0;
-    float mean_cb = sum_cb / 64.0;
-    float mean_cr = sum_cr / 64.0;
+    float mean_l = sum_l * inv_n;
+    float mean_cb = sum_cb * inv_n;
+    float mean_cr = sum_cr * inv_n;
     float motion = 0.0;
     if (pc.have_prev != 0u) {
         Cell prev = cells[id];
-        motion = clamp((abs(mean_l - prev.luma) + abs(mean_cb - prev.cb) + abs(mean_cr - prev.cr)) * 1.5, 0.0, 1.0);
+        // Negative luma marks a cell we have not measured yet (the buffer
+        // started at zero, or the layer was covering it). The first real
+        // sample is a baseline, not motion.
+        if (prev.luma >= 0.0) {
+            motion = clamp((abs(mean_l - prev.luma) + abs(mean_cb - prev.cb) + abs(mean_cr - prev.cr)) * 1.5, 0.0, 1.0);
+        }
     }
 
     float heat = pc.w0.x * text + pc.w0.y * selection + pc.w0.z * edge + pc.w0.w * color + pc.w1.x * motion;

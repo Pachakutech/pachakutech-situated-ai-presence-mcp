@@ -22,15 +22,15 @@ The weights are push constants, so they can be tuned without rewriting the shade
 
 | Signal | Weight | What the shader actually measures |
 |---|---|---|
-| Text | 1.0 | Fine horizontal structure. High-frequency energy that runs in rows. This is not OCR. A page of type scores high. A photo of grass can too. |
-| Highlighted text | 1.6 | That same text energy sitting on a flat, more saturated patch than its neighborhood. Theme colors differ, so this is a bias, not a detector of "selection blue". |
-| Window edges | 0.35 | Sobel magnitude, the frames of windows and other hard boundaries. |
-| Differing color | 0.35 | Spread of chroma inside the cell. A flat wallpaper is cold. A multicolored region is warm, about as warm as an edge. |
+| Text | 1.0 | Fine horizontal structure on the busiest row of the cell. One line of type still counts: that row keeps crossing. A straight rule crosses about once on the row and is left to the edge term. This is not OCR. A page of type scores high. A photo of grass can too. |
+| Highlighted text | 0 | The term is still computed (text on a flat saturated patch) but it does not add heat. An empty highlight must not outrank real text, so highlighted type is avoided only because it is type. |
+| Window edges | 0.04 | Sobel magnitude, the frames of windows and the lines of a box. Still measured, so a later actor can use those lines as scaffolding. Weighed lightly enough that a framed empty rectangle stays a place to sit. |
+| Differing color | 0.18 | Spread of chroma inside the cell. A flat wallpaper is cold. A flat saturated patch with no text (an empty highlight, a blank tinted pane) is forced cold as well, the same as the grey around it. A multicolored region can still be mildly warm. |
 | Being updated | 1.2 | Absolute change of the cell's luma and chroma since the previous capture. A playing video stays hot. A still window does not. |
 
 Motion is remembered as the previous cell values, a few kilobytes, not a second copy of the frame. Ten captures a second is enough to see a video. It will not see a flicker shorter than one capture.
 
-A candidate is scored by the mean heat in the twice-area window around where the disc would sit, skipping cells under the layer. The coolest legal top-left wins. The top-left is clamped so the disc stays on the output.
+A candidate is scored by the mean heat in a window of one and a half times the disc's area (`269×269` against `220×220`), centered on where the disc would sit, skipping cells under the layer. The coolest legal top-left wins. The top-left is clamped so the disc stays on the output. The earlier twice-area window was wide enough that a small calm rectangle lost to the text beside it.
 
 ## What the CPU is allowed to see
 
@@ -44,9 +44,9 @@ The CPU never maps the capture. After the GPU fence the host reads the coarse he
 
 ## Do not heat ourselves
 
-The live capture includes this layer. Masking the figure's silhouette is not worth it; the disc rectangle is the stand-in. The dispatch is given the current disc and the previous one. A cell whose center lies in either rectangle keeps its old luma (so the glass is not stored as motion) and contributes nothing.
+The live capture includes this layer. Masking the figure's silhouette is not worth it; the disc rectangle is the stand-in. The dispatch is given the current disc and the previous one. A cell whose center lies in either rectangle keeps its old luma (so the glass is not stored as motion) and contributes nothing. Samples that fall inside either rectangle are skipped, so a cell that only overlaps the disc is measured from the desktop part of that cell. A cell that has never been sampled does not report motion on the frame the layer uncovers it. The glass, and the first step off a cell we had not measured, are not heat.
 
-The score is not that hole. It is the mean heat of a square centered on the disc whose area is twice the disc (`311×311` against `220×220`). With the disc removed, what remains is the ring around it, about the same area as the disc. Other candidate spots are scored the same way, and their own interiors still count, because the layer is not sitting on them. A video smaller than the disc and exactly underneath can hide in the hole. A video the size of a window heats the ring and counts.
+The score is not that hole. It is the mean heat of the one-and-a-half window, skipping cells under the layer. What remains is a thin ring, enough to notice type about to slide under the disc and not so much that the neighboring paragraph decides the spot. Other candidate spots are scored the same way, and their own interiors still count, because the layer is not sitting on them. A video smaller than the disc and exactly underneath can hide in the hole. A video the size of a window heats the ring and counts.
 
 Idle stops the evaluation. The old gate inside `set_bubble_pos` is gone, so a glide that has already started can finish and the margins still apply. While idle, the integral is dropped and a new target is not chosen. Lock, screensaver, and sleep still park the layer, and placement resets when it is shown again.
 
@@ -54,15 +54,17 @@ Idle stops the evaluation. The old gate inside `set_bubble_pos` is gone, so a gl
 
 The disc starts at the center.
 
-At rest, the score of the ring is integrated for 800 ms (area under the curve, divided by the window). A short spike is a small part of that area and does not leave. Cooling lowers the integral and argues for staying. Another legal spot has to come in at least 15% under that average.
+The heat grid is a perceptual memory, not a scratchpad inside the glide. Each new capture is folded into a per-cell area under the curve of about 800 ms (`actors/quietude.rs`). Cells the disc is covering are not written, so the layer does not teach the memory that it is cold. The rectified field is what a later actor would query. The glide is one reader.
 
-Once a glide has started, the 800 ms wait is not consulted. Each new capture retargets to the coolest spot when that spot is a standard deviation under the field, or 15% under the spot we are already aimed at. The layer eases with a quadInOut lerp, 640 px/s, at least 350 ms, so a long cross of the screen stays smooth and a short correction does not pop. It settles when the spot it has reached has stayed a standard deviation under the field for 400 ms. A flat desktop has essentially no spread, so the deviation is treated as zero and the layer settles instead of wandering. The legs do not move.
+At rest, another legal spot has to come in at least 15% under that rectified field. A short spike is a small part of the area and does not leave. Cooling lowers the memory and argues for staying. The span is a general width, not a sacred deadline.
+
+Once a glide has started, that span is not a second wait. The layer eases with a quadInOut lerp, 280 px/s, at least 350 ms, so a long cross of the screen stays smooth and a short correction does not pop. A new capture does not restart that ease. The coolest cell of a noisy field is usually a standard deviation under the mean, and it wobbles by about a cell every capture; treating that as a new destination never arrives. Another spot redirects the glide only when it is more than a cell away and it stays at least 15% cooler than the aim for about 200 ms. The same short beat applies when the aim itself is no longer a standard deviation under the field and some other spot is. One capture is not a new destination. The layer settles when the ease has finished and the aimed spot has stayed a standard deviation under the latest field for about 400 ms. A flat desktop has essentially no spread, so the deviation is treated as zero and the layer settles instead of wandering. The legs do not move. Settling does not wipe the memory.
 
 ## First implementation
 
 1. `screen_heat.comp`, one dispatch per new desktop frame. It reads the desktop image already imported for coloring, writes the heat grid, and keeps the previous cell luma and chroma. Push constants are the five weights and the two disc rectangles.
 2. A host-visible copy of the cell heats, read after the fence that already waits for the frame. Not the picture.
-3. `placement.rs`: twice-area mean, 800 ms integral, 15% deadband, quadInOut glide, 400 ms settle. Unit tests feed a fake grid. No GPU in those tests.
+3. `actors/quietude.rs` holds the rectified field. `placement.rs` reads it to leave, then eases at 280 px/s. One-and-a-half-area mean, 15% deadband, about 400 ms to settle. Unit tests feed a fake grid. No GPU in those tests.
 4. The overlay calls it while the layer is visible. Idle skips the integral. No change to appearance scheduling, speech, the jaw, or the splat binding.
 5. On the machine: a still desktop leaves the figure near the calm area. A video or a bright editor warms its cells and the figure leaves. The catchlights and the sparks are unchanged.
 
@@ -70,6 +72,7 @@ Mouse and icons stay out. The weight for motion is the slot a later cursor spike
 
 ## Decided
 
-- The slide is a quadInOut lerp at 640 px/s, at least 350 ms. Not a jump.
+- The slide is a quadInOut lerp at 280 px/s, at least 350 ms. Not a jump.
+- The scored window is one and a half times the disc, not twice. Empty highlights are cold. Highlighted text is not ranked above other text. Window lines stay in the field for later actors, at 0.04, and a straight rule is not counted as type. One line of typing still is.
 - The deadband is 15%.
 - The mouse is a later CPU poll of the compositor cursor, together with icons. Not a second capture.

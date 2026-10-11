@@ -16,9 +16,14 @@ const MAX_CELLS: u32 = MAX_COLS * MAX_ROWS;
 
 /// Tunable from here. The shader reads them as push constants.
 const W_TEXT: f32 = 1.0;
-const W_SELECT: f32 = 1.6;
-const W_EDGE: f32 = 0.35;
-const W_COLOR: f32 = 0.35;
+/// Left at zero. A highlight with nothing written in it must not outrank
+/// real text, and raising this would do that. The term stays in the shader.
+const W_SELECT: f32 = 0.0;
+/// Measured, and kept, so a later actor can use window lines as
+/// scaffolding. Barely weighed here: a framed empty box should still
+/// be a place to sit.
+const W_EDGE: f32 = 0.04;
+const W_COLOR: f32 = 0.18;
 const W_MOTION: f32 = 1.2;
 
 #[repr(C)]

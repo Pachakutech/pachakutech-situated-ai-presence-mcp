@@ -8,6 +8,7 @@ pub mod control;
 pub mod gpu_layout;
 pub mod ingress;
 pub mod presence;
+pub mod quietude;
 pub mod scene_memory;
 pub mod splat_io;
 
