@@ -56,15 +56,15 @@ The disc starts at the center.
 
 The heat grid is a perceptual memory, not a scratchpad inside the glide. Each new capture is folded into a per-cell area under the curve of about 800 ms (`actors/quietude.rs`). Cells the disc is covering are not written, so the layer does not teach the memory that it is cold. The rectified field is what a later actor would query. The glide is one reader.
 
-At rest, another legal spot has to come in at least 15% under that rectified field. A short spike is a small part of the area and does not leave. Cooling lowers the memory and argues for staying. The span is a general width, not a sacred deadline.
+At rest, another legal spot has to come in at least 45% under that rectified field. A short spike is a small part of the area and does not leave. Cooling lowers the memory and argues for staying. The span is a general width, not a sacred deadline. The wider gap is heat tolerance: a decent seat is allowed to stay, and text is still hot enough to clear it.
 
-Once a glide has started, that span is not a second wait. The layer eases with a quadInOut lerp, 280 px/s, at least 350 ms, so a long cross of the screen stays smooth and a short correction does not pop. A new capture does not restart that ease. The coolest cell of a noisy field is usually a standard deviation under the mean, and it wobbles by about a cell every capture; treating that as a new destination never arrives. Another spot redirects the glide only when it is more than a cell away and it stays at least 15% cooler than the aim for about 200 ms. The same short beat applies when the aim itself is no longer a standard deviation under the field and some other spot is. One capture is not a new destination. The layer settles when the ease has finished and the aimed spot has stayed a standard deviation under the latest field for about 400 ms. A flat desktop has essentially no spread, so the deviation is treated as zero and the layer settles instead of wandering. The legs do not move. Settling does not wipe the memory.
+Once a glide has started, that span is not a second wait. The layer eases with a quadInOut lerp, 280 px/s, at least 350 ms, so a long cross of the screen stays smooth and a short correction does not pop. A new capture does not restart that ease. The coolest cell of a noisy field wobbles by about a cell every capture; treating that as a new destination never arrives. Another spot redirects the glide only when it is more than a cell away and it stays at least 45% cooler than the aim for about 200 ms. The same short beat applies when the aim itself is warmer than a tolerable seat and some other spot is not. A tolerable seat is a quarter of a standard deviation under the field, not a full one. One full deviation rejected good seats and the layer chased the outlier. One capture is not a new destination. The layer settles when the ease has finished and the aimed spot has stayed that cool for about 400 ms. A flat desktop has essentially no spread, so the deviation is treated as zero and the layer settles instead of wandering. The legs do not move. Settling does not wipe the memory.
 
 ## First implementation
 
 1. `screen_heat.comp`, one dispatch per new desktop frame. It reads the desktop image already imported for coloring, writes the heat grid, and keeps the previous cell luma and chroma. Push constants are the five weights and the two disc rectangles.
 2. A host-visible copy of the cell heats, read after the fence that already waits for the frame. Not the picture.
-3. `actors/quietude.rs` holds the rectified field. `placement.rs` reads it to leave, then eases at 280 px/s. One-and-a-half-area mean, 15% deadband, about 400 ms to settle. Unit tests feed a fake grid. No GPU in those tests.
+3. `actors/quietude.rs` holds the rectified field. `placement.rs` reads it to leave, then eases at 280 px/s. One-and-a-half-area mean, 45% deadband, a quarter deviation is cool enough to rest, about 400 ms to settle. Unit tests feed a fake grid. No GPU in those tests.
 4. The overlay calls it while the layer is visible. Idle skips the integral. No change to appearance scheduling, speech, the jaw, or the splat binding.
 5. On the machine: a still desktop leaves the figure near the calm area. A video or a bright editor warms its cells and the figure leaves. The catchlights and the sparks are unchanged.
 
@@ -74,5 +74,5 @@ Mouse and icons stay out. The weight for motion is the slot a later cursor spike
 
 - The slide is a quadInOut lerp at 280 px/s, at least 350 ms. Not a jump.
 - The scored window is one and a half times the disc, not twice. Empty highlights are cold. Highlighted text is not ranked above other text. Window lines stay in the field for later actors, at 0.04, and a straight rule is not counted as type. One line of typing still is.
-- The deadband is 15%.
+- The deadband is 45%. A quarter of a standard deviation under the field is cool enough to rest. One full deviation is not the rule.
 - The mouse is a later CPU poll of the compositor cursor, together with icons. Not a second capture.

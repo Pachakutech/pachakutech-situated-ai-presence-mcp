@@ -7,13 +7,13 @@
 //! half times the disc's area, centered on the disc, excluding cells the
 //! disc itself covers.
 //!
-//! At rest another spot has to be 15% under the rectified field. A spike
+//! At rest another spot has to be 45% under the rectified field. A spike
 //! that does not survive the span does not move the layer, and cooling
 //! argues for staying. Once a glide has started, that span is not a second
-//! wait: the layer eases until the aimed spot has stayed a standard
-//! deviation below the latest field for about 400 ms. A new capture
+//! wait: the layer eases until the aimed spot has stayed a quarter of a
+//! standard deviation below the latest field for about 400 ms. A new capture
 //! redirects it only when another spot, more than a cell away, stays at
-//! least 15% cooler for about 200 ms.
+//! least 45% cooler for about 200 ms.
 
 use crate::actors::quietude::QuietudeMemory;
 
@@ -27,7 +27,13 @@ const STABLE_SECS: f32 = 0.4;
 /// How long a better spot has to remain better before a glide changes course.
 /// One capture is noise. This is not the 800 ms departure window.
 const RETARGET_SECS: f32 = 0.2;
-const DEADBAND: f32 = 0.15;
+/// A tolerable seat stays. Leaving, or changing course, takes a place that
+/// is this much cooler. The gap is what leaves text room to still matter.
+const DEADBAND: f32 = 0.45;
+/// Cool enough to rest, in standard deviations under the field. One was
+/// strict enough that a good seat never qualified and the layer chased
+/// whichever cell was the outlier that capture.
+const COOL_SIGMAS: f32 = 0.25;
 const SLIDE_PX_PER_SEC: f32 = 280.0;
 const SLIDE_MIN_SECS: f32 = 0.35;
 
@@ -167,11 +173,11 @@ impl Placement {
             return;
         };
         let (mean, std) = field_stats(grid, out_w, out_h);
-        let cool = best.score <= mean - std;
+        let cool = cool_enough(best.score, mean, std);
 
         let aimed = neighborhood_mean(grid, self.to[0].round() as i32, self.to[1].round() as i32)
             .unwrap_or(f32::MAX);
-        let aimed_cool = aimed <= mean - std;
+        let aimed_cool = cool_enough(aimed, mean, std);
         if aimed_cool {
             self.aim_cool_secs += sample_dt;
         } else {
@@ -184,7 +190,7 @@ impl Placement {
             return;
         }
         let clearly = best.score + 1e-3 < aimed * (1.0 - DEADBAND);
-        // The aim warmed up (or was never an outlier) and somewhere else is.
+        // The aim is warmer than a tolerable seat and somewhere else is not.
         // Still has to hold for the short beat, or a one-frame spike redirects.
         let aim_missed = !aimed_cool && cool;
         if !clearly && !aim_missed {
@@ -381,6 +387,10 @@ fn origins(w: u32, h: u32, step: u32) -> Vec<(i32, i32)> {
         }
     }
     out
+}
+
+fn cool_enough(score: f32, mean: f32, std: f32) -> bool {
+    score <= mean - COOL_SIGMAS * std
 }
 
 fn field_stats(grid: &HeatGrid, out_w: u32, out_h: u32) -> (f32, f32) {
@@ -599,10 +609,11 @@ mod tests {
         let hot = desktop(1.0);
         // The block has to cover the whole judged window, or the mean
         // picks up the hot cells beside a disc this size.
+        let line = 1.0 - DEADBAND;
         let mut barely = desktop(1.0);
-        paint(&mut barely, 0, 0, 14, 14, 0.85);
+        paint(&mut barely, 0, 0, 14, 14, line);
         let mut clear = desktop(1.0);
-        paint(&mut clear, 0, 0, 14, 14, 0.84);
+        paint(&mut clear, 0, 0, 14, 14, line - 0.02);
 
         let mut stay = Placement::at(850, 430);
         feed(&mut stay, &barely, 8, 0.1, false);
@@ -622,9 +633,9 @@ mod tests {
     fn cooling_keeps_the_layer_put() {
         let mut place = Placement::at(850, 430);
         // The corner stays at 0.9. While the neighborhood is hot that is not
-        // 15% cooler, so we hold. After the neighborhood cools to 0.5 the
-        // corner is warmer than where we are, and the cooled window is what
-        // the decision sees.
+        // past the deadband, so we hold. After the neighborhood cools to 0.5
+        // the corner is warmer than where we are, and the cooled window is
+        // what the decision sees.
         let mut warm = desktop(1.0);
         paint(&mut warm, 0, 0, 8, 8, 0.9);
         feed(&mut place, &warm, 8, 0.1, false);
@@ -697,7 +708,7 @@ mod tests {
         feed(&mut place, &home, 12, 0.1, false);
         assert!(!place.is_settled(), "the cold corner should have started a glide");
 
-        // 0.36 is not 15% under 0.40 (the line is 0.34). One capture of it,
+        // 0.36 is not past the deadband under 0.40. One capture of it,
         // then the original spot again. A spike must not change course.
         let mut rival = desktop(1.0);
         paint(&mut rival, 0, 0, 10, 10, 0.40);
