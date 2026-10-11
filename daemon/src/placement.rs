@@ -29,7 +29,7 @@ const STABLE_SECS: f32 = 0.4;
 const RETARGET_SECS: f32 = 0.2;
 /// A tolerable seat stays. Leaving, or changing course, takes a place that
 /// is this much cooler. The gap is what leaves text room to still matter.
-const DEADBAND: f32 = 0.45;
+const DEADBAND: f32 = 0.75;
 /// Cool enough to rest, in standard deviations under the field. One was
 /// strict enough that a good seat never qualified and the layer chased
 /// whichever cell was the outlier that capture.
