@@ -1,0 +1,160 @@
+#version 450
+// One cell of the quietude grid. The desktop image stays on the GPU.
+// A cell whose center lies in either disc rect is the layer itself: its heat
+// is written as 0 and its remembered color is left alone, so the glass does
+// not become motion when the layer moves off it.
+//
+// text: fine horizontal luma changes, more than the vertical ones. Not OCR.
+// selection: that text on a saturated, coarsely flat patch.
+// edges: a coarse Sobel, so window frames count and glyph strokes do not.
+// color: spread of chroma inside the cell.
+// motion: change of the cell's luma and chroma since the previous capture.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform sampler2D desktop_img;
+
+struct Cell {
+    float heat;
+    float luma;
+    float cb;
+    float cr;
+};
+
+layout(std430, set = 0, binding = 1) buffer HeatCells {
+    Cell cells[];
+};
+
+layout(push_constant) uniform PC {
+    layout(offset = 0) vec2 screen_size;
+    layout(offset = 8) float cell_size;
+    layout(offset = 12) float y_invert;
+    layout(offset = 16) uint cols;
+    layout(offset = 20) uint rows;
+    layout(offset = 24) uint have_prev;
+    layout(offset = 32) vec4 w0; // text, selection, edges, color
+    layout(offset = 48) vec4 w1; // motion in x
+    layout(offset = 64) vec4 mask_a; // x, y, w, h
+    layout(offset = 80) vec4 mask_b;
+} pc;
+
+vec3 desktop_rgb(vec2 px) {
+    vec2 uv = clamp(px / max(pc.screen_size, vec2(1.0)), vec2(0.0), vec2(1.0));
+    if (pc.y_invert > 0.5) {
+        uv.y = 1.0 - uv.y;
+    }
+    return texture(desktop_img, uv).rgb;
+}
+
+float luma_of(vec3 rgb) {
+    return dot(rgb, vec3(0.2126, 0.7152, 0.0722));
+}
+
+bool in_rect(vec2 p, vec4 r) {
+    return r.z > 1.0 && p.x >= r.x && p.y >= r.y && p.x < r.x + r.z && p.y < r.y + r.w;
+}
+
+void main() {
+    uint col = gl_GlobalInvocationID.x;
+    uint row = gl_GlobalInvocationID.y;
+    if (col >= pc.cols || row >= pc.rows) {
+        return;
+    }
+    uint id = row * pc.cols + col;
+    vec2 origin = vec2(float(col), float(row)) * pc.cell_size;
+    vec2 center = origin + vec2(pc.cell_size * 0.5);
+    if (in_rect(center, pc.mask_a) || in_rect(center, pc.mask_b)) {
+        cells[id].heat = 0.0;
+        return;
+    }
+
+    float step = max(pc.cell_size / 8.0, 1.0);
+    float horiz = 0.0;
+    float vert = 0.0;
+    float sum_l = 0.0;
+    float sum_cb = 0.0;
+    float sum_cr = 0.0;
+    float sum_sat = 0.0;
+    float sum_sat2 = 0.0;
+    float prev_row[8];
+    float row_l[8];
+    for (int i = 0; i < 8; i++) {
+        prev_row[i] = 0.0;
+    }
+    bool have_row = false;
+    for (int y = 0; y < 8; y++) {
+        float prev_l = 0.0;
+        for (int x = 0; x < 8; x++) {
+            vec2 px = origin + (vec2(float(x), float(y)) + 0.5) * step;
+            vec3 rgb = desktop_rgb(px);
+            float l = luma_of(rgb);
+            float cb = rgb.b - l;
+            float cr = rgb.r - l;
+            float sat = length(rgb - vec3(l));
+            row_l[x] = l;
+            sum_l += l;
+            sum_cb += cb;
+            sum_cr += cr;
+            sum_sat += sat;
+            sum_sat2 += sat * sat;
+            if (x > 0) {
+                horiz += abs(l - prev_l);
+            }
+            if (have_row) {
+                vert += abs(l - prev_row[x]);
+            }
+            prev_l = l;
+        }
+        for (int x = 0; x < 8; x++) {
+            prev_row[x] = row_l[x];
+        }
+        have_row = true;
+    }
+
+    float h = horiz / 56.0;
+    float v = vert / 56.0;
+    float text = clamp((h - 0.45 * v) * 6.0, 0.0, 1.0);
+
+    float d = pc.cell_size * 0.28;
+    float s00 = luma_of(desktop_rgb(center + vec2(-d, -d)));
+    float s10 = luma_of(desktop_rgb(center + vec2(0.0, -d)));
+    float s20 = luma_of(desktop_rgb(center + vec2(d, -d)));
+    float s01 = luma_of(desktop_rgb(center + vec2(-d, 0.0)));
+    float s21 = luma_of(desktop_rgb(center + vec2(d, 0.0)));
+    float s02 = luma_of(desktop_rgb(center + vec2(-d, d)));
+    float s12 = luma_of(desktop_rgb(center + vec2(0.0, d)));
+    float s22 = luma_of(desktop_rgb(center + vec2(d, d)));
+    float gx = -s00 - 2.0 * s01 - s02 + s20 + 2.0 * s21 + s22;
+    float gy = -s00 - 2.0 * s10 - s20 + s02 + 2.0 * s12 + s22;
+    float edge = clamp(length(vec2(gx, gy)) * 0.85, 0.0, 1.0);
+
+    float sat_mean = sum_sat / 64.0;
+    float sat_var = max(sum_sat2 / 64.0 - sat_mean * sat_mean, 0.0);
+    float color = clamp(sqrt(sat_var) * 5.0, 0.0, 1.0);
+    float colorful = clamp(sat_mean * 3.5, 0.0, 1.0);
+
+    float sat_out = 0.0;
+    vec2 nudge = vec2(pc.cell_size * 0.75, 0.0);
+    sat_out += length(desktop_rgb(center + nudge) - vec3(luma_of(desktop_rgb(center + nudge))));
+    sat_out += length(desktop_rgb(center - nudge) - vec3(luma_of(desktop_rgb(center - nudge))));
+    sat_out += length(desktop_rgb(center + nudge.yx) - vec3(luma_of(desktop_rgb(center + nudge.yx))));
+    sat_out += length(desktop_rgb(center - nudge.yx) - vec3(luma_of(desktop_rgb(center - nudge.yx))));
+    float boost = clamp((sat_mean - sat_out * 0.25) * 4.0, 0.0, 1.0);
+    float coarse_flat = 1.0 - edge;
+    float selection = clamp(text * max(boost, colorful * 0.65) * (0.35 + 0.65 * coarse_flat), 0.0, 1.0);
+
+    float mean_l = sum_l / 64.0;
+    float mean_cb = sum_cb / 64.0;
+    float mean_cr = sum_cr / 64.0;
+    float motion = 0.0;
+    if (pc.have_prev != 0u) {
+        Cell prev = cells[id];
+        motion = clamp((abs(mean_l - prev.luma) + abs(mean_cb - prev.cb) + abs(mean_cr - prev.cr)) * 1.5, 0.0, 1.0);
+    }
+
+    float heat = pc.w0.x * text + pc.w0.y * selection + pc.w0.z * edge + pc.w0.w * color + pc.w1.x * motion;
+    cells[id].heat = max(heat, 0.0);
+    cells[id].luma = mean_l;
+    cells[id].cb = mean_cb;
+    cells[id].cr = mean_cr;
+}

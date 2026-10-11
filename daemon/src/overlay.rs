@@ -54,8 +54,9 @@ const OVERLAY_FRAG_SPV: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/overlay_quad.frag.spv"));
 
 /// Looking-glass diameter in pixels. Small enough not to dominate 1080p,
-/// large enough to read the refraction.
+/// large enough to read the refraction. `placement::DISC_PX` is the same edge.
 const BUBBLE_PX: u32 = 220;
+const _: () = assert!(crate::placement::DISC_PX as u32 == BUBBLE_PX);
 /// Capture/present ceiling. The OOM was a 16ms fullscreen copy+present spin.
 const CAPTURE_INTERVAL: Duration = Duration::from_millis(100);
 /// Avatar deform → project. Independent of the 10 fps capture.
@@ -254,17 +255,29 @@ impl Overlay {
         }
     }
 
-    /// Move the disc. Values are output-pixel top-left; clamped so the
-    /// bubble stays on-screen. This is what a quiescence/highlight actor
-    /// will call — the layer is not glued to the center.
+    pub fn bubble_pos(&self) -> (i32, i32) {
+        (self.bubble_x, self.bubble_y)
+    }
+
+    pub fn output_size(&self) -> (u32, u32) {
+        (self.state.output_width, self.state.output_height)
+    }
+
+    /// Seat idle. The heatmap stops while this is set. It does not park the layer.
+    pub fn is_idle(&self) -> bool {
+        self.state.idle
+    }
+
+    /// Move the disc. Values are output-pixel top-left, clamped on-screen.
+    /// Idle does not block this: a glide already started is allowed to finish,
+    /// and the heatmap simply stops choosing a new target. Do not call it
+    /// while the layer is parked for the lock, the screensaver, or sleep.
     pub fn set_bubble_pos(&mut self, x: i32, y: i32) {
         let max_x = self.state.output_width.saturating_sub(BUBBLE_PX) as i32;
         let max_y = self.state.output_height.saturating_sub(BUBBLE_PX) as i32;
         self.bubble_x = x.clamp(0, max_x.max(0));
         self.bubble_y = y.clamp(0, max_y.max(0));
-        if !self.state.idle {
-            self.unpark_at_bubble();
-        }
+        self.unpark_at_bubble();
     }
 
     pub fn closed(&self) -> bool {
@@ -621,6 +634,8 @@ pub struct OverlayGpu {
     projected: Option<(vk::Buffer, vk::DeviceSize)>,
     /// Static screen-rectangle atlas sampled by the avatar discs.
     patches: crate::screen_patch::ScreenPatches,
+    /// Coarse quietude grid. The CPU reads cell heats, never the picture.
+    heat: crate::screen_heat::ScreenHeat,
     /// Seconds the glass streak and twinkles have been running.
     glass_time: f32,
     webcam: WebcamSlot,
@@ -773,6 +788,7 @@ impl OverlayGpu {
             splat_count: 0,
             projected: None,
             patches: crate::screen_patch::ScreenPatches::new(vk)?,
+            heat: crate::screen_heat::ScreenHeat::new(vk)?,
             glass_time: 0.0,
             webcam: WebcamSlot::default(),
         })
@@ -1033,6 +1049,15 @@ impl OverlayGpu {
         }
     }
 
+    /// Disc top-left the next heat dispatch should treat as the layer.
+    pub fn set_heat_disc(&mut self, x: i32, y: i32) {
+        self.heat.set_disc(x, y);
+    }
+
+    pub fn take_heat_grid(&mut self) -> Option<crate::placement::HeatGrid> {
+        self.heat.take()
+    }
+
     pub fn enqueue_patch(&mut self, job: crate::avatar::appearance::PatchJob) {
         self.patches.enqueue(job);
     }
@@ -1130,6 +1155,9 @@ impl OverlayGpu {
     pub fn draw(&mut self, vk: &VulkanContext) -> Result<(), String> {
         unsafe { vk.device.wait_for_fences(&[self.in_flight], true, u64::MAX) }
             .map_err(|e| format!("overlay fence wait: {e:?}"))?;
+        // The previous heat dispatch, if any, has finished. Copy the cells
+        // out before this command buffer samples the desktop again.
+        self.heat.collect();
 
         // The previous draw has completed. For the dmabuf path, retire
         // the old imported image now (it's safe to destroy).
@@ -1160,6 +1188,7 @@ impl OverlayGpu {
         unsafe { vk.device.begin_command_buffer(self.command_buffer, &begin) }
             .map_err(|e| format!("overlay begin cmd: {e:?}"))?;
 
+        let new_frame = self.pending_update;
         if self.pending_update {
             match &mut self.screen {
                 ScreenFeedKind::Shm(feed) => feed.record_upload(&vk.device, self.command_buffer),
@@ -1168,6 +1197,14 @@ impl OverlayGpu {
                 }
             }
             self.pending_update = false;
+        }
+        if new_frame {
+            let captured = self.capture_view();
+            if let Some(view) = captured {
+                if let Err(err) = self.heat.record(&vk.device, self.command_buffer, &view) {
+                    self.heat.note_failure(&err);
+                }
+            }
         }
 
         // Projection compute already finished (its fence was waited). Host
@@ -1322,6 +1359,7 @@ impl OverlayGpu {
                 sprites.destroy(&vk.device);
             }
             self.patches.destroy(&vk.device);
+            self.heat.destroy(&vk.device);
             for image in &mut self.webcam.images {
                 vk.destroy_dmabuf_import(image);
             }
@@ -2235,6 +2273,9 @@ pub fn run(
     spawn_sleep_watch(sleeping.clone());
 
     let mut last_capture = Instant::now() - CAPTURE_INTERVAL;
+    let (bx0, by0) = overlay.bubble_pos();
+    let mut placement = crate::placement::Placement::at(bx0, by0);
+    let mut place_clock = Instant::now();
     let mut last_avatar;
     let mut avatar_frame: u32 = 1;
     let mut projection_checked = false;
@@ -2434,6 +2475,9 @@ pub fn run(
             if parked {
                 overlay.unpark_at_bubble();
                 parked = false;
+                let (bx, by) = overlay.bubble_pos();
+                placement.reset(bx, by);
+                place_clock = Instant::now();
                 // Force a tick and a present this iteration, without waiting
                 // on a fresh capture. The disc should show the avatar now.
                 last_avatar = Instant::now() - AVATAR_TICK;
@@ -2489,10 +2533,20 @@ pub fn run(
                 last_avatar = Instant::now();
             }
             if got || avatar_due || last_capture.elapsed() >= CAPTURE_INTERVAL {
+                let (bx, by) = overlay.bubble_pos();
+                gpu.set_heat_disc(bx, by);
                 gpu.draw(vk)?;
                 if got || last_capture.elapsed() >= CAPTURE_INTERVAL {
                     last_capture = Instant::now();
                 }
+            }
+            let dt = place_clock.elapsed().as_secs_f32();
+            place_clock = Instant::now();
+            let (ow, oh) = overlay.output_size();
+            let grid = gpu.take_heat_grid();
+            let (x, y) = placement.tick(grid.as_ref(), dt, overlay.is_idle(), ow, oh);
+            if (x, y) != overlay.bubble_pos() {
+                overlay.set_bubble_pos(x, y);
             }
         }
 

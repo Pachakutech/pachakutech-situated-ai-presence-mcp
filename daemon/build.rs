@@ -42,6 +42,7 @@ fn main() {
         "splat_eviction.comp",
         "gltf_to_splat.comp",
         "screen_patch.comp",
+        "screen_heat.comp",
         "overlay_quad.vert",
         "overlay_quad.frag",
         "splat_disc.vert",

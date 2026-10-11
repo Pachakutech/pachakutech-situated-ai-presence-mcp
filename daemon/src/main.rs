@@ -1,6 +1,8 @@
 mod actors;
 mod avatar;
 mod overlay;
+mod placement;
+mod screen_heat;
 mod screen_patch;
 mod pipeline;
 mod protocol;
