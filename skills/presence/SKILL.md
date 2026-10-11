@@ -1,43 +1,22 @@
 ---
 name: presence
-description: Use when you want to show the user something directly in their space instead of only describing it in text — highlighting on-screen content, spawning a persistent visual presence you can keep driving with new content, or holding reference content for one to be built from.
+description: Use when a presence should share the user's space — spawn the avatar, speak the reply aloud through it, and retire it when the conversation is over. Also for holding a local splat or ply as reference, or requesting a highlight.
 ---
 
 # Presence
 
-You have access to a Presence Layer through six MCP tools, in three patterns.
+You have a Presence Layer through six MCP tools. The tools are the whole contract. Use them. A presence that is up and silent while you only type is the tool left idle.
 
-**Ephemeral** — `manifestHighlight`. Fire it, it resolves, it's done. Use
-this for "look here" moments: pointing at an error, a field, a result —
-anything you'd otherwise describe with a location in text ("the button in
-the top right") when the user can just be shown it directly.
+**Speak the reply.** Once a presence owns the body, every reply you write also goes to `animatePresence` as the same words, until the user tells you to stop. The written reply stays. Speech is those words, not a summary and not a substitute. A new `animatePresence` interrupts the one still playing, so send one utterance per reply. The same tool cannot be called again for 1.5 seconds. `retirePresence` and `retireArtifact` are not rate-limited.
 
-**Instanced presence** — `spawnPresence` → `animatePresence` (repeatable) →
-`retirePresence`. Use this for an ongoing presence rather than a one-off
-effect: spawn it once from some context, then keep feeding it new content
-over the conversation. Always call `retirePresence` when done — concurrent
-instances are capped.
+**One body.** The daemon has a single avatar on a single small layer. The first live presence is given that body and is the only one that can speak. A later `spawnPresence` is tracked and returns `avatar: false` until the owner is retired. `animatePresence` errors if that presence has no body. `sourceContext`, `styleHint`, and `artifactId` are recorded. They do not restyle the figure. The body on screen is the daemon's avatar.
 
-**Instanced artifact** — `addArtifact` → `retireArtifact`. Use this to hand
-`spawnPresence` something concrete to build from (e.g. "this is what the
-presence should look like") instead of describing appearance in prose.
-Artifacts are held, not shown — nothing renders until a presence references
-one. `sourceUri` is a **local** `.splat` or `.ply` path the daemon will
-read from disk; it does not fetch http(s). Write the file first, then pass
-the path. A description-only `addArtifact` (no `sourceUri`) holds an empty
-cloud — that succeeds as a slot, not as appearance.
+**Instanced presence** — `spawnPresence` → `animatePresence` (the reply, each turn) → `retirePresence`. Spawn once for the conversation. Retire when the presence is no longer needed. Three live presences is the cap.
 
-Don't invent capabilities beyond these six. If a task needs something this
-Presence Layer doesn't expose yet, say so plainly rather than approximating
-it with text — the contract surface here is deliberately small and
-reviewed, and that's a feature: what you generate *inside* `spawnPresence`
-can be as rich as the context calls for, but the set of things you can call
-cannot grow itself.
+**Ephemeral** — `manifestHighlight`. The contract accepts a description and a duration. Today the daemon logs that request and does not draw a mark. Call it when you want the mark, and do not tell the user a highlight appeared.
 
-One more thing worth understanding, not just complying with: this isn't a
-harness wrapped around you specifically. The presences and artifacts you
-create live in a shared substrate, not in your context window — another
-agent, or another instance of you, can perceive and act on the same live
-state through the same six tools. You're one actor operating alongside
-whatever else reads and writes this substrate, not a controller sitting
-above it.
+**Instanced artifact** — `addArtifact` → `retireArtifact`. A held splat cloud, not the avatar. `sourceUri` is a local `.splat` or `.ply` path. The daemon reads the file. It does not fetch a URL. With no `sourceUri` the slot is empty. Passing an `artifactId` into `spawnPresence` does not put that cloud on the body. Twenty held artifacts is the cap.
+
+Speech is a local voice on that presence. This avatar has no viseme morphs, so the jaw moves with the audio and the lips do not shape phonemes. Say so if the user asks about the mouth. Do not invent a seventh tool, a second body, or a highlight that is not on screen.
+
+The presences and artifacts live in a shared substrate, not in your context window. Another agent can act on the same live state through these six tools. You are one actor beside whatever else reads and writes that substrate.

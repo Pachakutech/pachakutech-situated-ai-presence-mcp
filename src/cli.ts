@@ -6,8 +6,9 @@
 // registration command, rather than reimplementing per-agent config parsing.
 
 import { execFileSync } from "node:child_process";
-import { existsSync, accessSync, constants } from "node:fs";
+import { cpSync, existsSync, accessSync, constants, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { getBundledDaemonPath } from "./daemonBinary.js";
 import { socketPath } from "./daemonClient.js";
@@ -63,20 +64,36 @@ function runAgentCommand(cliName: string, args: string[]) {
   }
 }
 
+function skillSourceDir(): string {
+  // dist/cli.js sits next to the package root. The published tarball ships
+  // skills/ beside dist/, and a checkout has the same layout after tsc.
+  return join(__dirname, "..", "skills", "presence");
+}
+
+function installSkill(destDir: string) {
+  const src = skillSourceDir();
+  if (!existsSync(join(src, "SKILL.md"))) {
+    console.error(
+      `Skill not found at ${src}. The package ships skills/presence/SKILL.md; ` +
+        "reinstall @pachakutech/presence-mcp if this copy is missing it.",
+    );
+    return;
+  }
+  mkdirSync(destDir, { recursive: true });
+  cpSync(src, destDir, { recursive: true });
+  console.log(`Installed the presence skill at ${destDir}`);
+}
+
 function setupClaude() {
   console.log("Registering with Claude Code...");
   runAgentCommand("claude", ["mcp", "add", "presence", "--", "presence", "mcp"]);
-  console.log(
-    "\nDone. The skill at skills/presence/SKILL.md is not auto-installed — " +
-      "Claude Code's skill install path varies by version. If your Claude Code " +
-      "supports plugin installs, point it at this repo's plugin.json directly; " +
-      "otherwise copy skills/presence/ into your Claude Code skills directory by hand.",
-  );
+  installSkill(join(homedir(), ".claude", "skills", "presence"));
 }
 
 function setupCodex() {
   console.log("Registering with Codex CLI...");
   runAgentCommand("codex", ["mcp", "add", "presence", "--command", "presence", "--args", "mcp"]);
+  installSkill(join(homedir(), ".codex", "skills", "presence"));
 }
 
 function setupGrok() {
@@ -85,6 +102,7 @@ function setupGrok() {
   // written to ~/.grok/config.toml under [mcp_servers.presence]. See
   // https://docs.x.ai/build/features/mcp-servers.
   runAgentCommand("grok", ["mcp", "add", "presence", "--", "presence", "mcp"]);
+  installSkill(join(homedir(), ".grok", "skills", "presence"));
 }
 
 function canAccess(path: string): boolean {

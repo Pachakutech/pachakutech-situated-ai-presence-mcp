@@ -22,7 +22,7 @@ Once this is published to npm:
 
 ```
 omarchy-mise-install npm:@pachakutech/presence-mcp presence
-presence setup claude   # wires the skill + registers the MCP server
+presence setup claude   # registers the MCP server and installs skills/presence
 ```
 
 **Not verified yet, and not npm-published yet either** — the line above is
@@ -39,11 +39,10 @@ clone-and-build steps in the main [`README.md`](../README.md#setup).
 claude mcp add presence -- presence mcp
 ```
 
-and points you at `skills/presence/SKILL.md` to install into Claude Code's
-skill path by hand if your version doesn't support plugin installs directly.
-Codex and the other pre-wired CLIs work the same way through their own MCP
-config (see each CLI's docs — the server itself is unchanged across all of
-them, per the Model Context Protocol).
+and copies `skills/presence/` into `~/.claude/skills/presence`. Codex and
+Grok get the same skill under `~/.codex/skills/presence` and
+`~/.grok/skills/presence`. The server itself is unchanged across all of
+them, per the Model Context Protocol.
 
 ## What you'll see today
 

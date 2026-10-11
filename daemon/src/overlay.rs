@@ -60,7 +60,9 @@ const BUBBLE_PX: u32 = 220;
 const CAPTURE_INTERVAL: Duration = Duration::from_millis(100);
 /// Avatar deform → project. Independent of the 10 fps capture.
 const AVATAR_TICK: Duration = Duration::from_millis(33);
-/// Hide before Omarchy's 150s screensaver so we are not painted over it.
+/// Observed, not acted on. Mere idle does not park the layer. The screensaver,
+/// the lock, and sleep do — Omarchy's screensaver is a normal window, and this
+/// layer is above windows, so it has to leave when that window is actually up.
 const IDLE_HIDE_MS: u32 = 120_000;
 
 pub struct Overlay {
@@ -96,12 +98,6 @@ pub struct OverlayState {
     seat: Option<wl_seat::WlSeat>,
     idle_notifier: Option<ext_idle_notifier_v1::ExtIdleNotifierV1>,
     idle: bool,
-    /// Set by `ext_idle_notification_v1::Resumed` when the user becomes
-    /// active. The main loop consumes this to clear `screensaver` and
-    /// `locked` atomics — a second path back to ACTIVE in case the
-    /// Hyprland `closewindow` event doesn't fire (it doesn't carry the
-    /// window class, so we can't match it by class string).
-    session_resumed: bool,
     width: u32,
     height: u32,
     configured: bool,
@@ -137,7 +133,6 @@ impl Overlay {
             seat: None,
             idle_notifier: None,
             idle: false,
-            session_resumed: false,
             width: 0,
             height: 0,
             configured: false,
@@ -300,8 +295,11 @@ impl Overlay {
         }
     }
 
-    fn should_hide(&self, locked: bool, sleeping: bool) -> bool {
-        self.state.idle || locked || sleeping
+    /// `covered` is the lock screen or the screensaver window. Idle is not a
+    /// reason to leave: the figure stays until one of those is actually up,
+    /// or the machine is preparing for sleep.
+    fn should_hide(&self, covered: bool, sleeping: bool) -> bool {
+        covered || sleeping
     }
 
     /// Full-output copy into the reused memfd (SHM fallback path). Caller
@@ -538,10 +536,10 @@ impl Dispatch<ext_idle_notification_v1::ExtIdleNotificationV1, ()> for OverlaySt
     ) {
         match event {
             ext_idle_notification_v1::Event::Idled => state.idle = true,
-            ext_idle_notification_v1::Event::Resumed => {
-                state.idle = false;
-                state.session_resumed = true;
-            }
+            // Launching the screensaver makes the compositor report seat
+            // activity. This event must not clear the screensaver or lock
+            // flags — that put the layer back on top of the screensaver.
+            ext_idle_notification_v1::Event::Resumed => state.idle = false,
             _ => {}
         }
     }
@@ -2014,26 +2012,38 @@ fn spawn_sleep_watch(sleeping: Arc<AtomicBool>) {
     std::thread::Builder::new()
         .name("presence-sleep".into())
         .spawn(move || {
-            let child = std::process::Command::new("dbus-monitor")
+            // stdbuf -oL: dbus-monitor block-buffers when stdout is a pipe,
+            // so PrepareForSleep would otherwise sit unread until after
+            // the machine had already suspended.
+            let child = std::process::Command::new("stdbuf")
                 .args([
+                    "-oL",
+                    "dbus-monitor",
                     "--system",
                     "type='signal',interface='org.freedesktop.login1.Manager',member='PrepareForSleep'",
                 ])
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::null())
                 .spawn();
-            let Ok(mut child) = child else { return };
+            let Ok(mut child) = child else {
+                eprintln!("[overlay] sleep watch failed to start — lid close will not park the layer");
+                return;
+            };
             let Some(stdout) = child.stdout.take() else { return };
+            eprintln!("[overlay] sleep watch on PrepareForSleep");
             let reader = io::BufReader::new(stdout);
             for line in io::BufRead::lines(reader) {
                 let Ok(line) = line else { break };
                 let l = line.to_ascii_lowercase();
                 if l.contains("boolean true") {
                     sleeping.store(true, Ordering::Relaxed);
+                    eprintln!("[overlay] preparing for sleep — parking");
                 } else if l.contains("boolean false") {
                     sleeping.store(false, Ordering::Relaxed);
+                    eprintln!("[overlay] resume from sleep");
                 }
             }
+            eprintln!("[overlay] sleep watch ended");
         })
         .ok();
 }
@@ -2186,7 +2196,7 @@ fn tick_avatar(
 ///
 /// Spawns a capture thread that uses `wlr-screencopy` with dmabuf (preferred)
 /// or SHM (fallback). The capture thread is **gated by session activity**:
-/// when the session is idle, locked, under screensaver, or preparing for
+/// when the session is locked, under the screensaver, or preparing for
 /// sleep, the capture thread pauses (L1), releases its screencopy client
 /// (L2), and waits on a condvar. The GPU feed retains the last good frame
 /// (L3) so return-to-session can present immediately.
@@ -2367,16 +2377,6 @@ pub fn run(
             overlay.state.idle = false;
         }
 
-        // Fallback: ext_idle_notification_v1::Resumed fires when the user
-        // becomes active — clear screensaver and locked as a second path
-        // back to ACTIVE (in case closewindow didn't match).
-        if overlay.state.session_resumed {
-            overlay.state.session_resumed = false;
-            screensaver.store(false, Ordering::Relaxed);
-            locked.store(false, Ordering::Relaxed);
-            eprintln!("[overlay] idle Resumed event — clearing screensaver/locked");
-        }
-
         let hide = overlay.should_hide(
             locked.load(Ordering::Relaxed) || screensaver.load(Ordering::Relaxed),
             sleeping.load(Ordering::Relaxed),
@@ -2423,7 +2423,12 @@ pub fn run(
             if !parked {
                 overlay.park_offscreen();
                 parked = true;
-                println!("[overlay] hidden (idle/lock/sleep)");
+                println!(
+                    "[overlay] hidden (lock={}, screensaver={}, sleep={})",
+                    locked.load(Ordering::Relaxed),
+                    screensaver.load(Ordering::Relaxed),
+                    sleeping.load(Ordering::Relaxed),
+                );
             }
         } else {
             if parked {

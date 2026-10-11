@@ -42,12 +42,15 @@ presence setup claude
 ```
 
 `@pachakutech/presence-mcp` is one package. It includes the Node MCP binding,
-the `presence` CLI, and a prebuilt Linux x86_64 `presence-daemon`. You do not
-need Rust or Cargo, and install does not compile or start anything.
+the `presence` CLI, a prebuilt Linux x86_64 `presence-daemon`, and the agent
+skill at `skills/presence/SKILL.md`. You do not need Rust or Cargo, and
+install does not compile or start anything.
 
-`presence setup claude` runs `claude mcp add presence -- presence mcp`.
-`presence setup codex` and `presence setup grok` do the equivalent for Codex
-and Grok CLI. Your agent client then launches `presence mcp` over stdio. That
+`presence setup claude` runs `claude mcp add presence -- presence mcp` and
+installs the skill under `~/.claude/skills/presence`. `presence setup codex`
+and `presence setup grok` register the same MCP command and install the skill
+under `~/.codex/skills/presence` and `~/.grok/skills/presence`. Your agent
+client then launches `presence mcp` over stdio. That
 process talks to the daemon on a local Unix socket
 (`$XDG_RUNTIME_DIR/pachakutech/presence.sock`).
 
