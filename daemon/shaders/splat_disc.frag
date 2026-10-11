@@ -164,18 +164,21 @@ void main() {
     float glint = exp(-dot(q, q));
     rgb += vec3(1.0) * glint * 0.045;
 
-    // Glass sparks. Each one fades in and out and is bright for about half
-    // of its cycle, so about half as many show at once. The head uses the
-    // same fade with many more sparks, so the moving face catches them.
-    float hash = fract(sin(float(v_id) * 127.1) * 43758.5453);
+    // Glass sparks, separate from the steady catchlight above. The old
+    // sin-hash never reached the body gate, so those points were off.
+    uint hn = v_id * 747796405u + 2891336453u;
+    hn = (hn ^ (hn >> 16u)) * 2246822519u;
+    hn = (hn ^ (hn >> 13u)) * 3266489917u;
+    hn = hn ^ (hn >> 16u);
+    float hash = float(hn & 0x00FFFFFFu) / 16777216.0;
     bool face = (regions[min(v_region, 15u)].flags & 1u) != 0u;
-    float gate = face ? 0.97 : 0.9994;
+    float gate = face ? 0.985 : 0.994;
     float star = 0.0;
     if (hash > gate) {
-        float wave = sin(pc.time * (face ? 2.6 : 1.6) + hash * 6.2831853) * 0.5 + 0.5;
-        star = smoothstep(0.50, 0.92, wave) * smoothstep(0.22, 0.0, r);
+        float wave = sin(pc.time * (face ? 3.4 : 2.4) + hash * 6.2831853) * 0.5 + 0.5;
+        star = smoothstep(0.38, 0.96, wave) * smoothstep(0.62, 0.08, r);
     }
-    rgb += vec3(1.0, 0.97, 0.90) * star * (face ? 0.85 : 0.65);
+    rgb += vec3(1.0, 0.97, 0.90) * star * (face ? 1.45 : 1.15);
 
     float a = v_color.a * exp(-r * r * 2.2);
     outColor = vec4(rgb * a, a);
