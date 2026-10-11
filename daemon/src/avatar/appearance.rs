@@ -16,21 +16,18 @@ pub const ATLAS_W: u32 = TILE * MAX_REGIONS as u32;
 pub const ATLAS_H: u32 = TILE * 2;
 pub const MAX_PATCH_SPLATS: usize = 50_000;
 pub const FADE_SECS: f32 = 0.45;
-/// Gap before the next region. The back of the figure is off-camera, so a
-/// short gap keeps the visible side changing. Stays above `FADE_SECS`.
-pub const WAIT_MIN: f32 = 0.55;
-pub const WAIT_SPAN: f32 = 0.35;
-/// If the face has worn one tile this long, the next snapshot is the face
-/// again. Otherwise it waits in the same lottery as the body and the head
-/// sits on the debug palette.
-pub const FACE_STALE_SECS: f32 = 3.0;
+/// Gap before the next region. One region fades at a time, so the gap stays
+/// just above `FADE_SECS`. After its first snapshot, the head waits in the
+/// same lottery as the body.
+pub const WAIT_MIN: f32 = 0.48;
+pub const WAIT_SPAN: f32 = 0.10;
 pub const CHROME: [f32; 3] = [0.78, 0.81, 0.84];
 /// How far a face sample moves toward chrome grey. The captured desktop
 /// stays in front: 0.22 is a cool tint, not a grey wash.
 pub const CHROME_MIX: f32 = 0.22;
-/// Webcam rectangle magnification on the body region. Four shows the center
-/// quarter of the rectangle, still at its own aspect. The atlas copy stays 1:1.
-pub const WEBCAM_PLACE_SCALE: f32 = 4.0;
+/// Webcam rectangle scale on the body region. One covers the region with the
+/// stored rectangle, at its own aspect. The atlas copy stays a uniform fit.
+pub const WEBCAM_PLACE_SCALE: f32 = 1.0;
 /// Webcam grab, inclusive, in camera pixels. Triple the desktop 32..=128
 /// range. 384 still fits in the 640×480 frame, so the rectangle never
 /// becomes the whole picture. 512 would be taller than 480.
@@ -153,8 +150,6 @@ pub struct RegionState {
     /// Rest-pose bbox width / height. The disc shader uses this so a webcam
     /// rectangle keeps square pixels on a non-square region.
     pub bbox_aspect: f32,
-    /// Seconds since this region was last chosen.
-    pub idle: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -185,7 +180,6 @@ impl RegionState {
             shown_content: [0, 0],
             incoming_content: [0, 0],
             bbox_aspect: 1.0,
-            idle: 0.0,
         }
     }
 }
@@ -336,9 +330,6 @@ impl Appearance {
         if available.is_empty() {
             return None;
         }
-        for region in &mut self.regions {
-            region.idle += dt;
-        }
         if self.wait > 0.0 {
             self.wait = (self.wait - dt).max(0.0);
             if self.wait > 0.0 {
@@ -355,16 +346,12 @@ impl Appearance {
         if eligible.is_empty() {
             return None;
         }
-        // The head leaves the debug palette on the first capture, and is
-        // chosen again once it has been idle, instead of waiting out the
-        // full round of body regions.
+        // The head takes the opening sample so it does not sit on the debug
+        // palette while the body starts. After that it is one region among the rest.
         let pick = eligible
             .iter()
             .copied()
-            .find(|&i| {
-                let region = &self.regions[i];
-                region.is_face && (!region.shown_valid || region.idle >= FACE_STALE_SECS)
-            })
+            .find(|&i| self.regions[i].is_face && !self.regions[i].shown_valid)
             .unwrap_or_else(|| eligible[self.next_u32() as usize % eligible.len()]);
         let source = available[self.next_u32() as usize % available.len()];
         let rect = if source.id == SOURCE_WEBCAM {
@@ -382,7 +369,6 @@ impl Appearance {
         };
         region.incoming_valid = true;
         region.fade = 0.0;
-        region.idle = 0.0;
         let jitter = self.next_u32() as f32 / u32::MAX as f32;
         self.wait = WAIT_MIN + jitter * WAIT_SPAN;
         Some(PatchJob { region: pick as u32, page, rect, source: source.id })
@@ -461,7 +447,7 @@ pub fn webcam_content_texels(rect_w: u32, rect_h: u32) -> [u32; 2] {
 }
 
 /// 0..1 point inside a webcam tile's content for one region UV.
-/// One placement, uniform scale, centered, then magnified by
+/// One placement, uniform scale, centered, then scaled by
 /// `WEBCAM_PLACE_SCALE`. The camera's first row is the top of the frame and
 /// region `v` grows with mesh +Y, which is up on screen, so `v` is flipped
 /// here — one subtract, at the same moment the disc is shaded. The part of
@@ -480,10 +466,23 @@ pub fn webcam_cover_local(uv: [f32; 2], bbox_aspect: f32, content_w: u32, conten
     [lx, ly]
 }
 
+/// Origin and side of the centered square: the shorter side of the frame,
+/// applied to the longer side, sitting in the middle. A 1920×1080 screen
+/// is `(420, 0, 1080)`.
+pub fn center_square(width: u32, height: u32) -> (u32, u32, u32) {
+    let side = width.min(height).max(1);
+    let x = width.saturating_sub(side) / 2;
+    let y = height.saturating_sub(side) / 2;
+    (x, y, side)
+}
+
+/// Desktop samples stay inside [`center_square`]. The webcam still uses its whole frame.
 pub fn random_screen_rect(rng: &mut u32, width: u32, height: u32) -> Rect {
-    let w = span(rng, width);
-    let h = span(rng, height);
-    place_rect(rng, width, height, w, h)
+    let (x0, y0, side) = center_square(width, height);
+    let w = span(rng, side);
+    let h = span(rng, side);
+    let inner = place_rect(rng, side, side, w, h);
+    Rect { x: x0 + inner.x, y: y0 + inner.y, w: inner.w, h: inner.h }
 }
 
 fn random_webcam_rect(rng: &mut u32, width: u32, height: u32) -> Rect {
@@ -527,6 +526,15 @@ fn xorshift(state: &mut u32) -> u32 {
 
 fn bake_from_env() -> bool {
     matches!(std::env::var("PRESENCE_APPEARANCE_BAKE").as_deref(), Ok("1") | Ok("true") | Ok("yes"))
+}
+
+/// `PRESENCE_DESKTOP=0` leaves the desktop out of the source list. A webcam
+/// frame then supplies every sample. Unset keeps the desktop in the draw.
+pub fn desktop_ingress_enabled() -> bool {
+    !matches!(
+        std::env::var("PRESENCE_DESKTOP").as_deref(),
+        Ok("0") | Ok("false") | Ok("no") | Ok("off")
+    )
 }
 
 fn face_name(name: &str) -> bool {
@@ -652,10 +660,10 @@ mod tests {
 
     #[test]
     fn webcam_placement_is_one_patch_and_does_not_repeat() {
-        // A matching aspect, magnified 4x, shows the center quarter.
+        // A matching aspect at scale 1 covers the region with the whole rectangle.
         // v = 0 is the feet, so it reads a lower camera row than v = 1.
-        assert_eq!(webcam_cover_local([0.0, 0.0], 2.0, 64, 32), [0.375, 0.625]);
-        assert_eq!(webcam_cover_local([1.0, 1.0], 2.0, 64, 32), [0.625, 0.375]);
+        assert_eq!(webcam_cover_local([0.0, 0.0], 2.0, 64, 32), [0.0, 1.0]);
+        assert_eq!(webcam_cover_local([1.0, 1.0], 2.0, 64, 32), [1.0, 0.0]);
         assert_eq!(webcam_cover_local([0.5, 0.5], 1.0, 40, 40), [0.5, 0.5]);
         let feet = webcam_cover_local([0.5, 0.0], 1.0, 64, 64);
         let head = webcam_cover_local([0.5, 1.0], 1.0, 64, 64);
@@ -663,11 +671,10 @@ mod tests {
         // A square stamp on a region twice as wide is cropped, not stretched or tiled.
         let low = webcam_cover_local([0.0, 0.0], 2.0, 64, 64);
         let high = webcam_cover_local([1.0, 1.0], 2.0, 64, 64);
-        assert!((low[0] - 0.375).abs() < 1e-5 && (low[1] - 0.5625).abs() < 1e-5, "{low:?}");
-        assert!((high[0] - 0.625).abs() < 1e-5 && (high[1] - 0.4375).abs() < 1e-5, "{high:?}");
-        // A little past the region is still inside the magnified rectangle.
-        // Farther than that holds the edge. Neither case wraps.
-        assert_eq!(webcam_cover_local([-0.25, 1.25], 1.0, 64, 64), [0.3125, 0.3125]);
+        assert!((low[0] - 0.0).abs() < 1e-5 && (low[1] - 0.75).abs() < 1e-5, "{low:?}");
+        assert!((high[0] - 1.0).abs() < 1e-5 && (high[1] - 0.25).abs() < 1e-5, "{high:?}");
+        // Past the region holds the edge. It does not wrap.
+        assert_eq!(webcam_cover_local([-0.25, 1.25], 1.0, 64, 64), [0.0, 0.0]);
         assert_eq!(webcam_cover_local([-2.0, -2.0], 1.0, 64, 64), [0.0, 1.0]);
     }
 
@@ -701,6 +708,19 @@ mod tests {
     }
 
     #[test]
+    fn desktop_samples_come_from_the_center_square() {
+        assert_eq!(center_square(1920, 1080), (420, 0, 1080));
+        assert_eq!(center_square(1080, 1920), (0, 420, 1080));
+        let mut rng = 1u32;
+        for _ in 0..40 {
+            let rect = random_screen_rect(&mut rng, 1920, 1080);
+            assert!(rect.x >= 420 && rect.x + rect.w <= 1500, "{rect:?}");
+            assert!(rect.y + rect.h <= 1080, "{rect:?}");
+            assert!((32..=128).contains(&rect.w) && (32..=128).contains(&rect.h), "{rect:?}");
+        }
+    }
+
+    #[test]
     fn rects_stay_inside_and_repeat_for_a_seed() {
         let mut a = Appearance::new_regions(1, 0, 42);
         let mut b = Appearance::new_regions(1, 0, 42);
@@ -715,10 +735,12 @@ mod tests {
                 region.fade = 1.0;
             }
             let job = a.tick(0.0, &[IngressSource::desktop(100, 80)]).unwrap();
-            assert!(job.rect.x + job.rect.w <= 100, "{:?}", job.rect);
-            assert!(job.rect.y + job.rect.h <= 80, "{:?}", job.rect);
-            assert!((32..=100).contains(&job.rect.w), "{:?}", job.rect);
-            assert!((32..=80).contains(&job.rect.h), "{:?}", job.rect);
+            let (x0, y0, side) = center_square(100, 80);
+            assert!(job.rect.x >= x0 && job.rect.y >= y0, "{:?}", job.rect);
+            assert!(job.rect.x + job.rect.w <= x0 + side, "{:?}", job.rect);
+            assert!(job.rect.y + job.rect.h <= y0 + side, "{:?}", job.rect);
+            assert!((32..=side).contains(&job.rect.w), "{:?}", job.rect);
+            assert!((32..=side).contains(&job.rect.h), "{:?}", job.rect);
             assert_eq!(transitioning(&a), 1);
         }
     }
@@ -759,18 +781,24 @@ mod tests {
     }
 
     #[test]
-    fn face_leaves_the_debug_palette_first_and_comes_back() {
+    fn face_takes_the_first_sample_then_waits_with_the_body() {
         let mut a = Appearance::new_regions(8, 4, 3);
         let first = a.tick(0.0, &[IngressSource::desktop(1920, 1080)]).unwrap();
-        assert_eq!(first.region, 4, "the face is the first snapshot");
-        a.tick(0.5, &[IngressSource::desktop(1920, 1080)]);
-        assert!(a.regions[4].shown_valid);
+        assert_eq!(first.region, 4, "the head is the first snapshot");
 
-        a.wait = 0.0;
-        a.regions[4].idle = FACE_STALE_SECS;
-        a.regions[4].fade = 1.0;
-        let again = a.tick(0.0, &[IngressSource::desktop(1920, 1080)]).unwrap();
-        assert_eq!(again.region, 4, "a stale face is chosen ahead of the body");
+        let mut face = 0;
+        let mut body = 0;
+        for _ in 0..80 {
+            a.wait = 0.0;
+            for region in &mut a.regions {
+                region.fade = 1.0;
+                region.shown_valid = true;
+            }
+            let job = a.tick(0.0, &[IngressSource::desktop(1920, 1080)]).unwrap();
+            if job.region == 4 { face += 1; } else { body += 1; }
+        }
+        assert!(face > 0 && body > 0, "face {face} body {body}");
+        assert!(face * 3 < body * 2, "the face took too many turns: face {face} body {body}");
     }
 
     #[test]
@@ -798,8 +826,10 @@ mod tests {
             }
             let job = only_desk.tick(0.0, &[desktop]).unwrap();
             assert_eq!(job.source, SOURCE_DESKTOP);
-            assert!(job.rect.x + job.rect.w <= desktop.width, "{:?}", job.rect);
-            assert!(job.rect.y + job.rect.h <= desktop.height, "{:?}", job.rect);
+            let (x0, y0, side) = center_square(desktop.width, desktop.height);
+            assert!(job.rect.x >= x0 && job.rect.y >= y0, "{:?}", job.rect);
+            assert!(job.rect.x + job.rect.w <= x0 + side, "{:?}", job.rect);
+            assert!(job.rect.y + job.rect.h <= y0 + side, "{:?}", job.rect);
         }
 
         let mut only_cam = Appearance::new_regions(4, 1, 9);
@@ -828,6 +858,10 @@ mod tests {
             let (width, height) = match job.source {
                 SOURCE_DESKTOP => {
                     saw_desk += 1;
+                    let (x0, y0, side) = center_square(desktop.width, desktop.height);
+                    assert!(job.rect.x >= x0 && job.rect.y >= y0, "{:?}", job.rect);
+                    assert!(job.rect.x + job.rect.w <= x0 + side, "{:?}", job.rect);
+                    assert!(job.rect.y + job.rect.h <= y0 + side, "{:?}", job.rect);
                     (desktop.width, desktop.height)
                 }
                 SOURCE_WEBCAM => {
@@ -866,7 +900,7 @@ mod tests {
         let mut app = actor.appearance;
         app.show_bake = false;
         let job = app.tick(0.0, &[IngressSource::desktop(1920, 1080)]).unwrap();
-        assert_eq!(job.region, face as u32, "the face is the first snapshot");
+        assert_eq!(job.region, face as u32, "the head is the first snapshot");
         assert_eq!(job.source, SOURCE_DESKTOP);
         assert_eq!(transitioning(&app), 1);
         assert!(app.tick(0.016, &[IngressSource::desktop(1920, 1080)]).is_none());

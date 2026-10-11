@@ -43,11 +43,11 @@ const float ATLAS_W = 1024.0;
 const float ATLAS_H = 128.0;
 const vec3 CHROME = vec3(0.78, 0.81, 0.84);
 const float CHROME_MIX = 0.22;
-const float WEBCAM_PLACE_SCALE = 4.0;
+const float WEBCAM_PLACE_SCALE = 1.0;
 
 // Desktop content is (0, 0): the whole tile is stretched across the region.
 // Webcam content is the rectangle's texels at the tile origin. That rectangle
-// is placed once, at its own aspect, magnified by WEBCAM_PLACE_SCALE, and
+// is placed once, at its own aspect, scaled by WEBCAM_PLACE_SCALE, and
 // cropped to the region. Region v grows upward with the figure; the tile's
 // v grows down the camera frame, so v is flipped here. It does not repeat.
 // The formula matches `webcam_cover_local` in appearance.rs.

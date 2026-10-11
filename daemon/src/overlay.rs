@@ -900,11 +900,16 @@ impl OverlayGpu {
     }
 
     /// Desktop, then webcam, and only the ones that have a frame. One entry
-    /// means every sample comes from it.
+    /// means every sample comes from it. `PRESENCE_DESKTOP=0` omits the desktop.
     pub fn appearance_sources(&self) -> Vec<crate::avatar::appearance::IngressSource> {
         let mut sources = Vec::new();
-        if let Some((w, h)) = self.capture_extent() {
-            sources.push(crate::avatar::appearance::IngressSource::desktop(w, h));
+        if crate::avatar::appearance::desktop_ingress_enabled() {
+            if let Some((w, h)) = self.capture_extent() {
+                sources.push(crate::avatar::appearance::IngressSource::desktop(w, h));
+            }
+        } else {
+            static ONCE: std::sync::Once = std::sync::Once::new();
+            ONCE.call_once(|| eprintln!("[appearance] desktop ingress off — webcam only"));
         }
         if let Some((w, h)) = self.webcam_extent() {
             sources.push(crate::avatar::appearance::IngressSource::webcam(w, h));
