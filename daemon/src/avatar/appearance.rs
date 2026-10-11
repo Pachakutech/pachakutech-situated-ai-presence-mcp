@@ -28,9 +28,14 @@ pub const CHROME: [f32; 3] = [0.78, 0.81, 0.84];
 /// How far a face sample moves toward chrome grey. The captured desktop
 /// stays in front: 0.22 is a cool tint, not a grey wash.
 pub const CHROME_MIX: f32 = 0.22;
-/// Webcam rectangle magnification on the body region. Two shows the center
-/// half of the rectangle, still at its own aspect. The atlas copy stays 1:1.
-pub const WEBCAM_PLACE_SCALE: f32 = 2.0;
+/// Webcam rectangle magnification on the body region. Four shows the center
+/// quarter of the rectangle, still at its own aspect. The atlas copy stays 1:1.
+pub const WEBCAM_PLACE_SCALE: f32 = 4.0;
+/// Webcam grab, inclusive, in camera pixels. Triple the desktop 32..=128
+/// range. 384 still fits in the 640×480 frame, so the rectangle never
+/// becomes the whole picture. 512 would be taller than 480.
+pub const WEBCAM_SAMPLE_MIN: u32 = 96;
+pub const WEBCAM_SAMPLE_MAX: u32 = 384;
 
 pub const FLAG_FACE: u32 = 1;
 pub const FLAG_SHOWN: u32 = 2;
@@ -306,8 +311,8 @@ impl Appearance {
     }
 
     /// Advance fades. When at least one source has a frame and the timer
-    /// has elapsed, queue one rectangle for one region. The source is a
-    /// uniform draw over that list. No source: the timer does not move.
+    /// has elapsed, queue one rectangle for one region. The source is an
+    /// even draw over the live sources. No source: the timer does not move.
     pub fn tick(&mut self, dt: f32, sources: &[IngressSource]) -> Option<PatchJob> {
         let dt = dt.max(0.0);
         for region in &mut self.regions {
@@ -362,7 +367,11 @@ impl Appearance {
             })
             .unwrap_or_else(|| eligible[self.next_u32() as usize % eligible.len()]);
         let source = available[self.next_u32() as usize % available.len()];
-        let rect = random_screen_rect(&mut self.rng, source.width, source.height);
+        let rect = if source.id == SOURCE_WEBCAM {
+            random_webcam_rect(&mut self.rng, source.width, source.height)
+        } else {
+            random_screen_rect(&mut self.rng, source.width, source.height)
+        };
         let region = &mut self.regions[pick];
         let page = if region.shown_valid { 1 - (region.shown_page & 1) } else { 0 };
         region.incoming_page = page;
@@ -453,9 +462,11 @@ pub fn webcam_content_texels(rect_w: u32, rect_h: u32) -> [u32; 2] {
 
 /// 0..1 point inside a webcam tile's content for one region UV.
 /// One placement, uniform scale, centered, then magnified by
-/// `WEBCAM_PLACE_SCALE`. The part of the rectangle that does not fit the
-/// region is cropped. Lens UVs outside 0..1 clamp, so the picture does not
-/// repeat. Matches `sample_tile` in `splat_disc.frag`.
+/// `WEBCAM_PLACE_SCALE`. The camera's first row is the top of the frame and
+/// region `v` grows with mesh +Y, which is up on screen, so `v` is flipped
+/// here — one subtract, at the same moment the disc is shaded. The part of
+/// the rectangle that does not fit is cropped. Lens UVs outside 0..1 clamp,
+/// so the picture does not repeat. Matches `sample_tile` in `splat_disc.frag`.
 pub fn webcam_cover_local(uv: [f32; 2], bbox_aspect: f32, content_w: u32, content_h: u32) -> [f32; 2] {
     let region_aspect = bbox_aspect.max(1e-4);
     let rect_aspect = content_w.max(1) as f32 / content_h.max(1) as f32;
@@ -463,21 +474,41 @@ pub fn webcam_cover_local(uv: [f32; 2], bbox_aspect: f32, content_w: u32, conten
     let stamp_w = stamp_h * rect_aspect;
     let origin_x = (region_aspect - stamp_w) * 0.5;
     let origin_y = (1.0 - stamp_h) * 0.5;
+    let upright_y = 1.0 - uv[1];
     let lx = ((uv[0] * region_aspect - origin_x) / stamp_w).clamp(0.0, 1.0);
-    let ly = ((uv[1] - origin_y) / stamp_h).clamp(0.0, 1.0);
+    let ly = ((upright_y - origin_y) / stamp_h).clamp(0.0, 1.0);
     [lx, ly]
 }
 
 pub fn random_screen_rect(rng: &mut u32, width: u32, height: u32) -> Rect {
     let w = span(rng, width);
     let h = span(rng, height);
+    place_rect(rng, width, height, w, h)
+}
+
+fn random_webcam_rect(rng: &mut u32, width: u32, height: u32) -> Rect {
+    let w = webcam_span(rng, width);
+    let h = webcam_span(rng, height);
+    place_rect(rng, width, height, w, h)
+}
+
+fn place_rect(rng: &mut u32, width: u32, height: u32, w: u32, h: u32) -> Rect {
     let x = if width > w { xorshift(rng) % (width - w + 1) } else { 0 };
     let y = if height > h { xorshift(rng) % (height - h + 1) } else { 0 };
     Rect { x, y, w, h }
 }
 
 fn span(rng: &mut u32, extent: u32) -> u32 {
-    let want = 32 + (xorshift(rng) % 97);
+    sized_span(rng, extent, 32, 128)
+}
+
+fn webcam_span(rng: &mut u32, extent: u32) -> u32 {
+    sized_span(rng, extent, WEBCAM_SAMPLE_MIN, WEBCAM_SAMPLE_MAX)
+}
+
+fn sized_span(rng: &mut u32, extent: u32, min: u32, max: u32) -> u32 {
+    let choices = max - min + 1;
+    let want = min + (xorshift(rng) % choices);
     let extent = extent.max(1);
     if want > extent { extent } else { want }
 }
@@ -621,19 +652,23 @@ mod tests {
 
     #[test]
     fn webcam_placement_is_one_patch_and_does_not_repeat() {
-        // A matching aspect, magnified 2x, shows the center half of the rectangle.
-        assert_eq!(webcam_cover_local([0.0, 0.0], 2.0, 64, 32), [0.25, 0.25]);
-        assert_eq!(webcam_cover_local([1.0, 1.0], 2.0, 64, 32), [0.75, 0.75]);
+        // A matching aspect, magnified 4x, shows the center quarter.
+        // v = 0 is the feet, so it reads a lower camera row than v = 1.
+        assert_eq!(webcam_cover_local([0.0, 0.0], 2.0, 64, 32), [0.375, 0.625]);
+        assert_eq!(webcam_cover_local([1.0, 1.0], 2.0, 64, 32), [0.625, 0.375]);
         assert_eq!(webcam_cover_local([0.5, 0.5], 1.0, 40, 40), [0.5, 0.5]);
+        let feet = webcam_cover_local([0.5, 0.0], 1.0, 64, 64);
+        let head = webcam_cover_local([0.5, 1.0], 1.0, 64, 64);
+        assert!(feet[1] > head[1], "camera up follows the figure: feet {feet:?} head {head:?}");
         // A square stamp on a region twice as wide is cropped, not stretched or tiled.
-        let top = webcam_cover_local([0.0, 0.0], 2.0, 64, 64);
-        let bot = webcam_cover_local([1.0, 1.0], 2.0, 64, 64);
-        assert!((top[0] - 0.25).abs() < 1e-5 && (top[1] - 0.375).abs() < 1e-5, "{top:?}");
-        assert!((bot[0] - 0.75).abs() < 1e-5 && (bot[1] - 0.625).abs() < 1e-5, "{bot:?}");
+        let low = webcam_cover_local([0.0, 0.0], 2.0, 64, 64);
+        let high = webcam_cover_local([1.0, 1.0], 2.0, 64, 64);
+        assert!((low[0] - 0.375).abs() < 1e-5 && (low[1] - 0.5625).abs() < 1e-5, "{low:?}");
+        assert!((high[0] - 0.625).abs() < 1e-5 && (high[1] - 0.4375).abs() < 1e-5, "{high:?}");
         // A little past the region is still inside the magnified rectangle.
         // Farther than that holds the edge. Neither case wraps.
-        assert_eq!(webcam_cover_local([-0.25, 1.25], 1.0, 64, 64), [0.125, 0.875]);
-        assert_eq!(webcam_cover_local([-0.75, 1.75], 1.0, 64, 64), [0.0, 1.0]);
+        assert_eq!(webcam_cover_local([-0.25, 1.25], 1.0, 64, 64), [0.3125, 0.3125]);
+        assert_eq!(webcam_cover_local([-2.0, -2.0], 1.0, 64, 64), [0.0, 1.0]);
     }
 
     #[test]
@@ -775,14 +810,16 @@ mod tests {
             }
             let job = only_cam.tick(0.0, &[webcam]).unwrap();
             assert_eq!(job.source, SOURCE_WEBCAM);
+            assert!((WEBCAM_SAMPLE_MIN..=WEBCAM_SAMPLE_MAX).contains(&job.rect.w), "{:?}", job.rect);
+            assert!((WEBCAM_SAMPLE_MIN..=WEBCAM_SAMPLE_MAX).contains(&job.rect.h), "{:?}", job.rect);
             assert!(job.rect.x + job.rect.w <= webcam.width, "{:?}", job.rect);
             assert!(job.rect.y + job.rect.h <= webcam.height, "{:?}", job.rect);
         }
 
         let mut both = Appearance::new_regions(4, 2, 11);
-        let mut saw_desk = false;
-        let mut saw_cam = false;
-        for _ in 0..40 {
+        let mut saw_desk = 0;
+        let mut saw_cam = 0;
+        for _ in 0..90 {
             both.wait = 0.0;
             for region in &mut both.regions {
                 region.fade = 1.0;
@@ -790,11 +827,11 @@ mod tests {
             let job = both.tick(0.0, &[desktop, webcam]).unwrap();
             let (width, height) = match job.source {
                 SOURCE_DESKTOP => {
-                    saw_desk = true;
+                    saw_desk += 1;
                     (desktop.width, desktop.height)
                 }
                 SOURCE_WEBCAM => {
-                    saw_cam = true;
+                    saw_cam += 1;
                     (webcam.width, webcam.height)
                 }
                 other => panic!("unknown source {other}"),
@@ -802,7 +839,7 @@ mod tests {
             assert!(job.rect.x + job.rect.w <= width, "{:?} source {}", job.rect, job.source);
             assert!(job.rect.y + job.rect.h <= height, "{:?} source {}", job.rect, job.source);
         }
-        assert!(saw_desk && saw_cam, "desktop {saw_desk} webcam {saw_cam}");
+        assert!(saw_desk > 0 && saw_cam > 0, "desktop {saw_desk} webcam {saw_cam}");
     }
 
     #[test]
