@@ -30,35 +30,104 @@ bool in_our_disc(vec2 pixel, vec2 origin) {
     return length(pixel - c) <= cover_radius();
 }
 
-// Six separate blades. local is -1..1 across the widened disc.
-// The opening breathes, and the blades widen as they close so the
-// gaps between them narrow.
+// Six straight plates. local is -1..1 across the widened disc.
+// Each plate is a triangle cropped by the housing circle. Its outer
+// corner is a fixed pin on that circle; the inner edge is one side of
+// the opening. As the opening breathes, those pins stay put and the
+// plates turn about them, overlapping the next plate as they close.
+const float BLADES = 6.0;
+const float TAU = 6.2831853;
+const float HOUSING = 0.97;
+
+float segdist(vec2 p, vec2 a, vec2 b) {
+    vec2 ab = b - a;
+    float den = dot(ab, ab);
+    float t = den < 1e-8 ? 0.0 : clamp(dot(p - a, ab) / den, 0.0, 1.0);
+    return length(p - (a + t * ab));
+}
+
 vec3 aperture(vec2 local) {
-    float openR = 0.28 + 0.18 * sin(pc.time * 0.55);
-    float close = 1.0 - smoothstep(0.12, 0.46, openR);
-    const float n = 6.0;
-    float seg = 6.2831853 / n;
-    float ang = atan(local.y, local.x);
-    float fold = mod(ang + seg * 0.5, seg) - seg * 0.5;
     float rho = length(local);
-    float halfAng = seg * (0.30 + 0.14 * close);
+    if (rho > 1.04) {
+        return vec3(0.07);
+    }
+    // Enclosing ring. Everything outside it is the barrel, not a blade.
+    float ring = min(abs(rho - HOUSING), abs(rho - 1.0));
+    if (rho > HOUSING) {
+        return mix(vec3(0.0), vec3(0.13, 0.13, 0.14), smoothstep(0.0, 0.012, ring));
+    }
 
-    float fromSide = halfAng - abs(fold);
-    float fromInner = rho - openR;
-    float fromOuter = 0.98 - rho;
-    float side = smoothstep(0.0, 0.035, fromSide);
-    float radial = smoothstep(0.0, 0.025, fromInner) * smoothstep(0.0, 0.02, fromOuter);
-    float body = side * radial;
-    float edge = body * (1.0 - smoothstep(0.0, 0.07, min(fromSide * 1.4, min(fromInner, fromOuter))));
+    float t = sin(pc.time * 0.55) * 0.5 + 0.5;
+    float h = mix(0.50, 0.15, t);
+    float sector = TAU / BLADES;
+    float rv = h / cos(3.14159265 / BLADES);
 
-    vec3 col = vec3(0.0);
-    col = mix(col, vec3(0.58, 0.59, 0.62), body);
-    col = mix(col, vec3(0.0), edge);
+    bool in_hole = true;
+    for (int i = 0; i < 6; i++) {
+        float mid = (float(i) + 0.5) * sector;
+        if (dot(local, vec2(cos(mid), sin(mid))) > h) {
+            in_hole = false;
+        }
+    }
+    if (in_hole) {
+        float core = exp(-dot(local, local) / max(h * h, 0.02) * 1.35);
+        return vec3(1.0, 0.66, 0.12) * (0.30 + 1.15 * core);
+    }
 
-    float hole = 1.0 - smoothstep(openR - 0.015, openR + 0.02, rho);
-    float core = exp(-rho * rho / max(openR * openR, 0.02) * 1.35);
-    vec3 glow = vec3(1.0, 0.66, 0.12) * (0.30 + 1.15 * core);
-    return mix(col, glow, hole);
+    float ang = atan(local.y, local.x);
+    int mask = 0;
+    float overlap = sector * 0.38;
+    for (int i = 0; i < 6; i++) {
+        float mid = (float(i) + 0.5) * sector;
+        float d = mod(ang - mid + 3.14159265, TAU) - 3.14159265;
+        if (abs(d) < sector * 0.5 + overlap) {
+            mask |= 1 << i;
+        }
+    }
+    int start = 0;
+    bool found = false;
+    for (int i = 0; i < 6; i++) {
+        int prev = (i + 5) % 6;
+        if ((mask & (1 << i)) != 0 && (mask & (1 << prev)) == 0) {
+            start = i;
+            found = true;
+        }
+    }
+    if (!found) {
+        float a = mod(ang, TAU);
+        start = int(floor(a / sector)) % 6;
+    }
+    int w = start;
+    int k = start;
+    for (int n = 0; n < 6; n++) {
+        if ((mask & (1 << k)) == 0) break;
+        w = k;
+        k = (k + 1) % 6;
+    }
+
+    // One metal for every plate. The shine sits in the belly of a plate
+    // and is gone before the seam, so neighbouring plates don't meet
+    // as a light half against a dark half.
+    vec3 col = vec3(0.58, 0.59, 0.62);
+    float towardHole = smoothstep(HOUSING, max(h, 0.04), rho);
+    col *= mix(0.80, 1.05, towardHole);
+    float midA = (float(w) + 0.5) * sector;
+    float ad = abs(mod(ang - midA + 3.14159265, TAU) - 3.14159265);
+    float belly = smoothstep(1.05, 0.22, ad / (sector * 0.55));
+    float rake = dot(normalize(local), normalize(vec2(-0.35, 0.90)));
+    rake = clamp(rake * 0.5 + 0.5, 0.0, 1.0);
+    col += vec3(0.15, 0.16, 0.17) * belly * rake * rake * 0.55;
+
+    float aw = float(w) * sector;
+    float an = float((w + 1) % 6) * sector;
+    vec2 v0 = vec2(cos(aw), sin(aw)) * rv;
+    vec2 v1 = vec2(cos(an), sin(an)) * rv;
+    vec2 p0 = vec2(cos(aw + 0.55 * sector), sin(aw + 0.55 * sector)) * HOUSING;
+    vec2 p1 = vec2(cos(an + 0.55 * sector), sin(an + 0.55 * sector)) * HOUSING;
+    float bd = min(segdist(local, v0, p0), segdist(local, v1, p1));
+    bd = min(bd, segdist(local, v0, v1));
+    bd = min(bd, HOUSING - rho);
+    return mix(vec3(0.0), col, smoothstep(0.0, 0.018, bd));
 }
 
 void main() {
