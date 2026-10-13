@@ -1,0 +1,69 @@
+#version 450
+// One thread. The cell dispatch has finished. Read the heats it just wrote
+// and ease a single opening toward how busy the neighborhood is. The iris
+// reads that eased value. Nothing here is copied out for the aperture.
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+struct Cell {
+    float heat;
+    float luma;
+    float cb;
+    float cr;
+};
+
+layout(std430, set = 0, binding = 1) buffer HeatCells {
+    Cell cells[];
+};
+
+layout(push_constant) uniform PC {
+    layout(offset = 0) vec2 screen_size;
+    layout(offset = 8) float cell_size;
+    layout(offset = 12) float y_invert;
+    layout(offset = 16) uint cols;
+    layout(offset = 20) uint rows;
+    layout(offset = 24) uint have_prev;
+    layout(offset = 32) vec4 w0;
+    layout(offset = 48) vec4 w1;
+    layout(offset = 64) vec4 mask_a;
+    layout(offset = 80) vec4 mask_b;
+} pc;
+
+// Past the last real cell. 192*108, matching MAX_CELLS in screen_heat.rs.
+const uint SEAT = 192u * 108u;
+
+bool in_rect(vec2 p, vec4 r) {
+    return r.z > 1.0 && p.x >= r.x && p.y >= r.y && p.x < r.x + r.z && p.y < r.y + r.w;
+}
+
+void main() {
+    // neighbor_side() in placement.rs: round(edge * sqrt(1.5)). mask_a.z is the live edge.
+    float neighbor = round(pc.mask_a.z * sqrt(1.5));
+    vec2 center = pc.mask_a.xy + pc.mask_a.zw * 0.5;
+    vec2 origin = center - vec2(neighbor * 0.5);
+    float sum = 0.0;
+    float n = 0.0;
+    for (uint row = 0u; row < pc.rows; row++) {
+        for (uint col = 0u; col < pc.cols; col++) {
+            vec2 c = (vec2(float(col), float(row)) + 0.5) * pc.cell_size;
+            if (c.x < origin.x || c.y < origin.y || c.x >= origin.x + neighbor || c.y >= origin.y + neighbor) {
+                continue;
+            }
+            if (in_rect(c, pc.mask_a) || in_rect(c, pc.mask_b)) {
+                continue;
+            }
+            sum += cells[row * pc.cols + col].heat;
+            n += 1.0;
+        }
+    }
+    float mean = n > 0.0 ? sum / n : 0.0;
+    // Quiet stays open. A warm seat, and anything near the changing-text
+    // inferno, is stopped down.
+    float closed = smoothstep(0.08, 0.85, mean);
+    float prev = cells[SEAT].luma;
+    // 0.10 at a 10 Hz capture is about a one-second memory. 0.30 was a
+    // quarter-second, quick enough that one hot capture ticked the iris.
+    float seat = mix(prev, closed, 0.10);
+    cells[SEAT].heat = mean;
+    cells[SEAT].luma = seat;
+}
