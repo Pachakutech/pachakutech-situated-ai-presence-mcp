@@ -14,6 +14,19 @@ layout(push_constant) uniform PC {
 } pc;
 
 layout(set = 0, binding = 0) uniform sampler2D tScreen;
+
+struct HeatCell {
+    float heat;
+    float luma;
+    float cb;
+    float cr;
+};
+// Written by the seat dispatch. 192*108, one past the last real cell.
+layout(std430, set = 1, binding = 0) buffer HeatSeat {
+    HeatCell heat_cells[];
+};
+const uint SEAT = 192u * 108u;
+
 layout(location = 0) out vec4 outColor;
 
 // The capture is a photograph, about a tenth of a second old, and the ball
@@ -57,8 +70,11 @@ vec3 aperture(vec2 local) {
         return mix(vec3(0.0), vec3(0.13, 0.13, 0.14), smoothstep(0.0, 0.012, ring));
     }
 
-    float t = sin(pc.time * 0.55) * 0.5 + 0.5;
-    float h = mix(0.50, 0.15, t);
+    // 0 is a quiet seat (open), 1 is stopped down. Eased on the GPU.
+    float seat = clamp(heat_cells[SEAT].luma, 0.0, 1.0);
+    float h = mix(0.50, 0.15, seat);
+    h += 0.02 * sin(pc.time * 0.55);
+    h = clamp(h, 0.11, 0.55);
     float sector = TAU / BLADES;
     float rv = h / cos(3.14159265 / BLADES);
 
@@ -105,18 +121,14 @@ vec3 aperture(vec2 local) {
         k = (k + 1) % 6;
     }
 
-    // One metal for every plate. The shine sits in the belly of a plate
-    // and is gone before the seam, so neighbouring plates don't meet
-    // as a light half against a dark half.
+    // One metal. Nothing here depends on which plate won, so a seam
+    // cannot be a light half against a dark half. The black edge is
+    // the only line. The wash follows the disc, and it is continuous.
     vec3 col = vec3(0.58, 0.59, 0.62);
     float towardHole = smoothstep(HOUSING, max(h, 0.04), rho);
-    col *= mix(0.80, 1.05, towardHole);
-    float midA = (float(w) + 0.5) * sector;
-    float ad = abs(mod(ang - midA + 3.14159265, TAU) - 3.14159265);
-    float belly = smoothstep(1.05, 0.22, ad / (sector * 0.55));
-    float rake = dot(normalize(local), normalize(vec2(-0.35, 0.90)));
-    rake = clamp(rake * 0.5 + 0.5, 0.0, 1.0);
-    col += vec3(0.15, 0.16, 0.17) * belly * rake * rake * 0.55;
+    col *= mix(0.86, 1.04, towardHole);
+    float rake = clamp(dot(normalize(local), normalize(vec2(-0.2, 0.9))), 0.0, 1.0);
+    col += vec3(0.045, 0.048, 0.05) * rake * rake;
 
     float aw = float(w) * sector;
     float an = float((w + 1) % 6) * sector;

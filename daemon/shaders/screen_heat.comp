@@ -88,7 +88,6 @@ void main() {
     float step = max(pc.cell_size / 8.0, 1.0);
     float vert = 0.0;
     float sum_l = 0.0;
-    float sum_cb = 0.0;
     float sum_cr = 0.0;
     float sum_sat = 0.0;
     float sum_sat2 = 0.0;
@@ -108,6 +107,10 @@ void main() {
     // on that row. A vertical rule is one crossing, repeated down the cell.
     float best_h = 0.0;
     float best_cov = 0.0;
+    // Signed pattern of the crossings. The mean brightness of a cell full
+    // of grey type barely moves when the letters change. This does.
+    float cross_sig = 0.0;
+    int cross_n = 0;
     for (int y = 0; y < 8; y++) {
         float prev_l = 0.0;
         bool prev_ok = false;
@@ -124,13 +127,11 @@ void main() {
             }
             vec3 rgb = desktop_rgb(px);
             float l = luma_of(rgb);
-            float cb = rgb.b - l;
             float cr = rgb.r - l;
             float sat = length(rgb - vec3(l));
             row_l[x] = l;
             row_ok[x] = true;
             sum_l += l;
-            sum_cb += cb;
             sum_cr += cr;
             sum_sat += sat;
             sum_sat2 += sat * sat;
@@ -139,7 +140,13 @@ void main() {
                 float dlt = abs(l - prev_l);
                 row_horiz += dlt;
                 row_pairs++;
-                if (dlt > 0.06) row_steps++;
+                // 0.03 catches dim grey on a near grey. A rule is still one
+                // or two crossings on the row, so the glyph gate below
+                // keeps it out. 0.06 was dropping that dim type entirely.
+                if (dlt > 0.03) row_steps++;
+                float sgn = mod(float(x), 2.0) == 0.0 ? 1.0 : -1.0;
+                cross_sig += dlt * sgn;
+                cross_n++;
             }
             if (have_row && prev_ok_row[x]) {
                 vert += abs(l - prev_row[x]);
@@ -172,7 +179,8 @@ void main() {
     float v = vert / max(float(vert_n), 1.0);
     // Two crossings on a row of about seven is a thick rule. Four is type.
     float glyphs = smoothstep(0.34, 0.55, best_cov);
-    float text = clamp((best_h - 0.45 * v) * 6.0 * glyphs, 0.0, 1.0);
+    float text = clamp((best_h - 0.45 * v) * 8.0 * glyphs, 0.0, 1.0);
+    float sig = cross_n > 0 ? cross_sig / float(cross_n) : 0.0;
 
     float d = pc.cell_size * 0.28;
     vec2 t00 = center + vec2(-d, -d);
@@ -232,22 +240,32 @@ void main() {
     selection *= 1.0 - blank_highlight;
 
     float mean_l = sum_l * inv_n;
-    float mean_cb = sum_cb * inv_n;
     float mean_cr = sum_cr * inv_n;
     float motion = 0.0;
+    float structure = 0.0;
     if (pc.have_prev != 0u) {
         Cell prev = cells[id];
         // Negative luma marks a cell we have not measured yet (the buffer
         // started at zero, or the layer was covering it). The first real
         // sample is a baseline, not motion.
+        // cb holds the previous crossing pattern, stored as sig+10 so a
+        // real chroma value (well under 5) is never mistaken for one.
         if (prev.luma >= 0.0) {
-            motion = clamp((abs(mean_l - prev.luma) + abs(mean_cb - prev.cb) + abs(mean_cr - prev.cr)) * 1.5, 0.0, 1.0);
+            motion = clamp((abs(mean_l - prev.luma) + abs(mean_cr - prev.cr)) * 1.5, 0.0, 1.0);
+            if (prev.cb > 5.0) {
+                structure = clamp(abs(sig - (prev.cb - 10.0)) * 12.0, 0.0, 1.0);
+            }
         }
     }
+    motion = max(motion, structure);
+    // Letters changing in place. Static type stays at its own weight.
+    // A cell of this is the hot end of the field.
+    float changing = text * structure;
 
-    float heat = pc.w0.x * text + pc.w0.y * selection + pc.w0.z * edge + pc.w0.w * color + pc.w1.x * motion;
+    float heat = pc.w0.x * text + pc.w0.y * selection + pc.w0.z * edge + pc.w0.w * color
+        + pc.w1.x * motion + pc.w1.y * changing;
     cells[id].heat = max(heat, 0.0);
     cells[id].luma = mean_l;
-    cells[id].cb = mean_cb;
+    cells[id].cb = sig + 10.0;
     cells[id].cr = mean_cr;
 }

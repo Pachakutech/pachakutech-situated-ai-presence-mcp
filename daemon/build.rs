@@ -43,6 +43,7 @@ fn main() {
         "gltf_to_splat.comp",
         "screen_patch.comp",
         "screen_heat.comp",
+        "screen_heat_seat.comp",
         "overlay_quad.vert",
         "overlay_quad.frag",
         "splat_disc.vert",

@@ -746,8 +746,13 @@ impl OverlayGpu {
         let screen = ScreenFeedKind::Shm(ScreenFeed::new(vk, capture.width.max(1), capture.height.max(1))?);
         println!("[overlay] starting on SHM screen feed (will switch to dmabuf when capture confirms)");
 
-        let (pipeline_layout, pipeline) =
-            create_quad_pipeline(&vk.device, render_pass, screen.descriptor_set_layout())?;
+        let heat = crate::screen_heat::ScreenHeat::new(vk)?;
+        let (pipeline_layout, pipeline) = create_quad_pipeline(
+            &vk.device,
+            render_pass,
+            screen.descriptor_set_layout(),
+            heat.lens_set_layout(),
+        )?;
 
         let pool_info = vk::CommandPoolCreateInfo::default()
             .queue_family_index(vk.graphics_queue_family)
@@ -793,7 +798,7 @@ impl OverlayGpu {
             splat_count: 0,
             projected: None,
             patches: crate::screen_patch::ScreenPatches::new(vk)?,
-            heat: crate::screen_heat::ScreenHeat::new(vk)?,
+            heat,
             glass_time: 0.0,
             lens_origin: [0.0, 0.0],
             lens_prev: [0.0, 0.0],
@@ -841,8 +846,12 @@ impl OverlayGpu {
         self.image_views = create_image_views(&vk.device, format, &images)?;
         self.render_pass = create_render_pass(&vk.device, format)?;
         self.framebuffers = create_framebuffers(&vk.device, self.render_pass, extent, &self.image_views)?;
-        let (layout, pipeline) =
-            create_quad_pipeline(&vk.device, self.render_pass, self.screen.descriptor_set_layout())?;
+        let (layout, pipeline) = create_quad_pipeline(
+            &vk.device,
+            self.render_pass,
+            self.screen.descriptor_set_layout(),
+            self.heat.lens_set_layout(),
+        )?;
         unsafe {
             vk.device.destroy_pipeline(self.pipeline, None);
             vk.device.destroy_pipeline_layout(self.pipeline_layout, None);
@@ -1300,12 +1309,13 @@ impl OverlayGpu {
                     vk::PipelineBindPoint::GRAPHICS,
                     self.pipeline,
                 );
+                let sets = [self.screen.descriptor_set(), self.heat.lens_set()];
                 vk.device.cmd_bind_descriptor_sets(
                     self.command_buffer,
                     vk::PipelineBindPoint::GRAPHICS,
                     self.pipeline_layout,
                     0,
-                    &[self.screen.descriptor_set()],
+                    &sets,
                     &[],
                 );
                 let y_invert = match &self.screen {
@@ -1926,6 +1936,7 @@ fn create_quad_pipeline(
     device: &ash::Device,
     render_pass: vk::RenderPass,
     descriptor_set_layout: vk::DescriptorSetLayout,
+    heat_set_layout: vk::DescriptorSetLayout,
 ) -> Result<(vk::PipelineLayout, vk::Pipeline), String> {
     let vert = create_shader_module(device, OVERLAY_VERT_SPV)?;
     let frag = create_shader_module(device, OVERLAY_FRAG_SPV)?;
@@ -1970,7 +1981,7 @@ fn create_quad_pipeline(
         .stage_flags(vk::ShaderStageFlags::FRAGMENT)
         .offset(0)
         .size(40);
-    let set_layouts = [descriptor_set_layout];
+    let set_layouts = [descriptor_set_layout, heat_set_layout];
     let layout_info = vk::PipelineLayoutCreateInfo::default()
         .set_layouts(&set_layouts)
         .push_constant_ranges(std::slice::from_ref(&push));

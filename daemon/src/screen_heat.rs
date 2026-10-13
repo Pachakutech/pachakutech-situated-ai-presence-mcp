@@ -8,11 +8,16 @@ use ash::vk;
 use std::ffi::CStr;
 
 const COMP_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/screen_heat.comp.spv"));
+const SEAT_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/screen_heat_seat.comp.spv"));
 
 const CELL_PX: u32 = 40;
 const MAX_COLS: u32 = 192;
 const MAX_ROWS: u32 = 108;
 const MAX_CELLS: u32 = MAX_COLS * MAX_ROWS;
+/// One vec4 past the cells. The seat shader eases the iris opening here.
+/// The CPU copy never reads it.
+const SEAT_INDEX: u32 = MAX_CELLS;
+const _: () = assert!(SEAT_INDEX == 192 * 108);
 
 /// Tunable from here. The shader reads them as push constants.
 const W_TEXT: f32 = 1.0;
@@ -25,6 +30,10 @@ const W_SELECT: f32 = 0.0;
 const W_EDGE: f32 = 0.04;
 const W_COLOR: f32 = 0.18;
 const W_MOTION: f32 = 1.2;
+/// Letters changing in a cell that already looks like text. The mean
+/// brightness barely moves when grey type is rewritten, so this is the
+/// term that makes a live paragraph the hot end of the field.
+const W_CHANGING: f32 = 8.0;
 
 #[repr(C)]
 struct HeatPush {
@@ -59,9 +68,13 @@ struct Written {
 pub struct ScreenHeat {
     layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
+    seat_pipeline: vk::Pipeline,
     set_layout: vk::DescriptorSetLayout,
     pool: vk::DescriptorPool,
     set: vk::DescriptorSet,
+    /// Same buffer, fragment-readable, for the iris opening.
+    lens_set_layout: vk::DescriptorSetLayout,
+    lens_set: vk::DescriptorSet,
     sampler: vk::Sampler,
     buf: vk::Buffer,
     mem: vk::DeviceMemory,
@@ -98,9 +111,9 @@ impl ScreenHeat {
             .map_err(|e| format!("heat set layout: {e:?}"))?;
         let pool_sizes = [
             vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: 1 },
-            vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 1 },
+            vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 2 },
         ];
-        let pool_info = vk::DescriptorPoolCreateInfo::default().max_sets(1).pool_sizes(&pool_sizes);
+        let pool_info = vk::DescriptorPoolCreateInfo::default().max_sets(2).pool_sizes(&pool_sizes);
         let pool = unsafe { device.create_descriptor_pool(&pool_info, None) }
             .map_err(|e| format!("heat pool: {e:?}"))?;
         let layouts = [set_layout];
@@ -117,7 +130,8 @@ impl ScreenHeat {
         let sampler = unsafe { device.create_sampler(&sampler_info, None) }
             .map_err(|e| format!("heat sampler: {e:?}"))?;
 
-        let bytes = (MAX_CELLS as vk::DeviceSize) * std::mem::size_of::<[f32; 4]>() as vk::DeviceSize;
+        let slots = (MAX_CELLS + 1) as vk::DeviceSize;
+        let bytes = slots * std::mem::size_of::<[f32; 4]>() as vk::DeviceSize;
         let buf_info = vk::BufferCreateInfo::default()
             .size(bytes)
             .usage(vk::BufferUsageFlags::STORAGE_BUFFER)
@@ -128,7 +142,27 @@ impl ScreenHeat {
         unsafe { device.bind_buffer_memory(buf, mem, 0) }.map_err(|e| format!("heat buffer bind: {e:?}"))?;
         let ptr = unsafe { device.map_memory(mem, 0, bytes, vk::MemoryMapFlags::empty()) }
             .map_err(|e| format!("heat buffer map: {e:?}"))? as *mut f32;
-        unsafe { std::ptr::write_bytes(ptr, 0, (MAX_CELLS as usize) * 4) };
+        unsafe { std::ptr::write_bytes(ptr, 0, (MAX_CELLS as usize + 1) * 4) };
+
+        let lens_binding = vk::DescriptorSetLayoutBinding::default()
+            .binding(0)
+            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::FRAGMENT);
+        let lens_dsl = vk::DescriptorSetLayoutCreateInfo::default().bindings(std::slice::from_ref(&lens_binding));
+        let lens_set_layout = unsafe { device.create_descriptor_set_layout(&lens_dsl, None) }
+            .map_err(|e| format!("heat lens set layout: {e:?}"))?;
+        let lens_layouts = [lens_set_layout];
+        let lens_alloc = vk::DescriptorSetAllocateInfo::default().descriptor_pool(pool).set_layouts(&lens_layouts);
+        let lens_set = unsafe { device.allocate_descriptor_sets(&lens_alloc) }
+            .map_err(|e| format!("heat lens set: {e:?}"))?[0];
+        let lens_buf = [vk::DescriptorBufferInfo::default().buffer(buf).offset(0).range(bytes)];
+        let lens_write = vk::WriteDescriptorSet::default()
+            .dst_set(lens_set)
+            .dst_binding(0)
+            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+            .buffer_info(&lens_buf);
+        unsafe { device.update_descriptor_sets(&[lens_write], &[]) };
 
         let buf_info = [vk::DescriptorBufferInfo::default().buffer(buf).offset(0).range(bytes)];
         let write = vk::WriteDescriptorSet::default()
@@ -161,12 +195,27 @@ impl ScreenHeat {
             .map_err(|(_, e)| format!("heat pipeline: {e:?}"))?[0];
         unsafe { device.destroy_shader_module(module, None) };
 
+        let seat_code = ash::util::read_spv(&mut std::io::Cursor::new(SEAT_SPV)).map_err(|e| format!("heat seat spirv: {e}"))?;
+        let seat_module = unsafe { device.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&seat_code), None) }
+            .map_err(|e| format!("heat seat module: {e:?}"))?;
+        let seat_stage = vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::COMPUTE)
+            .module(seat_module)
+            .name(entry);
+        let seat_create = vk::ComputePipelineCreateInfo::default().stage(seat_stage).layout(layout);
+        let seat_pipeline = unsafe { device.create_compute_pipelines(vk::PipelineCache::null(), &[seat_create], None) }
+            .map_err(|(_, e)| format!("heat seat pipeline: {e:?}"))?[0];
+        unsafe { device.destroy_shader_module(seat_module, None) };
+
         Ok(Self {
             layout,
             pipeline,
+            seat_pipeline,
             set_layout,
             pool,
             set,
+            lens_set_layout,
+            lens_set,
             sampler,
             buf,
             mem,
@@ -259,7 +308,7 @@ impl ScreenHeat {
             have_prev: if self.have_prev { 1 } else { 0 },
             _pad: 0,
             weights0: [W_TEXT, W_SELECT, W_EDGE, W_COLOR],
-            weights1: [W_MOTION, 0.0, 0.0, 0.0],
+            weights1: [W_MOTION, W_CHANGING, 0.0, 0.0],
             mask_a: [mask_a.0 as f32, mask_a.1 as f32, DISC_PX as f32, DISC_PX as f32],
             mask_b: [mask_b.0 as f32, mask_b.1 as f32, DISC_PX as f32, DISC_PX as f32],
         };
@@ -274,6 +323,23 @@ impl ScreenHeat {
                 std::slice::from_raw_parts((&push as *const HeatPush).cast::<u8>(), std::mem::size_of::<HeatPush>()),
             );
             device.cmd_dispatch(cmd, (cols + 7) / 8, (rows + 7) / 8, 1);
+            let seat_barrier = vk::BufferMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE)
+                .buffer(self.buf)
+                .offset(0)
+                .size(vk::WHOLE_SIZE);
+            device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[seat_barrier],
+                &[],
+            );
+            device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.seat_pipeline);
+            device.cmd_dispatch(cmd, 1, 1, 1);
             let barrier = vk::BufferMemoryBarrier::default()
                 .src_access_mask(vk::AccessFlags::SHADER_WRITE)
                 .dst_access_mask(vk::AccessFlags::HOST_READ)
@@ -311,11 +377,21 @@ impl ScreenHeat {
         }
     }
 
+    pub fn lens_set_layout(&self) -> vk::DescriptorSetLayout {
+        self.lens_set_layout
+    }
+
+    pub fn lens_set(&self) -> vk::DescriptorSet {
+        self.lens_set
+    }
+
     pub fn destroy(&mut self, device: &ash::Device) {
         unsafe {
+            device.destroy_pipeline(self.seat_pipeline, None);
             device.destroy_pipeline(self.pipeline, None);
             device.destroy_pipeline_layout(self.layout, None);
             device.destroy_descriptor_pool(self.pool, None);
+            device.destroy_descriptor_set_layout(self.lens_set_layout, None);
             device.destroy_descriptor_set_layout(self.set_layout, None);
             device.destroy_sampler(self.sampler, None);
             device.unmap_memory(self.mem);
