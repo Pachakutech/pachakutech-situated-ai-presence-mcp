@@ -638,6 +638,11 @@ pub struct OverlayGpu {
     heat: crate::screen_heat::ScreenHeat,
     /// Seconds the glass streak and twinkles have been running.
     glass_time: f32,
+    /// Layer top-left and the one before it, plus the output size.
+    /// The crystal-ball shader uses these to find its own disc in the feed.
+    lens_origin: [f32; 2],
+    lens_prev: [f32; 2],
+    lens_screen: [f32; 2],
     webcam: WebcamSlot,
 }
 
@@ -790,12 +795,27 @@ impl OverlayGpu {
             patches: crate::screen_patch::ScreenPatches::new(vk)?,
             heat: crate::screen_heat::ScreenHeat::new(vk)?,
             glass_time: 0.0,
+            lens_origin: [0.0, 0.0],
+            lens_prev: [0.0, 0.0],
+            lens_screen: [0.0, 0.0],
             webcam: WebcamSlot::default(),
         })
     }
 
     pub fn advance_glass(&mut self, dt: f32) {
         self.glass_time = (self.glass_time + dt.max(0.0)) % 3600.0;
+    }
+
+    /// Where the crystal ball sits, for the aperture that replaces its echo.
+    pub fn set_lens_place(&mut self, x: i32, y: i32, screen_w: u32, screen_h: u32) {
+        let origin = [x as f32, y as f32];
+        if self.lens_screen == [0.0, 0.0] {
+            self.lens_prev = origin;
+        } else {
+            self.lens_prev = self.lens_origin;
+        }
+        self.lens_origin = origin;
+        self.lens_screen = [screen_w.max(1) as f32, screen_h.max(1) as f32];
     }
 
     pub fn recreate(&mut self, vk: &VulkanContext, extent: vk::Extent2D) -> Result<(), String> {
@@ -1300,14 +1320,20 @@ impl OverlayGpu {
                     self.extent.width as f32,
                     self.extent.height as f32,
                     if y_invert { 1.0 } else { 0.0 },
-                    0.0,
+                    self.glass_time,
+                    self.lens_origin[0],
+                    self.lens_origin[1],
+                    self.lens_prev[0],
+                    self.lens_prev[1],
+                    self.lens_screen[0],
+                    self.lens_screen[1],
                 ];
                 vk.device.cmd_push_constants(
                     self.command_buffer,
                     self.pipeline_layout,
                     vk::ShaderStageFlags::FRAGMENT,
                     0,
-                    std::slice::from_raw_parts(pc.as_ptr() as *const u8, 16),
+                    std::slice::from_raw_parts(pc.as_ptr() as *const u8, std::mem::size_of_val(&pc)),
                 );
                 vk.device.cmd_draw(self.command_buffer, 3, 1, 0, 0);
             }
@@ -1943,7 +1969,7 @@ fn create_quad_pipeline(
     let push = vk::PushConstantRange::default()
         .stage_flags(vk::ShaderStageFlags::FRAGMENT)
         .offset(0)
-        .size(16);
+        .size(40);
     let set_layouts = [descriptor_set_layout];
     let layout_info = vk::PipelineLayoutCreateInfo::default()
         .set_layouts(&set_layouts)
@@ -2187,6 +2213,7 @@ fn tick_avatar(
     for cmd in commands {
         avatar.apply_command(cmd);
     }
+    gpu.advance_glass(dt);
     if !avatar.visible {
         // Idle substrate: no avatar splats bound, so draw() shows the hyperbubble disc.
         gpu.set_splat_range(base, 0);
@@ -2194,7 +2221,6 @@ fn tick_avatar(
     }
     let started = Instant::now();
     avatar.advance(dt);
-    gpu.advance_glass(dt);
     let sources = gpu.appearance_sources();
     if let Some(job) = avatar.appearance.tick(dt, &sources) {
         gpu.enqueue_patch(job);
@@ -2386,6 +2412,9 @@ pub fn run(
         &mut projection_checked,
     )?;
     last_avatar = Instant::now();
+    let (bx, by) = overlay.bubble_pos();
+    let (ow, oh) = overlay.output_size();
+    gpu.set_lens_place(bx, by, ow, oh);
     gpu.draw(vk)?;
 
     let wl_fd = overlay.event_queue.as_fd().as_raw_fd();
@@ -2534,7 +2563,9 @@ pub fn run(
             }
             if got || avatar_due || last_capture.elapsed() >= CAPTURE_INTERVAL {
                 let (bx, by) = overlay.bubble_pos();
+                let (ow, oh) = overlay.output_size();
                 gpu.set_heat_disc(bx, by);
+                gpu.set_lens_place(bx, by, ow, oh);
                 gpu.draw(vk)?;
                 if got || last_capture.elapsed() >= CAPTURE_INTERVAL {
                     last_capture = Instant::now();
