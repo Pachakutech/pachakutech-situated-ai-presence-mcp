@@ -38,9 +38,25 @@ float cover_radius() {
     return min(pc.overlay.x, pc.overlay.y) * 0.5 + LAG_PX;
 }
 
+// The glass only looks at the center square. On a landscape screen the
+// square already spans the full height, so a bubble at the top or bottom
+// is cut by exactly one disc-radius of inset: the lag cap sits off the
+// square, and that is the amount of iris that should show. Past either
+// side of the square the echo leaves the picture, but the iris stays on
+// that same edge and keeps the bubble's vertical place. A portrait screen
+// swaps the axes.
+vec2 aperture_center(vec2 origin) {
+    vec2 center = origin + pc.overlay * 0.5;
+    float side = max(min(pc.screen.x, pc.screen.y), 1.0);
+    vec2 square0 = (pc.screen - vec2(side)) * 0.5;
+    float inset = min(pc.overlay.x, pc.overlay.y) * 0.5;
+    vec2 lo = square0 + vec2(inset);
+    vec2 hi = square0 + vec2(side) - vec2(inset);
+    return clamp(center, lo, max(hi, lo));
+}
+
 bool in_our_disc(vec2 pixel, vec2 origin) {
-    vec2 c = origin + pc.overlay * 0.5;
-    return length(pixel - c) <= cover_radius();
+    return length(pixel - aperture_center(origin)) <= cover_radius();
 }
 
 // Six straight plates. local is -1..1 across the widened disc.
@@ -174,7 +190,7 @@ void main() {
     bool was = in_our_disc(pixel, pc.prevOrigin);
     vec3 scene;
     if ((here || was) && pc.screen.x > 1.0) {
-        vec2 local = (pixel - (pc.origin + pc.overlay * 0.5)) / rad;
+        vec2 local = (pixel - aperture_center(pc.origin)) / rad;
         scene = aperture(local);
     } else {
         scene = texture(tScreen, texUv).rgb;
