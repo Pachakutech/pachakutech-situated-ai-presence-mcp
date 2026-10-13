@@ -53,10 +53,8 @@ const OVERLAY_VERT_SPV: &[u8] =
 const OVERLAY_FRAG_SPV: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/overlay_quad.frag.spv"));
 
-/// Looking-glass diameter in pixels. Small enough not to dominate 1080p,
-/// large enough to read the refraction. `placement::DISC_PX` is the same edge.
-const BUBBLE_PX: u32 = 330;
-const _: () = assert!(crate::placement::DISC_PX as u32 == BUBBLE_PX);
+/// Observing bubble. A presence grows the layer to `placement::DISC_PX`.
+const OBSERVE_PX: u32 = crate::placement::OBSERVE_PX as u32;
 /// Capture/present ceiling. The OOM was a 16ms fullscreen copy+present spin.
 const CAPTURE_INTERVAL: Duration = Duration::from_millis(100);
 /// Avatar deform → project. Independent of the 10 fps capture.
@@ -78,6 +76,8 @@ pub struct Overlay {
     /// will write this; `set_bubble_pos` is the whole present API.
     bubble_x: i32,
     bubble_y: i32,
+    /// Live edge. 220 while the bubble is up, 330 while a presence owns the body.
+    side: u32,
 }
 
 pub struct OverlayState {
@@ -189,8 +189,8 @@ impl Overlay {
         layer_surface.set_keyboard_interactivity(
             zwlr_layer_surface_v1::KeyboardInteractivity::None,
         );
-        layer_surface.set_size(BUBBLE_PX, BUBBLE_PX);
-        let (ml, mt) = center_margins(state.output_width, state.output_height);
+        layer_surface.set_size(OBSERVE_PX, OBSERVE_PX);
+        let (ml, mt) = center_margins(state.output_width, state.output_height, OBSERVE_PX);
         layer_surface.set_margin(mt, 0, 0, ml);
         surface.commit();
 
@@ -215,11 +215,11 @@ impl Overlay {
         }
 
         println!(
-            "[overlay] layer-shell {BUBBLE_PX}x{BUBBLE_PX} on {}x{} exclusive_zone=-1 input=pass-through",
-            state.output_width, state.output_height
+            "[overlay] layer-shell {}x{} on {}x{} exclusive_zone=-1 input=pass-through",
+            state.width, state.height, state.output_width, state.output_height
         );
 
-        let (bx, by) = disc_origin(state.output_width, state.output_height);
+        let (bx, by) = disc_origin(state.output_width, state.output_height, OBSERVE_PX);
         Ok(Self {
             conn,
             event_queue,
@@ -228,6 +228,7 @@ impl Overlay {
             cap_fd_size: 0,
             bubble_x: bx,
             bubble_y: by,
+            side: OBSERVE_PX,
         })
     }
 
@@ -259,6 +260,31 @@ impl Overlay {
         (self.bubble_x, self.bubble_y)
     }
 
+    pub fn side(&self) -> u32 {
+        self.side
+    }
+
+    /// Commit a new square. `x` and `y` are the top-left already shifted so
+    /// the center stays put. The swapchain follows the configure that answers.
+    pub fn apply_side(&mut self, side: u32, x: i32, y: i32) {
+        self.side = side;
+        let max_x = self.state.output_width.saturating_sub(side) as i32;
+        let max_y = self.state.output_height.saturating_sub(side) as i32;
+        self.bubble_x = x.clamp(0, max_x.max(0));
+        self.bubble_y = y.clamp(0, max_y.max(0));
+        if let Some(ls) = &self.state.layer_surface {
+            ls.set_size(side, side);
+            ls.set_margin(self.bubble_y, 0, 0, self.bubble_x);
+            if let Some(s) = &self.state.surface {
+                s.commit();
+            }
+        }
+        eprintln!(
+            "[overlay] layer {side}x{side} at {},{}",
+            self.bubble_x, self.bubble_y
+        );
+    }
+
     pub fn output_size(&self) -> (u32, u32) {
         (self.state.output_width, self.state.output_height)
     }
@@ -273,8 +299,8 @@ impl Overlay {
     /// and the heatmap simply stops choosing a new target. Do not call it
     /// while the layer is parked for the lock, the screensaver, or sleep.
     pub fn set_bubble_pos(&mut self, x: i32, y: i32) {
-        let max_x = self.state.output_width.saturating_sub(BUBBLE_PX) as i32;
-        let max_y = self.state.output_height.saturating_sub(BUBBLE_PX) as i32;
+        let max_x = self.state.output_width.saturating_sub(self.side) as i32;
+        let max_y = self.state.output_height.saturating_sub(self.side) as i32;
         self.bubble_x = x.clamp(0, max_x.max(0));
         self.bubble_y = y.clamp(0, max_y.max(0));
         self.unpark_at_bubble();
@@ -292,7 +318,7 @@ impl Overlay {
 
     fn park_offscreen(&self) {
         if let Some(ls) = &self.state.layer_surface {
-            ls.set_margin(-((BUBBLE_PX as i32) * 4), 0, 0, 0);
+            ls.set_margin(-((self.side as i32) * 4), 0, 0, 0);
             if let Some(s) = &self.state.surface {
                 s.commit();
             }
@@ -1079,8 +1105,8 @@ impl OverlayGpu {
     }
 
     /// Disc top-left the next heat dispatch should treat as the layer.
-    pub fn set_heat_disc(&mut self, x: i32, y: i32) {
-        self.heat.set_disc(x, y);
+    pub fn set_heat_disc(&mut self, x: i32, y: i32, side: i32) {
+        self.heat.set_disc(x, y, side);
     }
 
     pub fn take_heat_grid(&mut self) -> Option<crate::placement::HeatGrid> {
@@ -2018,14 +2044,32 @@ fn create_shader_module(device: &ash::Device, bytes: &[u8]) -> Result<vk::Shader
         .map_err(|e| format!("vkCreateShaderModule (overlay) failed: {e:?}"))
 }
 
-fn center_margins(output_w: u32, output_h: u32) -> (i32, i32) {
-    let w = output_w.max(BUBBLE_PX);
-    let h = output_h.max(BUBBLE_PX);
-    (((w - BUBBLE_PX) / 2) as i32, ((h - BUBBLE_PX) / 2) as i32)
+fn center_margins(output_w: u32, output_h: u32, side: u32) -> (i32, i32) {
+    let w = output_w.max(side);
+    let h = output_h.max(side);
+    (((w - side) / 2) as i32, ((h - side) / 2) as i32)
 }
 
-fn disc_origin(output_w: u32, output_h: u32) -> (i32, i32) {
-    center_margins(output_w, output_h)
+fn disc_origin(output_w: u32, output_h: u32, side: u32) -> (i32, i32) {
+    center_margins(output_w, output_h, side)
+}
+
+/// Grow to the presence disc or shrink to the observing bubble. The center
+/// stays. Drawing waits until the compositor has configured that edge.
+fn sync_disc_side(overlay: &mut Overlay, placement: &mut crate::placement::Placement, showing_avatar: bool) {
+    let want = if showing_avatar {
+        crate::placement::DISC_PX
+    } else {
+        crate::placement::OBSERVE_PX
+    };
+    if overlay.side() == want as u32 && placement.disc_px() == want {
+        return;
+    }
+    let (ow, oh) = overlay.output_size();
+    let (x, y) = placement.adopt_side(want, ow, oh);
+    if overlay.side() != want as u32 {
+        overlay.apply_side(want as u32, x, y);
+    }
 }
 
 fn spawn_hypr_lock_watch(
@@ -2232,6 +2276,15 @@ fn tick_avatar(
     }
     let started = Instant::now();
     avatar.advance(dt);
+    let extent = gpu.layer_extent();
+    if extent.width != crate::placement::DISC_PX as u32
+        || extent.height != crate::placement::DISC_PX as u32
+    {
+        // The compositor has not handed back the presence-sized layer yet.
+        // One blank frame beats drawing the sit into the smaller glass.
+        gpu.set_splat_range(base, 0);
+        return Ok(());
+    }
     let sources = gpu.appearance_sources();
     if let Some(job) = avatar.appearance.tick(dt, &sources) {
         gpu.enqueue_patch(job);
@@ -2311,7 +2364,7 @@ pub fn run(
 
     let mut last_capture = Instant::now() - CAPTURE_INTERVAL;
     let (bx0, by0) = overlay.bubble_pos();
-    let mut placement = crate::placement::Placement::at(bx0, by0);
+    let mut placement = crate::placement::Placement::sized(bx0, by0, crate::placement::OBSERVE_PX);
     let mut place_clock = Instant::now();
     let mut last_avatar;
     let mut avatar_frame: u32 = 1;
@@ -2412,6 +2465,11 @@ pub fn run(
 
     let (projected, projected_bytes) = pipeline.projected_buffer();
     gpu.attach_splats(vk, projected, projected_bytes)?;
+    sync_disc_side(
+        overlay,
+        &mut placement,
+        avatar.as_ref().is_some_and(|a| a.visible),
+    );
     tick_avatar(
         avatar,
         pipeline,
@@ -2423,10 +2481,13 @@ pub fn run(
         &mut projection_checked,
     )?;
     last_avatar = Instant::now();
-    let (bx, by) = overlay.bubble_pos();
-    let (ow, oh) = overlay.output_size();
-    gpu.set_lens_place(bx, by, ow, oh);
-    gpu.draw(vk)?;
+    let extent = overlay.extent();
+    if extent.width == overlay.side() && extent.height == overlay.side() {
+        let (bx, by) = overlay.bubble_pos();
+        let (ow, oh) = overlay.output_size();
+        gpu.set_lens_place(bx, by, ow, oh);
+        gpu.draw(vk)?;
+    }
 
     let wl_fd = overlay.event_queue.as_fd().as_raw_fd();
     loop {
@@ -2512,6 +2573,11 @@ pub fn run(
                 );
             }
         } else {
+            sync_disc_side(
+                overlay,
+                &mut placement,
+                avatar.as_ref().is_some_and(|a| a.visible),
+            );
             if parked {
                 overlay.unpark_at_bubble();
                 parked = false;
@@ -2572,10 +2638,19 @@ pub fn run(
                 )?;
                 last_avatar = Instant::now();
             }
-            if got || avatar_due || last_capture.elapsed() >= CAPTURE_INTERVAL {
+            // A bind or unbind lands inside the tick above. Size follows that,
+            // and the draw below waits until the compositor configures it.
+            sync_disc_side(
+                overlay,
+                &mut placement,
+                avatar.as_ref().is_some_and(|a| a.visible),
+            );
+            let extent = overlay.extent();
+            let sized = extent.width == overlay.side() && extent.height == overlay.side();
+            if sized && (got || avatar_due || last_capture.elapsed() >= CAPTURE_INTERVAL) {
                 let (bx, by) = overlay.bubble_pos();
                 let (ow, oh) = overlay.output_size();
-                gpu.set_heat_disc(bx, by);
+                gpu.set_heat_disc(bx, by, overlay.side() as i32);
                 gpu.set_lens_place(bx, by, ow, oh);
                 gpu.draw(vk)?;
                 if got || last_capture.elapsed() >= CAPTURE_INTERVAL {

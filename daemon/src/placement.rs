@@ -1,11 +1,12 @@
-//! Slide the 330 layer toward a quiet part of the screen.
+//! Slide the layer toward a quiet part of the screen.
 //!
 //! The GPU writes one heat value per cell. [`crate::actors::quietude`] keeps
 //! the area under that field for a short span. This module reads that memory
 //! when deciding to leave, and reads the latest capture once a glide has
 //! started. The score of a spot is the mean heat in a window of one and a
-//! half times the disc's area, centered on the disc, excluding cells the
-//! disc itself covers.
+//! half times the live disc's area, centered on the disc, excluding cells the
+//! disc itself covers. A presence is [`DISC_PX`]; the observing bubble is
+//! [`OBSERVE_PX`].
 //!
 //! At rest another spot has to be 45% under the rectified field. A spike
 //! that does not survive the span does not move the layer, and cooling
@@ -17,12 +18,22 @@
 
 use crate::actors::quietude::QuietudeMemory;
 
-/// Layer edge, in output pixels. Matches `BUBBLE_PX` in the overlay.
+/// Presence layer edge, in output pixels. The seated figure is framed to this.
 pub const DISC_PX: i32 = 330;
-/// Side of the square whose area is one and a half times the disc.
+/// Observing bubble, the earlier disc, while no presence owns the body.
+pub const OBSERVE_PX: i32 = 220;
+/// Side of the square whose area is one and a half times the presence disc.
 /// 330 * sqrt(1.5), rounded. Tight enough that a small calm rectangle
 /// is not averaged together with the text beside it.
 pub const NEIGHBOR_SIDE: i32 = 404;
+
+/// Side of the 1.5-area window for a disc of `disc` pixels.
+/// The seat shader computes the same round(edge * sqrt(1.5)).
+pub fn neighbor_side(disc: i32) -> i32 {
+    let side = (disc as f32 * 1.5f32.sqrt()).round() as i32;
+    // The presence edge stays the named constant. The test checks the formula.
+    if disc == DISC_PX { NEIGHBOR_SIDE } else { side }
+}
 const STABLE_SECS: f32 = 0.4;
 /// How long a better spot has to remain better before a glide changes course.
 /// One capture is noise. This is not the 800 ms departure window.
@@ -49,6 +60,9 @@ pub struct HeatGrid {
     pub heat: Vec<f32>,
     pub mask_a: (i32, i32),
     pub mask_b: (i32, i32),
+    /// Edge of each masked rect. The shader zeroed cells inside these squares.
+    pub disc_a: i32,
+    pub disc_b: i32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -79,10 +93,17 @@ pub struct Placement {
     hold_y: i32,
     hold_secs: f32,
     was_idle: bool,
+    /// Edge of the disc this glide is placing. 330 with a presence, 220 without.
+    disc_px: i32,
 }
 
 impl Placement {
-    pub fn at(x: i32, y: i32) -> Self {
+    #[cfg(test)]
+    fn at(x: i32, y: i32) -> Self {
+        Self::sized(x, y, DISC_PX)
+    }
+
+    pub fn sized(x: i32, y: i32, disc: i32) -> Self {
         let pos = [x as f32, y as f32];
         Self {
             phase: Phase::Settled,
@@ -98,12 +119,41 @@ impl Placement {
             hold_y: y,
             hold_secs: 0.0,
             was_idle: false,
+            disc_px: disc,
         }
     }
 
+    pub fn disc_px(&self) -> i32 {
+        self.disc_px
+    }
+
+    /// Keep the disc's center and adopt a new edge. Clamps onto the output.
+    pub fn adopt_side(&mut self, side: i32, out_w: u32, out_h: u32) -> (i32, i32) {
+        if side != self.disc_px {
+            let shift = (self.disc_px - side) as f32 * 0.5;
+            self.disc_px = side;
+            self.pos[0] += shift;
+            self.pos[1] += shift;
+            self.from[0] += shift;
+            self.from[1] += shift;
+            self.to[0] += shift;
+            self.to[1] += shift;
+            self.pos = clamp_point(self.pos, side, out_w, out_h);
+            self.from = clamp_point(self.from, side, out_w, out_h);
+            self.to = clamp_point(self.to, side, out_w, out_h);
+            eprintln!(
+                "[placement] disc {side}px at {:.0},{:.0}",
+                self.pos[0], self.pos[1]
+            );
+        }
+        self.clamped(out_w, out_h)
+    }
+
     /// Drop a glide and the integral. Used when the layer was parked.
+    /// The live edge stays: parking is not a presence.
     pub fn reset(&mut self, x: i32, y: i32) {
-        *self = Self::at(x, y);
+        let disc = self.disc_px;
+        *self = Self::sized(x, y, disc);
     }
 
     #[cfg(test)]
@@ -169,14 +219,19 @@ impl Placement {
             return;
         }
 
-        let Some(best) = coolest(grid, self.aim(), out_w, out_h) else {
+        let Some(best) = coolest(grid, self.aim(), out_w, out_h, self.disc_px) else {
             return;
         };
-        let (mean, std) = field_stats(grid, out_w, out_h);
+        let (mean, std) = field_stats(grid, out_w, out_h, self.disc_px);
         let cool = cool_enough(best.score, mean, std);
 
-        let aimed = neighborhood_mean(grid, self.to[0].round() as i32, self.to[1].round() as i32)
-            .unwrap_or(f32::MAX);
+        let aimed = neighborhood_mean(
+            grid,
+            self.to[0].round() as i32,
+            self.to[1].round() as i32,
+            self.disc_px,
+        )
+        .unwrap_or(f32::MAX);
         let aimed_cool = cool_enough(aimed, mean, std);
         if aimed_cool {
             self.aim_cool_secs += sample_dt;
@@ -217,11 +272,15 @@ impl Placement {
             return;
         }
         let scored = self.rectified(grid);
-        let Some(best) = coolest(&scored, self.pos, out_w, out_h) else {
+        let Some(best) = coolest(&scored, self.pos, out_w, out_h, self.disc_px) else {
             return;
         };
-        let Some(here) = neighborhood_mean(&scored, self.pos[0].round() as i32, self.pos[1].round() as i32)
-        else {
+        let Some(here) = neighborhood_mean(
+            &scored,
+            self.pos[0].round() as i32,
+            self.pos[1].round() as i32,
+            self.disc_px,
+        ) else {
             return;
         };
         // A thousandth keeps a mean that landed on the deadband, after
@@ -247,6 +306,8 @@ impl Placement {
             heat,
             mask_a: grid.mask_a,
             mask_b: grid.mask_b,
+            disc_a: grid.disc_a,
+            disc_b: grid.disc_b,
         }
     }
 
@@ -303,8 +364,8 @@ impl Placement {
     }
 
     fn clamped(&self, out_w: u32, out_h: u32) -> (i32, i32) {
-        let max_x = out_w.saturating_sub(DISC_PX as u32) as i32;
-        let max_y = out_h.saturating_sub(DISC_PX as u32) as i32;
+        let max_x = out_w.saturating_sub(self.disc_px as u32) as i32;
+        let max_y = out_h.saturating_sub(self.disc_px as u32) as i32;
         (
             (self.pos[0].round() as i32).clamp(0, max_x.max(0)),
             (self.pos[1].round() as i32).clamp(0, max_y.max(0)),
@@ -336,8 +397,8 @@ fn observed_cells(grid: &HeatGrid) -> Vec<bool> {
             let cx = (col as f32 + 0.5) * cell;
             let cy = (row as f32 + 0.5) * cell;
             out[i] = grid.heat[i].is_finite()
-                && !disc_covers(cx, cy, grid.mask_a)
-                && !disc_covers(cx, cy, grid.mask_b);
+                && !disc_covers(cx, cy, grid.mask_a, grid.disc_a)
+                && !disc_covers(cx, cy, grid.mask_b, grid.disc_b);
         }
     }
     out
@@ -359,9 +420,9 @@ fn screen_box(grid: &HeatGrid, out_w: u32, out_h: u32) -> (u32, u32) {
     (grid.screen_w.min(out_w.max(1)), grid.screen_h.min(out_h.max(1)))
 }
 
-fn origins(w: u32, h: u32, step: u32) -> Vec<(i32, i32)> {
-    let max_x = w.saturating_sub(DISC_PX as u32) as i32;
-    let max_y = h.saturating_sub(DISC_PX as u32) as i32;
+fn origins(w: u32, h: u32, step: u32, disc: i32) -> Vec<(i32, i32)> {
+    let max_x = w.saturating_sub(disc as u32) as i32;
+    let max_y = h.saturating_sub(disc as u32) as i32;
     if max_x < 0 || max_y < 0 {
         return Vec::new();
     }
@@ -393,11 +454,11 @@ fn cool_enough(score: f32, mean: f32, std: f32) -> bool {
     score <= mean - COOL_SIGMAS * std
 }
 
-fn field_stats(grid: &HeatGrid, out_w: u32, out_h: u32) -> (f32, f32) {
+fn field_stats(grid: &HeatGrid, out_w: u32, out_h: u32, disc: i32) -> (f32, f32) {
     let (w, h) = screen_box(grid, out_w, out_h);
     let mut vals = Vec::new();
-    for (x, y) in origins(w, h, grid.cell_px) {
-        if let Some(score) = neighborhood_mean(grid, x, y) {
+    for (x, y) in origins(w, h, grid.cell_px, disc) {
+        if let Some(score) = neighborhood_mean(grid, x, y, disc) {
             if score.is_finite() {
                 vals.push(score);
             }
@@ -420,11 +481,11 @@ fn field_stats(grid: &HeatGrid, out_w: u32, out_h: u32) -> (f32, f32) {
     (mean, std)
 }
 
-fn coolest(grid: &HeatGrid, prefer: [f32; 2], out_w: u32, out_h: u32) -> Option<Spot> {
+fn coolest(grid: &HeatGrid, prefer: [f32; 2], out_w: u32, out_h: u32, disc: i32) -> Option<Spot> {
     let (w, h) = screen_box(grid, out_w, out_h);
     let mut best: Option<Spot> = None;
-    for (x, y) in origins(w, h, grid.cell_px) {
-        let Some(score) = neighborhood_mean(grid, x, y) else { continue };
+    for (x, y) in origins(w, h, grid.cell_px, disc) {
+        let Some(score) = neighborhood_mean(grid, x, y, disc) else { continue };
         if !score.is_finite() {
             continue;
         }
@@ -450,14 +511,14 @@ fn dist2(x: i32, y: i32, prefer: [f32; 2]) -> f32 {
 
 /// Mean heat of cells whose centers lie in the twice-area window and not in
 /// either masked disc. `None` when the window has no such cell.
-fn neighborhood_mean(grid: &HeatGrid, x: i32, y: i32) -> Option<f32> {
+fn neighborhood_mean(grid: &HeatGrid, x: i32, y: i32, disc: i32) -> Option<f32> {
     let cell = grid.cell_px.max(1) as i32;
     let expect = (grid.cols as usize).saturating_mul(grid.rows as usize);
     if grid.heat.len() != expect || grid.cols == 0 || grid.rows == 0 {
         return None;
     }
-    let (wx, wy) = window_origin(x, y);
-    let side = NEIGHBOR_SIDE as f32;
+    let (wx, wy) = window_origin(x, y, disc);
+    let side = neighbor_side(disc) as f32;
     let mut sum = 0.0;
     let mut n = 0.0;
     let c0 = ((wx / cell as f32).floor() as i32).clamp(0, grid.cols as i32);
@@ -471,7 +532,9 @@ fn neighborhood_mean(grid: &HeatGrid, x: i32, y: i32) -> Option<f32> {
             if cx < wx || cy < wy || cx >= wx + side || cy >= wy + side {
                 continue;
             }
-            if disc_covers(cx, cy, grid.mask_a) || disc_covers(cx, cy, grid.mask_b) {
+            if disc_covers(cx, cy, grid.mask_a, grid.disc_a)
+                || disc_covers(cx, cy, grid.mask_b, grid.disc_b)
+            {
                 continue;
             }
             let heat = grid.heat[(row as u32 * grid.cols + col as u32) as usize];
@@ -485,17 +548,27 @@ fn neighborhood_mean(grid: &HeatGrid, x: i32, y: i32) -> Option<f32> {
     (n > 0.0).then_some(sum / n)
 }
 
-fn window_origin(x: i32, y: i32) -> (f32, f32) {
-    let cx = x as f32 + DISC_PX as f32 * 0.5;
-    let cy = y as f32 + DISC_PX as f32 * 0.5;
-    (cx - NEIGHBOR_SIDE as f32 * 0.5, cy - NEIGHBOR_SIDE as f32 * 0.5)
+fn window_origin(x: i32, y: i32, disc: i32) -> (f32, f32) {
+    let neighbor = neighbor_side(disc) as f32;
+    let cx = x as f32 + disc as f32 * 0.5;
+    let cy = y as f32 + disc as f32 * 0.5;
+    (cx - neighbor * 0.5, cy - neighbor * 0.5)
 }
 
-fn disc_covers(px: f32, py: f32, origin: (i32, i32)) -> bool {
+fn disc_covers(px: f32, py: f32, origin: (i32, i32), side: i32) -> bool {
     px >= origin.0 as f32
         && py >= origin.1 as f32
-        && px < (origin.0 + DISC_PX) as f32
-        && py < (origin.1 + DISC_PX) as f32
+        && px < (origin.0 + side) as f32
+        && py < (origin.1 + side) as f32
+}
+
+fn clamp_point(p: [f32; 2], disc: i32, out_w: u32, out_h: u32) -> [f32; 2] {
+    let max_x = out_w.saturating_sub(disc.max(0) as u32) as f32;
+    let max_y = out_h.saturating_sub(disc.max(0) as u32) as f32;
+    [
+        p[0].clamp(0.0, max_x.max(0.0)),
+        p[1].clamp(0.0, max_y.max(0.0)),
+    ]
 }
 
 #[cfg(test)]
@@ -514,6 +587,8 @@ mod tests {
             heat: vec![fill; (cols * rows) as usize],
             mask_a: (850, 430),
             mask_b: (850, 430),
+            disc_a: DISC_PX,
+            disc_b: DISC_PX,
         }
     }
 
@@ -541,10 +616,23 @@ mod tests {
 
     #[test]
     fn neighbor_covers_one_and_a_half_times_the_disc() {
-        let side = (DISC_PX as f32 * 1.5f32.sqrt()).round() as i32;
-        assert_eq!(side, NEIGHBOR_SIDE);
+        assert_eq!((DISC_PX as f32 * 1.5f32.sqrt()).round() as i32, NEIGHBOR_SIDE);
+        assert_eq!(neighbor_side(DISC_PX), NEIGHBOR_SIDE);
         let ratio = (NEIGHBOR_SIDE * NEIGHBOR_SIDE) as f32 / (DISC_PX * DISC_PX) as f32;
         assert!((ratio - 1.5).abs() < 0.02, "{ratio}");
+        let observe = neighbor_side(OBSERVE_PX);
+        let observe_ratio = (observe * observe) as f32 / (OBSERVE_PX * OBSERVE_PX) as f32;
+        assert!((observe_ratio - 1.5).abs() < 0.02, "{observe_ratio}");
+    }
+
+    #[test]
+    fn resizing_keeps_the_disc_center() {
+        let mut place = Placement::sized(100, 200, OBSERVE_PX);
+        let (x, y) = place.adopt_side(DISC_PX, 1920, 1080);
+        assert_eq!(x + DISC_PX / 2, 100 + OBSERVE_PX / 2);
+        assert_eq!(y + DISC_PX / 2, 200 + OBSERVE_PX / 2);
+        let (x2, y2) = place.adopt_side(OBSERVE_PX, 1920, 1080);
+        assert_eq!((x2, y2), (100, 200));
     }
 
     #[test]
@@ -564,16 +652,16 @@ mod tests {
             for col in 0..grid.cols {
                 let cx = (col as f32 + 0.5) * 40.0;
                 let cy = (row as f32 + 0.5) * 40.0;
-                if disc_covers(cx, cy, (850, 430)) {
+                if disc_covers(cx, cy, (850, 430), DISC_PX) {
                     grid.heat[(row * grid.cols + col) as usize] = 100.0;
                 }
             }
         }
-        let masked = neighborhood_mean(&grid, 850, 430).unwrap();
+        let masked = neighborhood_mean(&grid, 850, 430, DISC_PX).unwrap();
         assert!(masked < 2.0, "masked ring should stay near the desktop, got {masked}");
         grid.mask_a = (-4000, -4000);
         grid.mask_b = (-4000, -4000);
-        let raw = neighborhood_mean(&grid, 850, 430).unwrap();
+        let raw = neighborhood_mean(&grid, 850, 430, DISC_PX).unwrap();
         assert!(raw > 20.0, "without the mask the disc dominates, got {raw}");
     }
 
@@ -704,15 +792,16 @@ mod tests {
     fn a_close_rival_does_not_restart_the_glide() {
         let mut place = Placement::at(850, 430);
         let mut home = desktop(1.0);
-        paint(&mut home, 0, 0, 10, 10, 0.40);
+        // Under the 0.75 deadband the corner has to be below a quarter of the seat.
+        paint(&mut home, 0, 0, 10, 10, 0.20);
         feed(&mut place, &home, 12, 0.1, false);
         assert!(!place.is_settled(), "the cold corner should have started a glide");
 
-        // 0.36 is not past the deadband under 0.40. One capture of it,
+        // 0.12 is not past the deadband under 0.20. One capture of it,
         // then the original spot again. A spike must not change course.
         let mut rival = desktop(1.0);
-        paint(&mut rival, 0, 0, 10, 10, 0.40);
-        paint(&mut rival, 38, 17, 48, 27, 0.36);
+        paint(&mut rival, 0, 0, 10, 10, 0.20);
+        paint(&mut rival, 38, 17, 48, 27, 0.12);
         place.tick(Some(&rival), 0.1, false, 1920, 1080);
         feed(&mut place, &home, 60, 0.1, false);
         assert!(place.is_settled(), "the original glide should finish and settle");
@@ -724,13 +813,13 @@ mod tests {
     fn a_sustained_better_spot_redirects_without_the_long_wait() {
         let mut place = Placement::at(850, 430);
         let mut home = desktop(1.0);
-        paint(&mut home, 0, 0, 10, 10, 0.50);
+        paint(&mut home, 0, 0, 10, 10, 0.20);
         feed(&mut place, &home, 12, 0.1, false);
         assert!(!place.is_settled());
 
         let mut better = desktop(1.0);
-        paint(&mut better, 0, 0, 10, 10, 0.50);
-        paint(&mut better, 38, 17, 48, 27, 0.20);
+        paint(&mut better, 0, 0, 10, 10, 0.20);
+        paint(&mut better, 38, 17, 48, 27, 0.04);
         // Two tenths is enough to change course. Not another 800 ms.
         let pos = feed(&mut place, &better, 90, 0.1, false);
         assert!(pos.0 > 1000, "should have redirected to the colder corner, at {pos:?}");
@@ -740,7 +829,7 @@ mod tests {
     fn adjacent_winners_do_not_restart_the_glide() {
         let mut home = desktop(1.0);
         paint(&mut home, 0, 0, 16, 16, 0.20);
-        let first = coolest(&home, [850.0, 430.0], 1920, 1080).expect("cold block");
+        let first = coolest(&home, [850.0, 430.0], 1920, 1080, DISC_PX).expect("cold block");
         let mut place = Placement::at(850, 430);
         feed(&mut place, &home, 12, 0.1, false);
         assert!(!place.is_settled());
@@ -766,8 +855,8 @@ mod tests {
                 biased.heat[(row * biased.cols + col) as usize] = v;
             }
         }
-        let winner = coolest(&biased, [first.x as f32, first.y as f32], 1920, 1080).expect("biased");
-        let aimed = neighborhood_mean(&biased, first.x, first.y).expect("aim score");
+        let winner = coolest(&biased, [first.x as f32, first.y as f32], 1920, 1080, DISC_PX).expect("biased");
+        let aimed = neighborhood_mean(&biased, first.x, first.y, DISC_PX).expect("aim score");
         let dx = (winner.x - first.x).abs();
         let dy = (winner.y - first.y).abs();
         assert!(
@@ -792,7 +881,8 @@ mod tests {
     }
 
     fn window_contains(origin_x: i32, origin_y: i32, cx: f32, cy: f32) -> bool {
-        let (wx, wy) = window_origin(origin_x, origin_y);
-        cx >= wx && cy >= wy && cx < wx + NEIGHBOR_SIDE as f32 && cy < wy + NEIGHBOR_SIDE as f32
+        let (wx, wy) = window_origin(origin_x, origin_y, DISC_PX);
+        let side = neighbor_side(DISC_PX) as f32;
+        cx >= wx && cy >= wy && cx < wx + side && cy < wy + side
     }
 }

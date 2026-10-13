@@ -1,7 +1,7 @@
 //! Coarse heat grid from the desktop capture. The picture is sampled on the
 //! GPU. The CPU receives the cell heats only, after the present fence.
 
-use crate::placement::{HeatGrid, DISC_PX};
+use crate::placement::{HeatGrid, OBSERVE_PX};
 use crate::screen_patch::CaptureView;
 use crate::vulkan::VulkanContext;
 use ash::vk;
@@ -63,6 +63,8 @@ struct Written {
     screen_h: u32,
     mask_a: (i32, i32),
     mask_b: (i32, i32),
+    disc_a: i32,
+    disc_b: i32,
 }
 
 pub struct ScreenHeat {
@@ -81,6 +83,8 @@ pub struct ScreenHeat {
     ptr: *mut f32,
     disc: (i32, i32),
     prev_disc: (i32, i32),
+    disc_px: i32,
+    prev_disc_px: i32,
     have_prev: bool,
     cols: u32,
     rows: u32,
@@ -222,6 +226,8 @@ impl ScreenHeat {
             ptr,
             disc: (0, 0),
             prev_disc: (0, 0),
+            disc_px: OBSERVE_PX,
+            prev_disc_px: OBSERVE_PX,
             have_prev: false,
             cols: 0,
             rows: 0,
@@ -233,8 +239,9 @@ impl ScreenHeat {
         })
     }
 
-    pub fn set_disc(&mut self, x: i32, y: i32) {
+    pub fn set_disc(&mut self, x: i32, y: i32, side: i32) {
         self.disc = (x, y);
+        self.disc_px = side.max(1);
     }
 
     /// Copy the grid the previous dispatch wrote. Call after the fence for
@@ -264,6 +271,8 @@ impl ScreenHeat {
             heat,
             mask_a: written.mask_a,
             mask_b: written.mask_b,
+            disc_a: written.disc_a,
+            disc_b: written.disc_b,
         });
     }
 
@@ -299,6 +308,8 @@ impl ScreenHeat {
 
         let mask_a = self.disc;
         let mask_b = if self.have_prev { self.prev_disc } else { self.disc };
+        let side_a = self.disc_px.max(1);
+        let side_b = if self.have_prev { self.prev_disc_px.max(1) } else { side_a };
         let push = HeatPush {
             screen_size: [view.width as f32, view.height as f32],
             cell_size: cell as f32,
@@ -309,8 +320,8 @@ impl ScreenHeat {
             _pad: 0,
             weights0: [W_TEXT, W_SELECT, W_EDGE, W_COLOR],
             weights1: [W_MOTION, W_CHANGING, 0.0, 0.0],
-            mask_a: [mask_a.0 as f32, mask_a.1 as f32, DISC_PX as f32, DISC_PX as f32],
-            mask_b: [mask_b.0 as f32, mask_b.1 as f32, DISC_PX as f32, DISC_PX as f32],
+            mask_a: [mask_a.0 as f32, mask_a.1 as f32, side_a as f32, side_a as f32],
+            mask_b: [mask_b.0 as f32, mask_b.1 as f32, side_b as f32, side_b as f32],
         };
         unsafe {
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.pipeline);
@@ -357,6 +368,7 @@ impl ScreenHeat {
             );
         }
         self.prev_disc = mask_a;
+        self.prev_disc_px = side_a;
         self.have_prev = true;
         self.written = Some(Written {
             cols,
@@ -366,6 +378,8 @@ impl ScreenHeat {
             screen_h: view.height,
             mask_a,
             mask_b,
+            disc_a: side_a,
+            disc_b: side_b,
         });
         Ok(())
     }
