@@ -14,7 +14,11 @@ presence spawn [--context <text>] [--style <hint>] [--artifact <id>]
 
 Stdout is only the presence id, same as today, so `ID=$(presence spawn)` still works.
 
-`presence daemon start` stays the observe path. It brings the daemon up with no presence, and the crystal ball is what you see. `presence presence spawn` stays the socket-only verb: it attaches, and it fails if the daemon is down. It does not grow a second meaning. `presence spawn` is the one that starts the daemon when it has to.
+`presence daemon start` stays the observe path. It brings the daemon up with no presence, and the crystal ball is what you see. `presence presence spawn` stays the socket-only verb: it attaches, and it fails if the daemon is down.
+
+`presence spawn`, `presence speak`, `presence stop`, and `presence retire` already reach that same socket path. The help text used to print those words and then only accept the doubled form, so `presence speak "$ID" "Hello"` opened the menu. A missing id also opened the menu. Both of those now say what was missing, or they send the proposal.
+
+What this task still adds is the start. `presence spawn` does not yet bring the daemon up, and it does not yet hold the ball off the screen. That is the remaining work. The doubled form does not grow a second meaning.
 
 The flags match the socket verb. The CLI still talks to the daemon directly and still bypasses the MCP policy gate. The six MCP tools keep their names. This task does not make `spawnPresence` launch a daemon.
 
