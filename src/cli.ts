@@ -31,13 +31,12 @@ function usage(): never {
       "  daemon start         Start the bundled daemon and wait for its socket",
       "  daemon status        Report whether the daemon socket accepts a connection",
       "  daemon stop          Ask the daemon to shut down",
-      "  presence spawn [--context <text>] [--style <hint>] [--artifact <id>]",
+      "  spawn [--context <text>] [--style <hint>] [--artifact <id>]",
       "                       Spawn a presence (shows the avatar); prints its presenceId",
-      "  presence speak <id> <text>",
-      "                       That presence speaks: local TTS, audio, synced mouth",
-      "  presence stop <id>   Stop that presence's speech; face returns to neutral",
-      "  presence retire <id> End the presence, hide its avatar, free its slot",
-      "  (the above are typed as: presence presence spawn|speak|stop|retire ...)",
+      "  speak <id> <text>    That presence speaks: local TTS, audio, synced mouth",
+      "  stop <id>            Stop that presence's speech; face returns to neutral",
+      "  retire <id>          End the presence, hide its avatar, free its slot",
+      "                       The doubled form still works: presence presence speak <id> <text>",
       "  avatar rest|jaw <0-1>|walk <x> <z>|morph <i> <w>",
       "                       DEBUG controls for the default avatar body, no presence needed",
     ].join("\n"),
@@ -213,7 +212,7 @@ function flag(args: string[], name: string): string | undefined {
   return i >= 0 && i + 1 < args.length ? args[i + 1] : undefined;
 }
 
-/** `presence presence spawn|speak|stop|retire`: presence-scoped control, same names as the MCP tools. */
+/** `presence spawn|speak|stop|retire`, and the doubled `presence presence …` form. */
 async function presenceCommand(args: string[]): Promise<number> {
   const [action, id, ...rest] = args;
   try {
@@ -229,18 +228,27 @@ async function presenceCommand(args: string[]): Promise<number> {
         artifactId: flag(flags, "--artifact") ?? null,
       });
       if (reply.detail?.avatar === false) console.error(`warning: ${String(reply.detail.note ?? "presence has no avatar body")}`);
-      console.log(presenceId); // stdout is only the id: ID=$(presence presence spawn)
+      console.log(presenceId); // stdout is only the id: ID=$(presence spawn)
       return 0;
     }
     if (action === "speak") {
       const text = rest.join(" ").trim();
-      if (!id || !text) usage();
+      if (!id || !text) {
+        console.error("presence speak <id> <text>");
+        return 1;
+      }
       await sendProposal({ kind: "animatePresence", proposalId: "cli-speak", presenceId: id, text });
     } else if (action === "stop") {
-      if (!id) usage();
+      if (!id) {
+        console.error("presence stop <id>");
+        return 1;
+      }
       await sendProposal({ kind: "stopPresence", proposalId: "cli-stop", presenceId: id });
     } else if (action === "retire") {
-      if (!id) usage();
+      if (!id) {
+        console.error("presence retire <id>");
+        return 1;
+      }
       await sendProposal({ kind: "retirePresence", proposalId: "cli-retire", presenceId: id });
     } else {
       usage();
@@ -288,6 +296,12 @@ switch (command) {
     break;
   case "presence":
     process.exit(await presenceCommand(process.argv.slice(3)));
+    break;
+  case "spawn":
+  case "speak":
+  case "stop":
+  case "retire":
+    process.exit(await presenceCommand(process.argv.slice(2)));
     break;
   case "avatar":
     process.exit(await avatarCommand(process.argv.slice(3)));
