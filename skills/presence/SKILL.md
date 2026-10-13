@@ -9,6 +9,8 @@ You have a Presence Layer through six MCP tools. The tools are the whole contrac
 
 **Speak the reply.** Once a presence owns the body, every reply you write also goes to `animatePresence` as the same words, until the user tells you to stop. The written reply stays. Speech is those words, not a summary and not a substitute. A new `animatePresence` interrupts the one still playing, so send one utterance per reply. The same tool cannot be called again for 1.5 seconds. `retirePresence` and `retireArtifact` are not rate-limited.
 
+Assistant text that comes before the tools is spoken too. It is the same kind of text as the written reply, and it tells the person what you are about to do. Speak it, then carry on. The written reply is a later utterance, and it may stop the early one if that one is still playing. Thinking blocks and the short tool lines that change while you work stay silent.
+
 The call returns when the line is accepted. Synthesis and playback continue in the daemon. Do not wait on the log or the duration. A later `animatePresence` stops the line still playing. `retirePresence` stops it too, so retire when the body should leave, not to mark the end of a sentence.
 
 **One body.** The daemon has a single avatar on a single small layer. The first live presence is given that body and is the only one that can speak. A later `spawnPresence` is tracked and returns `avatar: false` until the owner is retired. `animatePresence` errors if that presence has no body. `sourceContext`, `styleHint`, and `artifactId` are recorded. They do not restyle the figure. The body on screen is the daemon's avatar.
