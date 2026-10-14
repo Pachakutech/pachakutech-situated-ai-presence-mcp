@@ -1,9 +1,9 @@
 #version 450
 // One cell of the quietude grid. The desktop image stays on the GPU.
-// A cell whose center lies in either disc rect is the layer itself: its heat
-// is written as 0 and its remembered color is left alone. Samples that fall
-// inside either rect are skipped, so a cell that only overlaps the disc is
-// measured from the desktop part of that cell. A cell that has never been
+// A cell whose center lies in either disc rect, or in a highlight rect, is
+// not the desktop: its heat is written as 0 and its remembered color is left
+// alone. Samples that fall inside a masked rect are skipped, so a cell that
+// only overlaps one is measured from the desktop part of that cell. A cell that has never been
 // sampled stores a negative luma and does not report motion on the frame the
 // layer uncovers it. The glass is not heat, and neither is the first step
 // off a cell we had not measured.
@@ -58,8 +58,20 @@ bool in_rect(vec2 p, vec4 r) {
     return r.z > 1.0 && p.x >= r.x && p.y >= r.y && p.x < r.x + r.z && p.y < r.y + r.w;
 }
 
+// Past the seat cell. The CPU writes x, y, w, h into heat, luma, cb, cr.
+// Width of 1 or less is "no rect", matching in_rect.
+const uint MARK0 = 192u * 108u + 1u;
+
+bool in_mark(vec2 p) {
+    for (uint i = 0u; i < 3u; i++) {
+        Cell m = cells[MARK0 + i];
+        if (in_rect(p, vec4(m.heat, m.luma, m.cb, m.cr))) return true;
+    }
+    return false;
+}
+
 bool in_disc(vec2 p) {
-    return in_rect(p, pc.mask_a) || in_rect(p, pc.mask_b);
+    return in_rect(p, pc.mask_a) || in_rect(p, pc.mask_b) || in_mark(p);
 }
 
 // All-zero is the buffer's initial value, not a measured black cell we can

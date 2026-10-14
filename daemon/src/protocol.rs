@@ -12,7 +12,14 @@ pub enum Proposal {
     HighlightRegion {
         #[serde(rename = "proposalId")]
         proposal_id: String,
+        #[serde(rename = "presenceId")]
+        presence_id: String,
         description: String,
+        /// Full-screen UV. Origin is the top left. `v` grows downward.
+        u: f32,
+        v: f32,
+        w: f32,
+        h: f32,
         #[serde(rename = "durationSeconds")]
         duration_seconds: u32,
     },

@@ -112,11 +112,32 @@ export class DaemonClient implements PresenceDaemon {
     });
   }
 
-  async highlightRegion(description: string, durationSeconds: number): Promise<HighlightResult> {
-    const result = await this.rpc("highlightRegion", { description, durationSeconds });
+  async highlightRegion(
+    presenceId: string,
+    description: string,
+    u: number,
+    v: number,
+    w: number,
+    h: number,
+    durationSeconds: number,
+  ): Promise<HighlightResult> {
+    const result = await this.rpc("highlightRegion", {
+      presenceId,
+      description,
+      u,
+      v,
+      w,
+      h,
+      durationSeconds,
+    });
     const regionId =
       typeof result.detail?.regionId === "string" ? result.detail.regionId : `r-${proposalId()}`;
-    return { regionId, resolvedBounds: null };
+    const raw = result.detail?.resolvedBounds;
+    const resolvedBounds =
+      Array.isArray(raw) && raw.length === 4 && raw.every((n) => typeof n === "number")
+        ? (raw as [number, number, number, number])
+        : null;
+    return { regionId, resolvedBounds };
   }
 
   async spawnPresence(

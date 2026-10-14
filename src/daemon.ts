@@ -10,7 +10,15 @@ export type HighlightResult = {
 };
 
 export interface PresenceDaemon {
-  highlightRegion(description: string, durationSeconds: number): Promise<HighlightResult>;
+  highlightRegion(
+    presenceId: string,
+    description: string,
+    u: number,
+    v: number,
+    w: number,
+    h: number,
+    durationSeconds: number,
+  ): Promise<HighlightResult>;
   spawnPresence(
     presenceId: string,
     sourceContext: string,

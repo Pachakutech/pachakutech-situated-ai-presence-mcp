@@ -4,9 +4,9 @@
 use crate::pipeline::SplatPipeline;
 use crate::protocol::{AvatarCommand, Proposal, ProposalResult};
 use crate::registry::Registry;
-use crate::vulkan::VulkanContext;
 use serde_json::json;
 use std::io::{self, Read, Write};
+use std::time::Instant;
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -59,6 +59,11 @@ impl SocketServer {
         std::mem::take(&mut self.avatar_commands)
     }
 
+    /// UV boxes whose mark should be on screen. The overlay thread calls this.
+    pub fn visible_interests(&self) -> Vec<(String, crate::highlight::UvBox)> {
+        self.registry.lock().expect("registry mutex poisoned").visible_interests(Instant::now())
+    }
+
     pub fn listener_fd(&self) -> RawFd {
         self.listener.as_raw_fd()
     }
@@ -68,7 +73,7 @@ impl SocketServer {
     }
 
     /// `Ok(true)` means a client asked the process to exit after its reply was written.
-    pub fn pump(&mut self, vk: &VulkanContext, pipeline: &SplatPipeline) -> io::Result<bool> {
+    pub fn pump(&mut self, pipeline: &SplatPipeline) -> io::Result<bool> {
         loop {
             match self.listener.accept() {
                 Ok((stream, _)) => {
@@ -82,7 +87,7 @@ impl SocketServer {
 
         let mut i = 0;
         while i < self.clients.len() {
-            match read_client(&mut self.clients[i], vk, pipeline, &self.registry, &mut self.avatar_commands) {
+            match read_client(&mut self.clients[i], pipeline, &self.registry, &mut self.avatar_commands) {
                 Ok(ClientRead::Keep) => i += 1,
                 Ok(ClientRead::Closed) | Err(_) => {
                     self.clients.remove(i);
@@ -133,7 +138,6 @@ impl Drop for PidFile {
 /// Keep the client, drop it, or leave the overlay loop after the reply is flushed.
 fn read_client(
     client: &mut Client,
-    vk: &VulkanContext,
     pipeline: &SplatPipeline,
     registry: &Mutex<Registry>,
     avatar_commands: &mut Vec<AvatarCommand>,
@@ -156,7 +160,7 @@ fn read_client(
             continue;
         }
         let (result, stop) = match serde_json::from_str::<Proposal>(line) {
-            Ok(proposal) => dispatch(proposal, vk, pipeline, registry, avatar_commands),
+            Ok(proposal) => dispatch(proposal, pipeline, registry, avatar_commands),
             Err(e) => {
                 eprintln!("[socket] malformed proposal: {e}");
                 (ProposalResult::err("unknown", format!("malformed proposal: {e}")), false)
@@ -183,7 +187,6 @@ fn read_client(
 /// Second value is true when the overlay loop should exit after this reply.
 fn dispatch(
     proposal: Proposal,
-    vk: &VulkanContext,
     pipeline: &SplatPipeline,
     registry: &Mutex<Registry>,
     avatar_commands: &mut Vec<AvatarCommand>,
@@ -230,9 +233,24 @@ fn dispatch(
     }
 
     let result = match proposal {
-        Proposal::HighlightRegion { description, duration_seconds, .. } => {
-            reg.highlight_region(vk, &description, duration_seconds);
-            ProposalResult::ok(&proposal_id, Some(json!({ "regionId": format!("r-{proposal_id}") })))
+        Proposal::HighlightRegion { presence_id, description, u, v, w, h, duration_seconds, .. } => {
+            match reg.declare_interest(
+                &presence_id,
+                &description,
+                crate::highlight::UvBox { u, v, w, h },
+                duration_seconds,
+                Instant::now(),
+            ) {
+                Ok((box_, secs)) => ProposalResult::ok(
+                    &proposal_id,
+                    Some(json!({
+                        "regionId": format!("r-{proposal_id}"),
+                        "resolvedBounds": [box_.u, box_.v, box_.w, box_.h],
+                        "durationSeconds": secs,
+                    })),
+                ),
+                Err(e) => ProposalResult::err(&proposal_id, e),
+            }
         }
         Proposal::AddArtifact { artifact_id, description, source_uri, .. } => {
             reg.add_artifact(&artifact_id, &description, source_uri.as_deref(), pipeline);
@@ -379,6 +397,47 @@ mod tests {
         assert_eq!(run(&mut reg, &mut cmds, r#"{"kind":"stopPresence","proposalId":"s","presenceId":"ghost"}"#).status, "error");
         assert_eq!(run(&mut reg, &mut cmds, r#"{"kind":"retirePresence","proposalId":"r","presenceId":"p-a"}"#).status, "ok");
         assert_eq!(run(&mut reg, &mut cmds, r#"{"kind":"retirePresence","proposalId":"r2","presenceId":"p-a"}"#).status, "error");
+    }
+
+    #[test]
+    fn highlight_json_carries_the_uv_box() {
+        let proposal = p(
+            r#"{"kind":"highlightRegion","proposalId":"9","presenceId":"p-a","description":"the banner","u":0.1,"v":0.2,"w":0.3,"h":0.4,"durationSeconds":12}"#,
+        );
+        match proposal {
+            Proposal::HighlightRegion { presence_id, description, u, v, w, h, duration_seconds, .. } => {
+                assert_eq!(presence_id, "p-a");
+                assert_eq!(description, "the banner");
+                assert_eq!((u, v, w, h), (0.1, 0.2, 0.3, 0.4));
+                assert_eq!(duration_seconds, 12);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_highlight_needs_a_live_presence_and_retire_drops_the_box() {
+        use crate::highlight::UvBox;
+        use std::time::Instant;
+        let mut reg = Registry::new();
+        let now = Instant::now();
+        let raw = UvBox { u: 0.1, v: 0.2, w: 0.3, h: 0.4 };
+        let err = reg.declare_interest("p-a", "banner", raw, 5, now).unwrap_err();
+        assert!(err.contains("no live presence with id p-a"), "{err}");
+        let mut cmds = vec![];
+        run(&mut reg, &mut cmds, &spawn("p-a"));
+        assert!(!reg.has_avatar("p-a"));
+        let (got, secs) = reg.declare_interest("p-a", "banner", raw, 90, now).unwrap();
+        assert_eq!(secs, 60);
+        assert_eq!(got, raw);
+        assert_eq!(reg.visible_interests(now).len(), 1);
+        assert_eq!(reg.interest("p-a"), Some(raw));
+        assert_eq!(
+            run(&mut reg, &mut cmds, r#"{"kind":"retirePresence","proposalId":"r","presenceId":"p-a"}"#).status,
+            "ok"
+        );
+        assert_eq!(reg.interest("p-a"), None);
+        assert!(reg.visible_interests(now).is_empty());
     }
 
     #[test]
