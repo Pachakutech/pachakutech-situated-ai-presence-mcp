@@ -31,9 +31,19 @@ layout(push_constant) uniform PC {
 
 // Past the last real cell. 192*108, matching MAX_CELLS in screen_heat.rs.
 const uint SEAT = 192u * 108u;
+// Three highlight rects. Same packing as screen_heat.comp.
+const uint MARK0 = SEAT + 1u;
 
 bool in_rect(vec2 p, vec4 r) {
     return r.z > 1.0 && p.x >= r.x && p.y >= r.y && p.x < r.x + r.z && p.y < r.y + r.w;
+}
+
+bool in_mark(vec2 p) {
+    for (uint i = 0u; i < 3u; i++) {
+        Cell m = cells[MARK0 + i];
+        if (in_rect(p, vec4(m.heat, m.luma, m.cb, m.cr))) return true;
+    }
+    return false;
 }
 
 void main() {
@@ -49,7 +59,7 @@ void main() {
             if (c.x < origin.x || c.y < origin.y || c.x >= origin.x + neighbor || c.y >= origin.y + neighbor) {
                 continue;
             }
-            if (in_rect(c, pc.mask_a) || in_rect(c, pc.mask_b)) {
+            if (in_rect(c, pc.mask_a) || in_rect(c, pc.mask_b) || in_mark(c)) {
                 continue;
             }
             sum += cells[row * pc.cols + col].heat;

@@ -34,6 +34,8 @@ function usage(): never {
       "  spawn [--context <text>] [--style <hint>] [--artifact <id>]",
       "                       Spawn a presence (shows the avatar); prints its presenceId",
       "  speak <id> <text>    That presence speaks: local TTS, audio, synced mouth",
+      "  highlight <id> <u> <v> <w> <h> [seconds]",
+      "                       Tint that UV box (top-left, v down, 0..1). Default 5s, max 60",
       "  stop <id>            Stop that presence's speech; face returns to neutral",
       "  retire <id>          End the presence, hide its avatar, free its slot",
       "                       The doubled form still works: presence presence speak <id> <text>",
@@ -212,7 +214,7 @@ function flag(args: string[], name: string): string | undefined {
   return i >= 0 && i + 1 < args.length ? args[i + 1] : undefined;
 }
 
-/** `presence spawn|speak|stop|retire`, and the doubled `presence presence …` form. */
+/** `presence spawn|speak|highlight|stop|retire`, and the doubled `presence presence …` form. */
 async function presenceCommand(args: string[]): Promise<number> {
   const [action, id, ...rest] = args;
   try {
@@ -229,6 +231,31 @@ async function presenceCommand(args: string[]): Promise<number> {
       });
       if (reply.detail?.avatar === false) console.error(`warning: ${String(reply.detail.note ?? "presence has no avatar body")}`);
       console.log(presenceId); // stdout is only the id: ID=$(presence spawn)
+      return 0;
+    }
+    if (action === "highlight") {
+      const [us, vs, ws, hs, sec] = rest;
+      const u = Number(us);
+      const v = Number(vs);
+      const w = Number(ws);
+      const h = Number(hs);
+      const durationSeconds = sec === undefined ? 5 : Number(sec);
+      if (!id || [u, v, w, h, durationSeconds].some((n) => !Number.isFinite(n)) || durationSeconds < 0) {
+        console.error("presence highlight <id> <u> <v> <w> <h> [seconds]");
+        return 1;
+      }
+      const reply = await sendProposal({
+        kind: "highlightRegion",
+        proposalId: "cli-highlight",
+        presenceId: id,
+        description: "",
+        u,
+        v,
+        w,
+        h,
+        durationSeconds: Math.round(durationSeconds),
+      });
+      console.log(JSON.stringify(reply.detail ?? {}));
       return 0;
     }
     if (action === "speak") {
@@ -299,6 +326,7 @@ switch (command) {
     break;
   case "spawn":
   case "speak":
+  case "highlight":
   case "stop":
   case "retire":
     process.exit(await presenceCommand(process.argv.slice(2)));

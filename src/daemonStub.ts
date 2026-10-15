@@ -33,11 +33,35 @@ function notify(title: string, body: string) {
 }
 
 export const daemonStub: PresenceDaemon = {
-  async highlightRegion(description: string, durationSeconds: number): Promise<HighlightResult> {
+  async highlightRegion(
+    presenceId: string,
+    description: string,
+    u: number,
+    v: number,
+    w: number,
+    h: number,
+    durationSeconds: number,
+  ): Promise<HighlightResult> {
     const regionId = `r-${Math.random().toString(36).slice(2, 8)}`;
-    record({ kind: "highlightRegion", description, durationSeconds, regionId });
+    const uu = Math.min(1, Math.max(0, u));
+    const vv = Math.min(1, Math.max(0, v));
+    const ww = Math.max(0, Math.min(w, 1 - uu));
+    const hh = Math.max(0, Math.min(h, 1 - vv));
+    const resolvedBounds: [number, number, number, number] = [uu, vv, ww, hh];
+    record({
+      kind: "highlightRegion",
+      presenceId,
+      description,
+      u,
+      v,
+      w,
+      h,
+      durationSeconds,
+      regionId,
+      resolvedBounds,
+    });
     notify("Presence: highlight", `${description} (${durationSeconds}s)`);
-    return { regionId, resolvedBounds: null };
+    return { regionId, resolvedBounds };
   },
 
   async spawnPresence(presenceId: string, sourceContext: string, styleHint?: string, artifactId?: string) {

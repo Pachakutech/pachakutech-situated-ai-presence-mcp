@@ -13,11 +13,16 @@
 //!   1080p RGBA is ~8MiB overwritten in place — the OOM was new shm +
 //!   60fps fullscreen *present*, not "the GPU cannot sample 1080p".
 //!
+//! A highlight is not this surface. While a box is visible, `sync_marks`
+//! adds one small layer-shell surface on the Top layer, under this Overlay
+//! disc, and removes it when the mark fades. The disc extent stays the disc.
+//!
 //! **Always starts on SHM.** The GPU feed switches to dmabuf only when the
 //! capture thread confirms the first dmabuf frame — so a failed dmabuf path
 //! (no `zwp_linux_dmabuf_v1`, no GBM, etc.) never causes a black screen.
 
 use crate::actors::ingress::screen_dmabuf::DmabufScreenSource;
+use crate::highlight::{paint_mark, to_pixels, UvBox};
 use crate::actors::ingress::screen_wlr::WlrScreenSource;
 use crate::actors::ingress::webcam_dmabuf::{self, WebcamMsg, WEBCAM_YIELD_ACK};
 use crate::actors::ingress::{DmabufFrame, DmabufPlane, FrameSource, IngressFrame, DRM_FORMAT_RG88};
@@ -57,6 +62,8 @@ const OVERLAY_FRAG_SPV: &[u8] =
 const OBSERVE_PX: u32 = crate::placement::OBSERVE_PX as u32;
 /// Capture/present ceiling. The OOM was a 16ms fullscreen copy+present spin.
 const CAPTURE_INTERVAL: Duration = Duration::from_millis(100);
+/// Highlight repaint. Same ceiling: a mark is not a 60 fps present.
+const MARK_INTERVAL: Duration = Duration::from_millis(100);
 /// Avatar deform → project. Independent of the 10 fps capture.
 const AVATAR_TICK: Duration = Duration::from_millis(33);
 /// Observed, not acted on. Mere idle does not park the layer. The screensaver,
@@ -72,12 +79,14 @@ pub struct Overlay {
     /// Only used by the SHM fallback path.
     cap_fd: Option<std::os::fd::OwnedFd>,
     cap_fd_size: usize,
-    /// Top-left of the disc in output pixels. Quiescence / highlight actors
-    /// will write this; `set_bubble_pos` is the whole present API.
+    /// Top-left of the disc in output pixels. Placement writes this.
     bubble_x: i32,
     bubble_y: i32,
     /// Live edge. 220 while the bubble is up, 330 while a presence owns the body.
     side: u32,
+    born: Instant,
+    mark_seq: u32,
+    mark_error_logged: bool,
 }
 
 pub struct OverlayState {
@@ -104,6 +113,71 @@ pub struct OverlayState {
     configured: bool,
     closed: bool,
     dirty: bool,
+    /// Highlight layers. Their configure must not write `width` or `dirty`.
+    marks: Vec<Mark>,
+}
+
+/// One ephemeral highlight. The layer is Top, under the Overlay disc.
+/// `key` is the Wayland user data, so a configure here is not the disc's.
+struct Mark {
+    id: String,
+    key: String,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    surface: Option<wl_surface::WlSurface>,
+    layer: Option<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1>,
+    pool: Option<wl_shm_pool::WlShmPool>,
+    buffer: Option<wl_buffer::WlBuffer>,
+    map: Option<ShmMap>,
+    fd: Option<OwnedFd>,
+    stride: i32,
+    configured: bool,
+    configured_w: u32,
+    configured_h: u32,
+    buf_w: i32,
+    buf_h: i32,
+    free: bool,
+    last_paint: Option<Instant>,
+    dying: bool,
+}
+
+/// Writable MAP_SHARED view of a mark's memfd. The overlay thread is the only writer.
+struct ShmMap {
+    ptr: *mut libc::c_void,
+    len: usize,
+}
+
+impl ShmMap {
+    fn writable(fd: &OwnedFd, len: usize) -> Result<Self, String> {
+        let ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                fd.as_raw_fd(),
+                0,
+            )
+        };
+        if ptr == libc::MAP_FAILED {
+            return Err(format!("highlight mmap failed: {}", std::io::Error::last_os_error()));
+        }
+        Ok(Self { ptr, len })
+    }
+
+    fn bytes(&mut self) -> &mut [u8] {
+        unsafe { std::slice::from_raw_parts_mut(self.ptr.cast::<u8>(), self.len) }
+    }
+}
+
+impl Drop for ShmMap {
+    fn drop(&mut self) {
+        unsafe {
+            libc::munmap(self.ptr, self.len);
+        }
+    }
 }
 
 impl Overlay {
@@ -139,6 +213,7 @@ impl Overlay {
             configured: false,
             closed: false,
             dirty: false,
+            marks: Vec::new(),
         };
         event_queue
             .roundtrip(&mut state)
@@ -229,6 +304,9 @@ impl Overlay {
             bubble_x: bx,
             bubble_y: by,
             side: OBSERVE_PX,
+            born: Instant::now(),
+            mark_seq: 0,
+            mark_error_logged: false,
         })
     }
 
@@ -441,6 +519,267 @@ impl Overlay {
             .map_err(|e| format!("wayland dispatch: {e}"))?;
         Ok(())
     }
+
+    /// Show one Top-layer surface per visible box. An empty list removes them.
+    /// Returns the pixel rects (up to three) for the heat mask. Width of 0 is none.
+    /// `in_rect` ignores a width of 1 or less, so a 1px box is masked as 2.
+    fn sync_marks(&mut self, boxes: &[(String, UvBox)]) -> [[f32; 4]; 3] {
+        let (sw, sh) = (self.state.output_width, self.state.output_height);
+        let desired: Vec<(String, i32, i32, i32, i32)> = boxes
+            .iter()
+            .take(3)
+            .map(|(id, box_)| {
+                let (x, y, w, h) = to_pixels(*box_, sw, sh);
+                (id.clone(), x, y, w, h)
+            })
+            .collect();
+
+        let mut kill = Vec::new();
+        let mut move_to = Vec::new();
+        for (i, mark) in self.state.marks.iter().enumerate() {
+            if mark.dying {
+                continue;
+            }
+            match desired.iter().find(|(id, _, _, w, h)| *id == mark.id && *w == mark.w && *h == mark.h) {
+                Some((_, x, y, _, _)) => {
+                    if *x != mark.x || *y != mark.y {
+                        move_to.push((i, *x, *y));
+                    }
+                }
+                None => kill.push(i),
+            }
+        }
+        for (i, x, y) in move_to {
+            let mark = &mut self.state.marks[i];
+            mark.x = x;
+            mark.y = y;
+            if let (Some(layer), Some(surface)) = (&mark.layer, &mark.surface) {
+                layer.set_margin(y, 0, 0, x);
+                surface.commit();
+            }
+        }
+        for i in kill {
+            let mark = &mut self.state.marks[i];
+            eprintln!("[highlight] {} down", mark.id);
+            mark.dying = true;
+            if let Some(layer) = mark.layer.take() {
+                layer.destroy();
+            }
+            if let Some(surface) = mark.surface.take() {
+                surface.destroy();
+            }
+        }
+        for (id, x, y, w, h) in &desired {
+            let exists = self
+                .state
+                .marks
+                .iter()
+                .any(|m| m.id == *id && !m.dying && m.w == *w && m.h == *h);
+            if exists {
+                continue;
+            }
+            if let Err(e) = self.spawn_mark(id, *x, *y, *w, *h) {
+                if !self.mark_error_logged {
+                    eprintln!("[highlight] {e}");
+                    self.mark_error_logged = true;
+                }
+            }
+        }
+
+        let waiting = self
+            .state
+            .marks
+            .iter()
+            .any(|m| !m.dying && m.surface.is_some() && !m.configured);
+        if waiting {
+            if let Err(e) = self.event_queue.roundtrip(&mut self.state) {
+                eprintln!("[highlight] configure: {e}");
+            }
+        }
+        self.paint_marks();
+        self.sweep_marks();
+
+        let mut rects = [[0.0f32; 4]; 3];
+        for (i, (_, x, y, w, h)) in desired.iter().enumerate() {
+            let rw = if *w <= 1 { 2.0 } else { *w as f32 };
+            let rh = if *h <= 1 { 2.0 } else { *h as f32 };
+            rects[i] = [*x as f32, *y as f32, rw, rh];
+        }
+        rects
+    }
+
+    fn spawn_mark(&mut self, id: &str, x: i32, y: i32, w: i32, h: i32) -> Result<(), String> {
+        let compositor = self.state.compositor.clone().ok_or("highlight: no wl_compositor")?;
+        let shell = self.state.layer_shell.clone().ok_or("highlight: no layer shell")?;
+        let output = self.state.output.clone();
+        let qh = self.event_queue.handle();
+        self.mark_seq = self.mark_seq.wrapping_add(1);
+        let key = format!("{id}:{}", self.mark_seq);
+        let surface = compositor.create_surface(&qh, ());
+        let region = compositor.create_region(&qh, ());
+        surface.set_input_region(Some(&region));
+        surface.set_opaque_region(Some(&region));
+        region.destroy();
+        let layer = shell.get_layer_surface(
+            &surface,
+            output.as_ref(),
+            zwlr_layer_shell_v1::Layer::Top,
+            format!("pachakutech-mark-{id}"),
+            &qh,
+            key.clone(),
+        );
+        layer.set_anchor(zwlr_layer_surface_v1::Anchor::Top | zwlr_layer_surface_v1::Anchor::Left);
+        layer.set_exclusive_zone(-1);
+        layer.set_keyboard_interactivity(zwlr_layer_surface_v1::KeyboardInteractivity::None);
+        layer.set_size(w.max(1) as u32, h.max(1) as u32);
+        layer.set_margin(y, 0, 0, x);
+        surface.commit();
+        self.state.marks.push(Mark {
+            id: id.to_string(),
+            key,
+            x,
+            y,
+            w,
+            h,
+            surface: Some(surface),
+            layer: Some(layer),
+            pool: None,
+            buffer: None,
+            map: None,
+            fd: None,
+            stride: 0,
+            configured: false,
+            configured_w: 0,
+            configured_h: 0,
+            buf_w: 0,
+            buf_h: 0,
+            free: true,
+            last_paint: None,
+            dying: false,
+        });
+        eprintln!("[highlight] {id} {w}x{h} at {x},{y}");
+        Ok(())
+    }
+
+    fn paint_marks(&mut self) {
+        let phase = self.born.elapsed().as_secs_f32();
+        let qh = self.event_queue.handle();
+        let Some(shm) = self.state.shm.clone() else {
+            return;
+        };
+        let n = self.state.marks.len();
+        for i in 0..n {
+            let (bw, bh, key, reuse) = {
+                let mark = &self.state.marks[i];
+                if mark.dying || !mark.configured {
+                    continue;
+                }
+                let due = mark.last_paint.map(|t| t.elapsed() >= MARK_INTERVAL).unwrap_or(true);
+                if !due {
+                    continue;
+                }
+                if mark.buffer.is_some() && !mark.free {
+                    continue;
+                }
+                let bw = if mark.configured_w > 0 { mark.configured_w as i32 } else { mark.w.max(1) };
+                let bh = if mark.configured_h > 0 { mark.configured_h as i32 } else { mark.h.max(1) };
+                let reuse = mark.buffer.is_some() && mark.buf_w == bw && mark.buf_h == bh;
+                (bw, bh, mark.key.clone(), reuse)
+            };
+            if !reuse {
+                release_mark_buffer(&mut self.state.marks[i]);
+                if let Err(e) = self.alloc_mark_buffer(i, bw, bh, &shm, &qh, &key) {
+                    if !self.mark_error_logged {
+                        eprintln!("[highlight] {e}");
+                        self.mark_error_logged = true;
+                    }
+                    continue;
+                }
+            }
+            self.blit_mark(i, bw, bh, phase);
+        }
+    }
+
+    fn alloc_mark_buffer(
+        &mut self,
+        i: usize,
+        bw: i32,
+        bh: i32,
+        shm: &wl_shm::WlShm,
+        qh: &QueueHandle<OverlayState>,
+        key: &str,
+    ) -> Result<(), String> {
+        let stride = bw.saturating_mul(4);
+        let size = stride.saturating_mul(bh);
+        if size <= 0 {
+            return Err("highlight buffer is empty".into());
+        }
+        let fd = crate::actors::ingress::screen_wlr::create_anonymous_shm(size as usize)?;
+        let pool = shm.create_pool(fd.as_fd(), size, qh, ());
+        let buffer = pool.create_buffer(0, bw, bh, stride, wl_shm::Format::Argb8888, qh, key.to_string());
+        let map = ShmMap::writable(&fd, size as usize)?;
+        let mark = &mut self.state.marks[i];
+        mark.pool = Some(pool);
+        mark.buffer = Some(buffer);
+        mark.map = Some(map);
+        mark.fd = Some(fd);
+        mark.stride = stride;
+        mark.buf_w = bw;
+        mark.buf_h = bh;
+        mark.free = true;
+        Ok(())
+    }
+
+    fn blit_mark(&mut self, i: usize, bw: i32, bh: i32, phase: f32) {
+        {
+            let mark = &mut self.state.marks[i];
+            let Some(map) = mark.map.as_mut() else { return };
+            paint_mark(map.bytes(), bw, bh, mark.stride, phase);
+        }
+        {
+            let mark = &self.state.marks[i];
+            let (Some(buffer), Some(surface)) = (mark.buffer.as_ref(), mark.surface.as_ref()) else {
+                return;
+            };
+            surface.attach(Some(buffer), 0, 0);
+            surface.damage_buffer(0, 0, bw, bh);
+            surface.commit();
+        }
+        let mark = &mut self.state.marks[i];
+        mark.free = false;
+        mark.last_paint = Some(Instant::now());
+    }
+
+    fn sweep_marks(&mut self) {
+        let mut i = 0;
+        while i < self.state.marks.len() {
+            if self.state.marks[i].dying && self.state.marks[i].free {
+                release_mark_buffer(&mut self.state.marks[i]);
+                let mark = &mut self.state.marks[i];
+                if let Some(layer) = mark.layer.take() {
+                    layer.destroy();
+                }
+                if let Some(surface) = mark.surface.take() {
+                    surface.destroy();
+                }
+                self.state.marks.remove(i);
+            } else {
+                i += 1;
+            }
+        }
+    }
+}
+
+fn release_mark_buffer(mark: &mut Mark) {
+    if let Some(buffer) = mark.buffer.take() {
+        buffer.destroy();
+    }
+    if let Some(pool) = mark.pool.take() {
+        pool.destroy();
+    }
+    mark.map = None;
+    mark.fd = None;
+    mark.free = true;
 }
 
 impl Dispatch<wl_registry::WlRegistry, ()> for OverlayState {
@@ -493,17 +832,22 @@ impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, ()> for OverlayState {
         match event {
             zwlr_layer_surface_v1::Event::Configure { serial, width, height } => {
                 layer_surface.ack_configure(serial);
-                if width > 0 {
-                    state.width = width;
+                // Marks use their own user data. Only the disc resizes the swapchain.
+                if state.layer_surface.as_ref().is_some_and(|s| s == layer_surface) {
+                    if width > 0 {
+                        state.width = width;
+                    }
+                    if height > 0 {
+                        state.height = height;
+                    }
+                    state.configured = true;
+                    state.dirty = true;
                 }
-                if height > 0 {
-                    state.height = height;
-                }
-                state.configured = true;
-                state.dirty = true;
             }
             zwlr_layer_surface_v1::Event::Closed => {
-                state.closed = true;
+                if state.layer_surface.as_ref().is_some_and(|s| s == layer_surface) {
+                    state.closed = true;
+                }
             }
             _ => {}
         }
@@ -592,6 +936,53 @@ wayland_client::delegate_noop!(OverlayState: ignore ext_idle_notifier_v1::ExtIdl
 wayland_client::delegate_noop!(OverlayState: ignore wl_shm::WlShm);
 wayland_client::delegate_noop!(OverlayState: ignore wl_shm_pool::WlShmPool);
 wayland_client::delegate_noop!(OverlayState: ignore wl_buffer::WlBuffer);
+
+impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, String> for OverlayState {
+    fn event(
+        state: &mut Self,
+        layer_surface: &zwlr_layer_surface_v1::ZwlrLayerSurfaceV1,
+        event: zwlr_layer_surface_v1::Event,
+        data: &String,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        let Some(mark) = state.marks.iter_mut().find(|m| m.key == *data) else {
+            if let zwlr_layer_surface_v1::Event::Configure { serial, .. } = event {
+                layer_surface.ack_configure(serial);
+            }
+            return;
+        };
+        match event {
+            zwlr_layer_surface_v1::Event::Configure { serial, width, height } => {
+                layer_surface.ack_configure(serial);
+                mark.configured_w = width;
+                mark.configured_h = height;
+                mark.configured = true;
+            }
+            zwlr_layer_surface_v1::Event::Closed => {
+                mark.dying = true;
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<wl_buffer::WlBuffer, String> for OverlayState {
+    fn event(
+        state: &mut Self,
+        _proxy: &wl_buffer::WlBuffer,
+        event: wl_buffer::Event,
+        data: &String,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        if let wl_buffer::Event::Release = event {
+            if let Some(mark) = state.marks.iter_mut().find(|m| m.key == *data) {
+                mark.free = true;
+            }
+        }
+    }
+}
 wayland_client::delegate_noop!(OverlayState: ignore zwlr_layer_shell_v1::ZwlrLayerShellV1);
 wayland_client::delegate_noop!(OverlayState: ignore zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1);
 
@@ -1107,6 +1498,10 @@ impl OverlayGpu {
     /// Disc top-left the next heat dispatch should treat as the layer.
     pub fn set_heat_disc(&mut self, x: i32, y: i32, side: i32) {
         self.heat.set_disc(x, y, side);
+    }
+
+    pub fn set_heat_marks(&mut self, marks: [[f32; 4]; 3]) {
+        self.heat.set_marks(marks);
     }
 
     pub fn take_heat_grid(&mut self) -> Option<crate::placement::HeatGrid> {
@@ -2503,7 +2898,7 @@ pub fn run(
             }
         }
 
-        if server.pump(vk, pipeline).map_err(|e| format!("socket pump: {e}"))? {
+        if server.pump(pipeline).map_err(|e| format!("socket pump: {e}"))? {
             println!("[socket] shutdown requested");
             capture_enabled.store(false, Ordering::Relaxed);
             {
@@ -2523,6 +2918,15 @@ pub fn run(
             locked.load(Ordering::Relaxed) || screensaver.load(Ordering::Relaxed),
             sleeping.load(Ordering::Relaxed),
         );
+        let mark_rects = if hide {
+            overlay.sync_marks(&[])
+        } else {
+            let boxes = server.visible_interests();
+            overlay.sync_marks(&boxes)
+        };
+        if !hide {
+            gpu.set_heat_marks(mark_rects);
+        }
 
         // --- Session ingress power policy (L1 + L2 + L3) ---
         // Edge-triggered: only act on hide transitions, not steady-state.

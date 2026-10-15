@@ -11,7 +11,7 @@ the Eros for LLM/AI Logos to learn by.
 
 | Tool | Pattern | Does |
 |---|---|---|
-| `manifestHighlight` | ephemeral | Highlights described on-screen content for N seconds |
+| `manifestHighlight` | ephemeral | Tints a full-screen UV box for a live presence. The mark fades; the box stays until replace or retire |
 | `spawnPresence` | instanced (1/3) | Spawns a persistent audio-visual presence derived from context (optionally from a held artifact), returns a `presenceId` |
 | `animatePresence` | instanced (2/3) | Feeds new content to a spawned presence |
 | `retirePresence` | instanced (3/3) | Ends a presence and frees its slot |

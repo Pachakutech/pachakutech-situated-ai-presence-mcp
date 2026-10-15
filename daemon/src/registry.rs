@@ -4,9 +4,10 @@
 
 use crate::actors::gpu_layout::to_gpu_splat;
 use crate::actors::{ControlActor, PresenceActor, SceneMemory};
+use crate::highlight::{InterestBook, UvBox, MAX_SECS};
 use crate::pipeline::{SplatPipeline, INACTIVE_SPLAT};
-use crate::vulkan::VulkanContext;
 use std::collections::HashMap;
+use std::time::Instant;
 
 struct GpuRange {
     start: u32,
@@ -25,6 +26,8 @@ pub struct Registry {
     avatar_available: bool,
     /// The single avatar body belongs to at most one presence at a time.
     avatar_owner: Option<String>,
+    /// One screen box per presence. The mark fades; the box stays until retire.
+    interests: InterestBook,
 }
 
 impl Registry {
@@ -39,17 +42,40 @@ impl Registry {
             gpu_ranges: HashMap::new(),
             avatar_available: false,
             avatar_owner: None,
+            interests: InterestBook::new(),
         }
     }
 
-    pub fn highlight_region(&self, vk: &VulkanContext, description: &str, duration_secs: u32) {
-        // TODO: resolve `description` against a captured frame and draw a
-        // wlr-layer-shell overlay. For now, this just proves the daemon
-        // received the proposal and has a live GPU to eventually draw with.
+    /// The presence must already be in the daemon map. It does not need the body.
+    /// `secs` is clamped to 1..=60. The returned box is the one that will be drawn.
+    pub fn declare_interest(
+        &mut self,
+        presence_id: &str,
+        description: &str,
+        raw: UvBox,
+        secs: u32,
+        now: Instant,
+    ) -> Result<(UvBox, u32), String> {
+        if !self.has_presence(presence_id) {
+            return Err(format!("no live presence with id {presence_id}"));
+        }
+        let secs = secs.clamp(1, MAX_SECS);
+        let got = self.interests.declare(presence_id, raw, secs, now)?;
         println!(
-            "[registry] highlightRegion on {}: \"{description}\" for {duration_secs}s",
-            vk.device_name
+            "[registry] highlight {presence_id} uv {:.3},{:.3} {:.3}x{:.3} for {secs}s — {description}",
+            got.u, got.v, got.w, got.h
         );
+        Ok((got, secs))
+    }
+
+    /// Still the declared box after the mark has faded. Gesture sampling reads this.
+    #[allow(dead_code)]
+    pub fn interest(&self, presence_id: &str) -> Option<UvBox> {
+        self.interests.get(presence_id)
+    }
+
+    pub fn visible_interests(&self, now: Instant) -> Vec<(String, UvBox)> {
+        self.interests.visible(now)
     }
 
     pub fn set_avatar_available(&mut self, available: bool) {
@@ -91,6 +117,7 @@ impl Registry {
     /// Retires the presence. Returns true if it owned the avatar body (now released).
     pub fn retire_presence(&mut self, presence_id: &str) -> Result<bool, String> {
         self.presence.retire(presence_id)?;
+        self.interests.retire(presence_id);
         let owned = self.avatar_owner.as_deref() == Some(presence_id);
         if owned {
             self.avatar_owner = None;

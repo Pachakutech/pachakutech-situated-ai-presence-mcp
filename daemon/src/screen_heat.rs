@@ -15,9 +15,13 @@ const MAX_COLS: u32 = 192;
 const MAX_ROWS: u32 = 108;
 const MAX_CELLS: u32 = MAX_COLS * MAX_ROWS;
 /// One vec4 past the cells. The seat shader eases the iris opening here.
-/// The CPU copy never reads it.
+/// Three more vec4s are highlight rects (x, y, w, h in heat, luma, cb, cr).
+/// The CPU copy never reads any of them.
 const SEAT_INDEX: u32 = MAX_CELLS;
+const MARK_SLOTS: u32 = 3;
+const MARK0: u32 = SEAT_INDEX + 1;
 const _: () = assert!(SEAT_INDEX == 192 * 108);
+const _: () = assert!(MARK0 == 192 * 108 + 1);
 
 /// Tunable from here. The shader reads them as push constants.
 const W_TEXT: f32 = 1.0;
@@ -85,6 +89,8 @@ pub struct ScreenHeat {
     prev_disc: (i32, i32),
     disc_px: i32,
     prev_disc_px: i32,
+    /// Up to three highlight rects in screen pixels. Zero width means none.
+    marks: [[f32; 4]; 3],
     have_prev: bool,
     cols: u32,
     rows: u32,
@@ -134,7 +140,7 @@ impl ScreenHeat {
         let sampler = unsafe { device.create_sampler(&sampler_info, None) }
             .map_err(|e| format!("heat sampler: {e:?}"))?;
 
-        let slots = (MAX_CELLS + 1) as vk::DeviceSize;
+        let slots = (MAX_CELLS + 1 + MARK_SLOTS) as vk::DeviceSize;
         let bytes = slots * std::mem::size_of::<[f32; 4]>() as vk::DeviceSize;
         let buf_info = vk::BufferCreateInfo::default()
             .size(bytes)
@@ -146,7 +152,7 @@ impl ScreenHeat {
         unsafe { device.bind_buffer_memory(buf, mem, 0) }.map_err(|e| format!("heat buffer bind: {e:?}"))?;
         let ptr = unsafe { device.map_memory(mem, 0, bytes, vk::MemoryMapFlags::empty()) }
             .map_err(|e| format!("heat buffer map: {e:?}"))? as *mut f32;
-        unsafe { std::ptr::write_bytes(ptr, 0, (MAX_CELLS as usize + 1) * 4) };
+        unsafe { std::ptr::write_bytes(ptr, 0, (MAX_CELLS as usize + 1 + MARK_SLOTS as usize) * 4) };
 
         let lens_binding = vk::DescriptorSetLayoutBinding::default()
             .binding(0)
@@ -228,6 +234,7 @@ impl ScreenHeat {
             prev_disc: (0, 0),
             disc_px: OBSERVE_PX,
             prev_disc_px: OBSERVE_PX,
+            marks: [[0.0; 4]; 3],
             have_prev: false,
             cols: 0,
             rows: 0,
@@ -242,6 +249,13 @@ impl ScreenHeat {
     pub fn set_disc(&mut self, x: i32, y: i32, side: i32) {
         self.disc = (x, y);
         self.disc_px = side.max(1);
+    }
+
+    /// Screen-pixel rects the next dispatch should treat like the disc.
+    /// A width of 0 is no rect. These are not the disc size: the seat window
+    /// still comes from `mask_a.z`.
+    pub fn set_marks(&mut self, marks: [[f32; 4]; 3]) {
+        self.marks = marks;
     }
 
     /// Copy the grid the previous dispatch wrote. Call after the fence for
@@ -324,6 +338,28 @@ impl ScreenHeat {
             mask_b: [mask_b.0 as f32, mask_b.1 as f32, side_b as f32, side_b as f32],
         };
         unsafe {
+            for (i, rect) in self.marks.iter().enumerate() {
+                let base = (MARK0 as usize + i) * 4;
+                *self.ptr.add(base) = rect[0];
+                *self.ptr.add(base + 1) = rect[1];
+                *self.ptr.add(base + 2) = rect[2];
+                *self.ptr.add(base + 3) = rect[3];
+            }
+            let host_barrier = vk::BufferMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::HOST_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                .buffer(self.buf)
+                .offset(0)
+                .size(vk::WHOLE_SIZE);
+            device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::HOST,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[host_barrier],
+                &[],
+            );
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.pipeline);
             device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::COMPUTE, self.layout, 0, &[self.set], &[]);
             device.cmd_push_constants(

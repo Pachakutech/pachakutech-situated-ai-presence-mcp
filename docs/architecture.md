@@ -39,13 +39,13 @@ desktop instead of a CPU/GPU boundary on a phone.
 Request (MCP Binding → daemon):
 
 ```json
-{ "kind": "highlightRegion", "proposalId": "a1b2", "description": "the red error banner", "durationSeconds": 6 }
+{ "kind": "highlightRegion", "proposalId": "a1b2", "presenceId": "p-xyz", "description": "the red error banner", "u": 0.1, "v": 0.2, "w": 0.3, "h": 0.15, "durationSeconds": 5 }
 ```
 
 Response (daemon → MCP Binding):
 
 ```json
-{ "proposalId": "a1b2", "status": "ok", "detail": { "regionId": "r-a1b2" } }
+{ "proposalId": "a1b2", "status": "ok", "detail": { "regionId": "r-a1b2", "resolvedBounds": [0.1, 0.2, 0.3, 0.15], "durationSeconds": 5 } }
 ```
 
 Or, on failure:
