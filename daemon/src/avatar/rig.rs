@@ -119,6 +119,22 @@ impl Rig {
         p
     }
 
+    /// Joint origin in the pose, before the actor's root yaw. Parents first.
+    pub fn joint_origin(&self, pose: &Pose, joint: usize) -> [f32; 3] {
+        let mut world = vec![MAT4_IDENTITY; self.names.len()];
+        for &j in &self.order {
+            let local = mat4_from_trs(pose.t[j], pose.r[j]);
+            world[j] = match self.parent[j] {
+                Some(p) => mat4_mul(&world[p], &local),
+                None => local,
+            };
+            if j == joint {
+                return [world[j][12], world[j][13], world[j][14]];
+            }
+        }
+        [0.0; 3]
+    }
+
     /// World matrices (with `root_xf` applied above all roots) -> skin matrices (world * IBM).
     pub fn skin_matrices(&self, pose: &Pose, root_xf: &Mat4) -> Vec<Mat4> {
         let n = self.names.len();

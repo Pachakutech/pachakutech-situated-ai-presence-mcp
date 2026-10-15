@@ -6,6 +6,7 @@
 //!
 //! The overlay loop ticks this at 30 Hz and draws the projected discs. Speech
 //! stays out: `FaceFrame` is demo motion or a socket command.
+pub mod aim;
 pub mod appearance;
 pub mod debug;
 pub mod deform;
@@ -69,6 +70,11 @@ pub struct AvatarActor {
     pub autoload: bool,
     /// The presence that currently owns this body.
     pub bound_presence: Option<String>,
+    /// True while an utterance is actually playing. The point reads this.
+    talking: bool,
+    aim: aim::AimSpring,
+    /// `Point` arm joints copied onto the breath. Empty when those names are absent.
+    point_joints: Vec<usize>,
     time: f32,
     posed_verts: Vec<[f32; 3]>,
     pub posed: Vec<GaussianSplat>,
@@ -105,6 +111,14 @@ impl AvatarActor {
         let recon = Reconstructor::new(&mesh, &binding);
         let appearance = appearance::Appearance::from_mesh(&mesh, &rig, &binding);
         let axis = man["jaw_axis"].as_array().map(|a| [0, 1, 2].map(|i| a[i].as_f64().unwrap_or(0.) as f32)).unwrap_or([1., 0., 0.]);
+        let point_joints: Vec<usize> = aim::ARM_JOINTS.iter().filter_map(|n| rig.joint(n)).collect();
+        if rig.clip("Point").is_some() && point_joints.len() != aim::ARM_JOINTS.len() {
+            eprintln!(
+                "[avatar] Point is loaded but only {} of {} arm joints were found",
+                point_joints.len(),
+                aim::ARM_JOINTS.len()
+            );
+        }
         let mut a = AvatarActor {
             jaw_joint: man["jaw_joint"].as_str().and_then(|n| rig.joint(n)),
             jaw_axis: axis,
@@ -117,6 +131,7 @@ impl AvatarActor {
             demo_motion: true, time: 0.,
             speech: crate::speech::Speaker::new(crate::speech::SpeechConfig::from_env()),
             visible: true, autoload: true, bound_presence: None,
+            talking: false, aim: aim::AimSpring::default(), point_joints,
             posed_verts: vec![], posed: vec![], stats: DeformStats::default(),
         };
         a.play("idle", true);
@@ -159,6 +174,8 @@ impl AvatarActor {
                 self.walk_target = None;
                 self.root = RootState { pos: [0.; 3], yaw: 0. };
                 self.rest();
+                self.aim.reset();
+                self.talking = false;
                 self.face = FaceFrame::default();
             }
             AvatarCommand::Unbind { presence_id } => {
@@ -168,6 +185,8 @@ impl AvatarActor {
                     self.bound_presence = None;
                     self.visible = self.autoload;
                     self.demo_motion = self.autoload;
+                    self.aim.reset();
+                    self.talking = false;
                 }
             }
             AvatarCommand::Speak { presence_id, text } => {
@@ -187,6 +206,8 @@ impl AvatarActor {
                 self.rest();
                 self.walk_target = None;
                 self.root.yaw = 0.0;
+                self.aim.reset();
+                self.talking = false;
                 self.face = FaceFrame::default();
             }
             AvatarCommand::Face { jaw_open, morph_index, morph_weight } => {
@@ -229,9 +250,16 @@ impl AvatarActor {
             }
         }
         match self.speech.poll(&self.mesh.morph_names) {
-            crate::speech::SpeechPoll::Active(f) => { self.demo_motion = false; self.face = f; }
-            crate::speech::SpeechPoll::Finished => self.face = FaceFrame::default(),
-            crate::speech::SpeechPoll::Idle => {}
+            crate::speech::SpeechPoll::Active(f) => {
+                self.demo_motion = false;
+                self.face = f;
+                self.talking = true;
+            }
+            crate::speech::SpeechPoll::Finished => {
+                self.face = FaceFrame::default();
+                self.talking = false;
+            }
+            crate::speech::SpeechPoll::Idle => self.talking = false,
         }
         if self.demo_motion {
             if self.walk_target.is_none() {
@@ -256,12 +284,55 @@ impl AvatarActor {
         )
     }
 
-    /// Run clip -> face -> FK -> morph/LBS -> barycentric reconstruction.
-    pub fn evaluate(&mut self) -> &[GaussianSplat] {
-        let mut pose = match self.clip.as_deref().and_then(|n| self.rig.clip(n)) {
-            Some(c) => self.rig.sample(c, self.clip_time, self.clip_loop),
+    /// Aim the damped spring. `highlight` is the mark still on screen for the
+    /// presence that owns the body, not the box left behind after it fades.
+    /// Demo sway keeps the yaw when `demo_motion` is set; the caller skips this.
+    pub fn steer(
+        &mut self,
+        dt: f32,
+        highlight: Option<crate::highlight::UvBox>,
+        figure: (f32, f32),
+        screen: (f32, f32),
+    ) {
+        let aim = highlight.filter(|_| screen.0 > 1.0 && screen.1 > 1.0).map(|b| {
+            let (bx, by) = aim::box_center(b.u, b.v, b.w, b.h, screen.0, screen.1);
+            aim::aim_theta(figure.0, figure.1, bx, by)
+        });
+        let target = aim::gesture_target(self.talking, aim);
+        self.aim.step(target, dt);
+        self.root.yaw = aim::aim_yaw(self.aim.theta);
+    }
+
+    /// Breath, with `Point`'s arms at the current aim. Theta 0 is the low pose,
+    /// which is the rest while she is not gesturing. A walk clip, if one is
+    /// actually playing, still wins.
+    fn skeleton_pose(&self) -> rig::Pose {
+        if self.walk_target.is_some() {
+            if let Some(c) = self.clip.as_deref().and_then(|n| self.rig.clip(n)) {
+                if self.clip.as_deref() == Some("walk") {
+                    return self.rig.sample(c, self.clip_time, self.clip_loop);
+                }
+            }
+        }
+        let mut pose = match self.rig.clip("Breathe") {
+            Some(c) => {
+                let rate = c.duration / aim::BREATH_PERIOD_S;
+                self.rig.sample(c, self.time * rate, true)
+            }
             None => self.rig.rest_pose(),
         };
+        if let Some(point) = self.rig.clip("Point") {
+            let arms = self.rig.sample(point, aim::point_time(self.aim.theta, point.duration), false);
+            for &j in &self.point_joints {
+                pose.r[j] = arms.r[j];
+            }
+        }
+        pose
+    }
+
+    /// Run clip -> face -> FK -> morph/LBS -> barycentric reconstruction.
+    pub fn evaluate(&mut self) -> &[GaussianSplat] {
+        let mut pose = self.skeleton_pose();
         if let Some(j) = self.jaw_joint {
             let ang = self.face.jaw_open.clamp(0., 1.) * self.jaw_max_rad;
             if ang != 0.0 { pose.r[j] = quat_mul(pose.r[j], quat_axis_angle(self.jaw_axis, ang)); }

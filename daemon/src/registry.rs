@@ -68,7 +68,8 @@ impl Registry {
         Ok((got, secs))
     }
 
-    /// Still the declared box after the mark has faded. Gesture sampling reads this.
+    /// Still the declared box after the mark has faded.
+    /// The point gesture reads [`Self::visible_interests`], not this.
     #[allow(dead_code)]
     pub fn interest(&self, presence_id: &str) -> Option<UvBox> {
         self.interests.get(presence_id)

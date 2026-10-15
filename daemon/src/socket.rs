@@ -64,6 +64,12 @@ impl SocketServer {
         self.registry.lock().expect("registry mutex poisoned").visible_interests(Instant::now())
     }
 
+    /// The mark still showing for this presence. A faded box stays in the book
+    /// and is not returned here; the point follows the mark, not that leftover.
+    pub fn visible_interest(&self, id: &str) -> Option<crate::highlight::UvBox> {
+        self.visible_interests().into_iter().find(|(i, _)| i == id).map(|(_, b)| b)
+    }
+
     pub fn listener_fd(&self) -> RawFd {
         self.listener.as_raw_fd()
     }

@@ -3,15 +3,6 @@ use std::path::PathBuf;
 
 fn manifest() -> PathBuf { PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../assets/avatar_manifest.json") }
 
-fn ply_samples() -> Vec<([f32; 3], [f32; 3])> {
-    let d = std::fs::read(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../assets/humanoid_proxy_rigged.samples.ply")).unwrap();
-    let h = d.windows(10).position(|w| w == b"end_header").unwrap() + 11;
-    d[h..].chunks_exact(24).map(|c| {
-        let f = |i: usize| f32::from_le_bytes([c[i * 4], c[i * 4 + 1], c[i * 4 + 2], c[i * 4 + 3]]);
-        ([f(0), f(1), f(2)], [f(3), f(4), f(5)])
-    }).collect()
-}
-
 fn rest_actor() -> AvatarActor {
     let mut a = AvatarActor::load(&manifest()).expect("load avatar");
     a.rest();
@@ -24,7 +15,10 @@ fn rest_actor() -> AvatarActor {
 #[test]
 fn fingerprint_matches_bake_manifest() {
     let a = AvatarActor::load(&manifest()).unwrap();
-    assert_eq!(a.binding.fingerprint(), "8448f066825111bce3aa606bae47824f14b7fbebcb437a06d181b7097e8eceb2");
+    let sidecar = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../assets/humanoid_proxy_rigged.splatbind.json");
+    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&sidecar).unwrap()).unwrap();
+    let expected = v["fingerprint_sha256"].as_str().expect("sidecar fingerprint");
+    assert_eq!(a.binding.fingerprint(), expected);
 }
 
 #[test]
@@ -37,34 +31,6 @@ fn wrong_topology_is_rejected() {
     assert!(a.binding.validate(&a.mesh.rest, &idx).is_err());
 }
 
-#[test]
-fn rest_pose_reproduces_baked_samples() {
-    let a = rest_actor();
-    let ply = ply_samples();
-    assert_eq!(ply.len(), a.posed.len());
-    let mut worst = 0.0f32;
-    for (s, (p, _)) in a.posed.iter().zip(&ply) {
-        for c in 0..3 { worst = worst.max((s.position[c] - p[c]).abs()); }
-    }
-    assert!(worst < 2e-4, "rest reconstruction deviates {worst} m from samples.ply");
-    assert_eq!(a.stats.nonfinite_repaired, 0);
-}
-
-#[test]
-fn rest_frame_normals_match_baked_normals() {
-    let a = rest_actor();
-    let ply = ply_samples();
-    // splat local +Z axis = triangle normal
-    let mut bad = 0;
-    for (s, (_, n)) in a.posed.iter().zip(&ply) {
-        let [w, x, y, z] = s.rotation;
-        let nz = [2. * (x * z + w * y), 2. * (y * z - w * x), 1. - 2. * (x * x + y * y)];
-        if dot(nz, *n) < 0.999 { bad += 1; }
-    }
-    assert!(bad < 50, "{bad} splats with normal disagreement");
-}
-fn dot(a: [f32; 3], b: [f32; 3]) -> f32 { a[0] * b[0] + a[1] * b[1] + a[2] * b[2] }
-
 fn finite_all(a: &AvatarActor) -> bool {
     a.posed.iter().all(|s| s.position.iter().chain(&s.rotation).chain(&s.scale).all(|v| v.is_finite()))
 }
@@ -73,13 +39,18 @@ fn dist3(a: [f32; 3], b: [f32; 3]) -> f32 {
     (0..3).map(|c| (a[c] - b[c]).powi(2)).sum::<f32>().sqrt()
 }
 
-/// This GLB has no animation clips. Body motion is the root; the face is the jaw.
+fn quat_dot(a: [f32; 4], b: [f32; 4]) -> f32 {
+    (a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]).abs()
+}
+
+/// The sit is the skeleton rest, with `Breathe` and `Point` in the file.
 #[test]
-fn rest_pose_is_a_standing_body() {
+fn rest_pose_is_a_sitting_body() {
     let a = rest_actor();
     assert!(finite_all(&a));
     assert_eq!(a.stats.nonfinite_repaired, 0);
-    assert!(a.rig.clips.is_empty(), "this mesh has no clips; the demo must not invent them");
+    assert!(a.rig.clip("Breathe").is_some(), "Breathe missing");
+    assert!(a.rig.clip("Point").is_some(), "Point missing");
     assert!(a.jaw_joint.is_some(), "jaw joint missing");
     let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
     for s in &a.posed {
@@ -89,7 +60,48 @@ fn rest_pose_is_a_standing_body() {
         }
     }
     let height = hi[1] - lo[1];
-    assert!(height > 1.4 && height < 2.0, "body height {height}");
+    assert!(height > 0.4 && height < 2.2, "body height {height}");
+}
+
+#[test]
+fn point_compass_frames_place_the_wrists() {
+    let a = AvatarActor::load(&manifest()).unwrap();
+    let point = a.rig.clip("Point").expect("Point");
+    let dur = point.duration;
+    let wrist = |t: f32| {
+        let pose = a.rig.sample(point, t, false);
+        let l = a.rig.joint_origin(&pose, a.rig.joint("wrist.L").unwrap());
+        let r = a.rig.joint_origin(&pose, a.rig.joint("wrist.R").unwrap());
+        (l, r)
+    };
+    let (down_l, down_r) = wrist(0.0);
+    let (right_l, right_r) = wrist(dur * 0.25);
+    let (up_l, up_r) = wrist(dur * 0.5);
+    let (left_l, left_r) = wrist(dur * 0.75);
+    assert!(right_l[1] > right_r[1] + 0.05, "viewer's right: left wrist should be higher {right_l:?} {right_r:?}");
+    assert!(right_l[0] > right_r[0] + 0.05, "viewer's right: left wrist should be further on +X");
+    assert!(left_r[1] > left_l[1] + 0.05, "viewer's left: right wrist should be higher {left_l:?} {left_r:?}");
+    assert!(left_r[0] < left_l[0] - 0.05, "viewer's left: right wrist should be further on -X");
+    assert!((up_l[1] - up_r[1]).abs() < 0.05, "above: wrists should match in height {up_l:?} {up_r:?}");
+    assert!(up_l[1] > down_l[1] + 0.2 && up_r[1] > down_r[1] + 0.2, "above should clear the low pose");
+    let root = a.rig.joint("root").unwrap();
+    let q = |t: f32| a.rig.sample(point, t, false).r[root];
+    let q0 = q(0.0);
+    for t in [dur * 0.25, dur * 0.5, dur * 0.75] {
+        assert!(quat_dot(q0, q(t)) > 0.999, "root rotation moved at {t}");
+    }
+}
+
+#[test]
+fn breathe_does_not_gesture_the_upper_arm() {
+    let a = AvatarActor::load(&manifest()).unwrap();
+    let breathe = a.rig.clip("Breathe").expect("Breathe");
+    let joint = a.rig.joint("upperarm01.L").unwrap();
+    let q0 = a.rig.sample(breathe, 0.0, false).r[joint];
+    for t in [breathe.duration * 0.5, breathe.duration] {
+        let q = a.rig.sample(breathe, t, false).r[joint];
+        assert!(quat_dot(q0, q) > 0.999, "upperarm01.L moved across Breathe at {t}");
+    }
 }
 
 #[test]

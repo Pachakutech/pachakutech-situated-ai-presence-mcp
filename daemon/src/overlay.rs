@@ -2637,6 +2637,14 @@ fn take_webcam_msg(avatar: &mut Option<AvatarActor>, gpu: &mut OverlayGpu, vk: &
     }
 }
 
+/// Figure center (layer origin plus half the edge) and the output size in pixels.
+fn figure_and_screen(overlay: &Overlay) -> ((f32, f32), (f32, f32)) {
+    let (x, y) = overlay.bubble_pos();
+    let half = overlay.side() as f32 * 0.5;
+    let (w, h) = overlay.output_size();
+    ((x as f32 + half, y as f32 + half), (w as f32, h as f32))
+}
+
 /// One avatar step: pose, deform, project. Fails the process the first time
 /// the layer camera leaves the cloud with fewer than 1000 live discs.
 fn tick_avatar(
@@ -2648,6 +2656,8 @@ fn tick_avatar(
     dt: f32,
     frame: &mut u32,
     projection_checked: &mut bool,
+    figure: (f32, f32),
+    screen: (f32, f32),
 ) -> Result<(), String> {
     gpu.wait_for_present(vk)?;
     gpu.flush_webcam_retire(vk);
@@ -2671,6 +2681,13 @@ fn tick_avatar(
     }
     let started = Instant::now();
     avatar.advance(dt);
+    if !avatar.demo_motion {
+        let highlight = avatar
+            .bound_presence
+            .as_deref()
+            .and_then(|id| server.visible_interest(id));
+        avatar.steer(dt, highlight, figure, screen);
+    }
     let extent = gpu.layer_extent();
     if extent.width != crate::placement::DISC_PX as u32
         || extent.height != crate::placement::DISC_PX as u32
@@ -2865,6 +2882,7 @@ pub fn run(
         &mut placement,
         avatar.as_ref().is_some_and(|a| a.visible),
     );
+    let (figure, screen) = figure_and_screen(overlay);
     tick_avatar(
         avatar,
         pipeline,
@@ -2874,6 +2892,8 @@ pub fn run(
         1.0 / 30.0,
         &mut avatar_frame,
         &mut projection_checked,
+        figure,
+        screen,
     )?;
     last_avatar = Instant::now();
     let extent = overlay.extent();
@@ -3030,6 +3050,7 @@ pub fn run(
             let avatar_due = last_avatar.elapsed() >= AVATAR_TICK;
             if avatar_due {
                 let dt = last_avatar.elapsed().as_secs_f32().clamp(1.0 / 120.0, 0.1);
+                let (figure, screen) = figure_and_screen(overlay);
                 tick_avatar(
                     avatar,
                     pipeline,
@@ -3039,6 +3060,8 @@ pub fn run(
                     dt,
                     &mut avatar_frame,
                     &mut projection_checked,
+                    figure,
+                    screen,
                 )?;
                 last_avatar = Instant::now();
             }
