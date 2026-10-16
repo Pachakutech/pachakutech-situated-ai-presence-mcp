@@ -4,7 +4,7 @@ An npm install speaks only when the person who starts the daemon has already ins
 
 ## Three buckets
 
-**Avatar files** already ship. `scripts/stage-daemon.mjs` copies `avatar_manifest.json`, the rigged GLB, and the splatbind into `native/linux-x64/assets/`. `avatar_manifest()` in `daemon/src/main.rs` uses `PRESENCE_AVATAR_MANIFEST` when it is set, and otherwise the copy beside the executable. A normal `npm install -g` needs no export for the figure to appear.
+**Avatar files** already ship. `scripts/stage-daemon.mjs` copies `avatar_manifest.json`, the rigged GLB, and the splatbind into `native/linux-x64/assets/` when the binary is staged. That copy is the install payload. On the machine that built the binary, `avatar_manifest()` uses the checkout `assets/` while that path exists, so an export does not have to be copied by hand. `PRESENCE_AVATAR_MANIFEST` still wins when it is set. After install, on a machine without the checkout, the copy beside the executable is what loads. A normal `npm install -g` needs no export for the figure to appear.
 
 **The host session** cannot ship. The README already lists it: Linux x86_64, a Wayland session, a Vulkan driver, render-node access, and a webcam only when that feature is used. `presence doctor` reports those. Nothing in this plan moves them into the tarball.
 

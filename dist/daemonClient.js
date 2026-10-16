@@ -100,10 +100,22 @@ export class DaemonClient {
             return result;
         });
     }
-    async highlightRegion(description, durationSeconds) {
-        const result = await this.rpc("highlightRegion", { description, durationSeconds });
+    async highlightRegion(presenceId, description, u, v, w, h, durationSeconds) {
+        const result = await this.rpc("highlightRegion", {
+            presenceId,
+            description,
+            u,
+            v,
+            w,
+            h,
+            durationSeconds,
+        });
         const regionId = typeof result.detail?.regionId === "string" ? result.detail.regionId : `r-${proposalId()}`;
-        return { regionId, resolvedBounds: null };
+        const raw = result.detail?.resolvedBounds;
+        const resolvedBounds = Array.isArray(raw) && raw.length === 4 && raw.every((n) => typeof n === "number")
+            ? raw
+            : null;
+        return { regionId, resolvedBounds };
     }
     async spawnPresence(presenceId, sourceContext, styleHint, artifactId) {
         await this.rpc("spawnPresence", {

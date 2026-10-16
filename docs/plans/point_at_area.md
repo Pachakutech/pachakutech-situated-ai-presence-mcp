@@ -37,9 +37,9 @@ Both clips run 15 seconds, 24 fps, keys from frame 1 through frame 360. The glTF
 | 180 | 7.5 s | Both high, about y = 1.51, forward of the shoulders |
 | 270 | 11.25 s | `wrist.R` is up and out on −X. `wrist.L` stays low |
 
-+X is the figure's left, which is the viewer's right while she faces the camera. Frame 90 is the viewer's right. Frame 270 is the viewer's left. Frame 180 is both hands up. That is the clock in the action.
++X is the figure's left. Frame 90 puts `wrist.L` out on +X. Frame 270 puts `wrist.R` out on −X. Frame 180 is both hands up. That is the clock in the skeleton, before the camera.
 
-The camera sits on +Z and looks back at the origin (`body_camera_dq`). Yaw 0 faces +Z, toward the viewer. The existing root yaw of +90° carries a point on +Z over to +X. That is a turn toward the viewer's right, the same side as frame 90.
+The camera is `Ry(π)` on +Z, looking back at the origin (`body_camera_dq`). That turn sends world +X to the viewer's left, so frame 90 appears on the viewer's left and frame 270 on the viewer's right. Yaw 0 faces +Z, toward the viewer. A root yaw of +90° carries a point on +Z over to +X, the viewer's left on screen, the same side as frame 90.
 
 ## What to clean up in Blender
 
@@ -58,9 +58,9 @@ One function from a screen box to a sample, plus the breath.
 The figure's center is the layer origin plus half the layer edge. The box center is `((u + w/2) * screen_width, (v + h/2) * screen_height)`, the same full-screen UV the highlight already stores in `InterestBook`. With screen y growing down:
 
 ```
-dx = box_x - figure_x
+dx = figure_x - box_x          // the camera mirrors X
 dy = box_y - figure_y
-theta = atan2(dx, dy)          // 0 below, +π/2 viewer's right, π above, −π/2 viewer's left
+theta = atan2(dx, dy)          // 0 below, −π/2 viewer's right, π above, +π/2 viewer's left
 ```
 
 `Point` time is `theta / 2π * duration`, wrapped into `[0, duration]`. Theta 0 and 2π are the low pose. Theta π/2 is frame 90. Theta π is frame 180. Theta 3π/2 is frame 270.
@@ -71,7 +71,7 @@ Root yaw, in radians, from that same theta:
 yaw = atan2(sin(theta), abs(cos(theta)))
 ```
 
-That is 0 below and above, +π/2 at the viewer's right, −π/2 at the viewer's left, and a straight blend along each quadrant. It uses the root yaw the actor already has. It does not rotate the `root` bone inside the clip.
+That is 0 below and above, −π/2 when the box is on the viewer's right, +π/2 when it is on the viewer's left, and a straight blend along each quadrant. It uses the root yaw the actor already has. It does not rotate the `root` bone inside the clip.
 
 Each avatar tick:
 
@@ -101,4 +101,4 @@ The fingerprint check reads the sidecar. The empty-clip assertion is gone. The p
 
 ## First look
 
-Restart onto this GLB only when the slice is in. The figure on screen today was loaded before this export. The first thing to check is the sit inside the disc, then a box to the viewer's right (left arm, yaw +90°), a box above (both hands, yaw 0), and a box to the viewer's left. Focal length stays put.
+Restart onto this GLB only when the slice is in. The figure on screen today was loaded before this export. The first thing to check is the sit inside the disc, then a box to the viewer's right (the arm on that side of the screen, yaw −90°), a box above (both hands, yaw 0), and a box to the viewer's left. Focal length stays put.

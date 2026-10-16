@@ -5,8 +5,9 @@
 // or shells out to the target agent CLI's own, already-documented MCP
 // registration command, rather than reimplementing per-agent config parsing.
 import { execFileSync } from "node:child_process";
-import { existsSync, accessSync, constants } from "node:fs";
+import { cpSync, existsSync, accessSync, constants, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { getBundledDaemonPath } from "./daemonBinary.js";
 import { socketPath } from "./daemonClient.js";
@@ -26,13 +27,14 @@ function usage() {
         "  daemon start         Start the bundled daemon and wait for its socket",
         "  daemon status        Report whether the daemon socket accepts a connection",
         "  daemon stop          Ask the daemon to shut down",
-        "  presence spawn [--context <text>] [--style <hint>] [--artifact <id>]",
+        "  spawn [--context <text>] [--style <hint>] [--artifact <id>]",
         "                       Spawn a presence (shows the avatar); prints its presenceId",
-        "  presence speak <id> <text>",
-        "                       That presence speaks: local TTS, audio, synced mouth",
-        "  presence stop <id>   Stop that presence's speech; face returns to neutral",
-        "  presence retire <id> End the presence, hide its avatar, free its slot",
-        "  (the above are typed as: presence presence spawn|speak|stop|retire ...)",
+        "  speak <id> <text>    That presence speaks: local TTS, audio, synced mouth",
+        "  highlight <id> <u> <v> <w> <h> [seconds]",
+        "                       Tint that UV box (top-left, v down, 0..1). Default 5s, max 60",
+        "  stop <id>            Stop that presence's speech; face returns to neutral",
+        "  retire <id>          End the presence, hide its avatar, free its slot",
+        "                       The doubled form still works: presence presence speak <id> <text>",
         "  avatar rest|jaw <0-1>|walk <x> <z>|morph <i> <w>",
         "                       DEBUG controls for the default avatar body, no presence needed",
     ].join("\n"));
@@ -56,17 +58,31 @@ function runAgentCommand(cliName, args) {
         throw error;
     }
 }
+function skillSourceDir() {
+    // dist/cli.js sits next to the package root. The published tarball ships
+    // skills/ beside dist/, and a checkout has the same layout after tsc.
+    return join(__dirname, "..", "skills", "presence");
+}
+function installSkill(destDir) {
+    const src = skillSourceDir();
+    if (!existsSync(join(src, "SKILL.md"))) {
+        console.error(`Skill not found at ${src}. The package ships skills/presence/SKILL.md; ` +
+            "reinstall @pachakutech/presence-mcp if this copy is missing it.");
+        return;
+    }
+    mkdirSync(destDir, { recursive: true });
+    cpSync(src, destDir, { recursive: true });
+    console.log(`Installed the presence skill at ${destDir}`);
+}
 function setupClaude() {
     console.log("Registering with Claude Code...");
     runAgentCommand("claude", ["mcp", "add", "presence", "--", "presence", "mcp"]);
-    console.log("\nDone. The skill at skills/presence/SKILL.md is not auto-installed — " +
-        "Claude Code's skill install path varies by version. If your Claude Code " +
-        "supports plugin installs, point it at this repo's plugin.json directly; " +
-        "otherwise copy skills/presence/ into your Claude Code skills directory by hand.");
+    installSkill(join(homedir(), ".claude", "skills", "presence"));
 }
 function setupCodex() {
     console.log("Registering with Codex CLI...");
     runAgentCommand("codex", ["mcp", "add", "presence", "--command", "presence", "--args", "mcp"]);
+    installSkill(join(homedir(), ".codex", "skills", "presence"));
 }
 function setupGrok() {
     console.log("Registering with Grok CLI...");
@@ -74,6 +90,7 @@ function setupGrok() {
     // written to ~/.grok/config.toml under [mcp_servers.presence]. See
     // https://docs.x.ai/build/features/mcp-servers.
     runAgentCommand("grok", ["mcp", "add", "presence", "--", "presence", "mcp"]);
+    installSkill(join(homedir(), ".grok", "skills", "presence"));
 }
 function canAccess(path) {
     try {
@@ -179,7 +196,7 @@ function flag(args, name) {
     const i = args.indexOf(name);
     return i >= 0 && i + 1 < args.length ? args[i + 1] : undefined;
 }
-/** `presence presence spawn|speak|stop|retire`: presence-scoped control, same names as the MCP tools. */
+/** `presence spawn|speak|highlight|stop|retire`, and the doubled `presence presence …` form. */
 async function presenceCommand(args) {
     const [action, id, ...rest] = args;
     try {
@@ -196,23 +213,54 @@ async function presenceCommand(args) {
             });
             if (reply.detail?.avatar === false)
                 console.error(`warning: ${String(reply.detail.note ?? "presence has no avatar body")}`);
-            console.log(presenceId); // stdout is only the id: ID=$(presence presence spawn)
+            console.log(presenceId); // stdout is only the id: ID=$(presence spawn)
+            return 0;
+        }
+        if (action === "highlight") {
+            const [us, vs, ws, hs, sec] = rest;
+            const u = Number(us);
+            const v = Number(vs);
+            const w = Number(ws);
+            const h = Number(hs);
+            const durationSeconds = sec === undefined ? 5 : Number(sec);
+            if (!id || [u, v, w, h, durationSeconds].some((n) => !Number.isFinite(n)) || durationSeconds < 0) {
+                console.error("presence highlight <id> <u> <v> <w> <h> [seconds]");
+                return 1;
+            }
+            const reply = await sendProposal({
+                kind: "highlightRegion",
+                proposalId: "cli-highlight",
+                presenceId: id,
+                description: "",
+                u,
+                v,
+                w,
+                h,
+                durationSeconds: Math.round(durationSeconds),
+            });
+            console.log(JSON.stringify(reply.detail ?? {}));
             return 0;
         }
         if (action === "speak") {
             const text = rest.join(" ").trim();
-            if (!id || !text)
-                usage();
+            if (!id || !text) {
+                console.error("presence speak <id> <text>");
+                return 1;
+            }
             await sendProposal({ kind: "animatePresence", proposalId: "cli-speak", presenceId: id, text });
         }
         else if (action === "stop") {
-            if (!id)
-                usage();
+            if (!id) {
+                console.error("presence stop <id>");
+                return 1;
+            }
             await sendProposal({ kind: "stopPresence", proposalId: "cli-stop", presenceId: id });
         }
         else if (action === "retire") {
-            if (!id)
-                usage();
+            if (!id) {
+                console.error("presence retire <id>");
+                return 1;
+            }
             await sendProposal({ kind: "retirePresence", proposalId: "cli-retire", presenceId: id });
         }
         else {
@@ -269,6 +317,13 @@ switch (command) {
         break;
     case "presence":
         process.exit(await presenceCommand(process.argv.slice(3)));
+        break;
+    case "spawn":
+    case "speak":
+    case "highlight":
+    case "stop":
+    case "retire":
+        process.exit(await presenceCommand(process.argv.slice(2)));
         break;
     case "avatar":
         process.exit(await avatarCommand(process.argv.slice(3)));

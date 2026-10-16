@@ -28,17 +28,25 @@ function getDaemon() {
     return daemonReady.then(() => daemon);
 }
 server.registerTool("manifestHighlight", {
-    title: "Highlight something on screen",
-    description: "Ephemeral Manifestation. Draws a bounded, temporary highlight over the " +
-        "described on-screen content. Prefer this over describing a location in " +
-        "text when the user can see their screen.",
+    title: "Highlight a box on screen",
+    description: "Ephemeral. Tints a full-screen UV box for a live presence: origin top-left, " +
+        "u and v from 0 to 1 across the whole output, v growing downward. The mark fades " +
+        "after durationSeconds (default 5, max 60); call again to replace the box and keep it up. " +
+        "The box remains that presence's area of interest after the pixels fade, until a new box or retire. " +
+        "The figure does not gesture yet.",
     inputSchema: {
-        description: z.string().describe("What to highlight, e.g. 'the red error banner'"),
-        durationSeconds: z.number().min(1).max(30).default(6),
+        presenceId: z.string().describe("Live presence this box belongs to"),
+        description: z.string().describe("Short note for the log, e.g. 'the red error banner'"),
+        u: z.number().min(0).max(1).describe("Left edge, 0..1 across the whole screen"),
+        v: z.number().min(0).max(1).describe("Top edge, 0..1, growing downward"),
+        w: z.number().positive().describe("Width in that same 0..1 space"),
+        h: z.number().positive().describe("Height in that same 0..1 space"),
+        durationSeconds: z.number().min(1).max(60).default(5),
     },
-}, async ({ description, durationSeconds }) => {
+}, async ({ presenceId, description, u, v, w, h, durationSeconds }) => {
     policy.assertAllowed("manifestHighlight");
-    const result = await (await getDaemon()).highlightRegion(description, durationSeconds);
+    policy.assertInstanceExists(presenceId);
+    const result = await (await getDaemon()).highlightRegion(presenceId, description, u, v, w, h, durationSeconds);
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
 });
 server.registerTool("spawnPresence", {

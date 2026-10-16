@@ -120,6 +120,7 @@ impl Rig {
     }
 
     /// Joint origin in the pose, before the actor's root yaw. Parents first.
+    #[cfg(test)]
     pub fn joint_origin(&self, pose: &Pose, joint: usize) -> [f32; 3] {
         let mut world = vec![MAT4_IDENTITY; self.names.len()];
         for &j in &self.order {
