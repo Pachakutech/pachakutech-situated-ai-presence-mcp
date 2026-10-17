@@ -1,10 +1,12 @@
 //! Screen aim for the sitting figure.
 //!
-//! Theta is a clock on the screen: 0 below her, +π/2 to the viewer's right,
-//! π above, −π/2 to the viewer's left. The same angle picks a frame of `Point`
-//! and a root yaw. A critically damped spring carries theta, so a turn from
-//! one side to the other settles instead of snapping. An exact tie between
-//! the high pose and the low pose takes the low pose.
+//! Theta is a clock on the screen. Screen y grows down. The camera is a 180°
+//! yaw, so world +X appears on the viewer's left and the horizontal delta is
+//! `figure_x - box_x`. `atan2(dx, dy)` is 0 below her, −π/2 to the viewer's
+//! right, π above, and +π/2 to the viewer's left. The same angle picks a frame
+//! of `Point` and a root yaw. A critically damped spring carries theta, so a
+//! turn from one side to the other settles instead of snapping. An exact tie
+//! between the high pose and the low pose takes the low pose.
 
 /// One breath. The 15 s clip is played through in this many seconds.
 pub const BREATH_PERIOD_S: f32 = 4.0;
@@ -50,9 +52,11 @@ pub fn shortest_delta(from: f32, to: f32) -> f32 {
     }
 }
 
-/// Screen y grows down. `atan2(dx, dy)`: 0 below, +π/2 viewer's right.
+/// Screen y grows down. `dx` is `figure_x - box_x` because the camera mirrors
+/// X. `atan2(dx, dy)`: 0 below, −π/2 on the viewer's right, π above, +π/2 on
+/// the viewer's left.
 pub fn aim_theta(figure_x: f32, figure_y: f32, box_x: f32, box_y: f32) -> f32 {
-    let dx = box_x - figure_x;
+    let dx = figure_x - box_x;
     let dy = box_y - figure_y;
     dx.atan2(dy)
 }
@@ -70,8 +74,8 @@ pub fn point_time(theta: f32, duration: f32) -> f32 {
     (theta / std::f32::consts::TAU).rem_euclid(1.0) * duration
 }
 
-/// Yaw about +Y from the same theta. 0 above and below, +π/2 at the viewer's
-/// right, −π/2 at the viewer's left.
+/// Yaw about +Y from the same theta. 0 above and below. The sign follows
+/// theta, so she turns toward the side of the screen the box is on.
 pub fn aim_yaw(theta: f32) -> f32 {
     theta.sin().atan2(theta.cos().abs())
 }
@@ -148,10 +152,12 @@ mod tests {
     fn screen_quadrants() {
         let pi = std::f32::consts::PI;
         let (fx, fy) = (100.0, 100.0);
+        // y grows down. A larger x is the viewer's right, and the camera
+        // mirrors X, so that box is −π/2.
         assert!(near(aim_theta(fx, fy, 100.0, 180.0), 0.0));
-        assert!(near(aim_theta(fx, fy, 180.0, 100.0), pi / 2.0));
+        assert!(near(aim_theta(fx, fy, 180.0, 100.0), -pi / 2.0));
         assert!(near(aim_theta(fx, fy, 100.0, 20.0), pi));
-        assert!(near(aim_theta(fx, fy, 20.0, 100.0), -pi / 2.0));
+        assert!(near(aim_theta(fx, fy, 20.0, 100.0), pi / 2.0));
     }
 
     #[test]

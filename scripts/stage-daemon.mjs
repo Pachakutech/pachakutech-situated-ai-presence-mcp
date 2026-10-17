@@ -29,8 +29,9 @@ await chmod(destination, 0o755);
 
 console.error(`Staged daemon: ${destination}`);
 
-// The avatar cloud, rig and binding ship beside the binary; the daemon looks
-// in <exe dir>/assets first (daemon/src/main.rs: avatar_manifest).
+// Package payload, copied from assets/ at stage time. A binary built in this
+// checkout reads assets/ directly. This directory is what an install uses
+// once that checkout path is gone (daemon/src/main.rs: avatar_manifest).
 const assetNames = ["avatar_manifest.json", "humanoid_proxy_rigged.glb", "humanoid_proxy_rigged.splatbind"];
 const assetDir = resolve(dirname(destination), "assets");
 await mkdir(assetDir, { recursive: true });

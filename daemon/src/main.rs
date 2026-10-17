@@ -38,16 +38,22 @@ fn avatar_manifest() -> PathBuf {
             return PathBuf::from(over);
         }
     }
+    // Absolute path baked in at build time. On the machine that compiled this
+    // binary it is the checkout's assets/, so an export is what the next start
+    // loads. An install on another machine does not have that path.
     let compiled = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../assets/avatar_manifest.json");
-    // The npm package ships assets next to the binary: native/linux-x64/assets/.
+    if compiled.exists() {
+        return compiled;
+    }
+    // npm ships a copy beside the binary: native/linux-x64/assets/. stage-daemon
+    // fills it from assets/ at package time. It is not a second file to keep by hand.
     let beside_exe = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("assets/avatar_manifest.json")));
     let candidates = [
         beside_exe.unwrap_or_else(|| PathBuf::from("/nonexistent")),
         PathBuf::from("assets/avatar_manifest.json"),
         PathBuf::from("../assets/avatar_manifest.json"),
-        compiled.clone(),
     ];
-    candidates.into_iter().find(|p| p.exists()).unwrap_or(compiled)
+    candidates.into_iter().find(|p| p.exists()).unwrap_or_else(|| PathBuf::from("assets/avatar_manifest.json"))
 }
 
 fn socket_path() -> PathBuf {

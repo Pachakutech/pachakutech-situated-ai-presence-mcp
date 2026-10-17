@@ -75,13 +75,15 @@ fn point_compass_frames_place_the_wrists() {
         (l, r)
     };
     let (down_l, down_r) = wrist(0.0);
-    let (right_l, right_r) = wrist(dur * 0.25);
+    // Skeleton, before the camera. A quarter of the clip is wrist.L on +X.
+    // Ry(π) shows that arm on the viewer's left; aim_theta accounts for it.
+    let (quarter_l, quarter_r) = wrist(dur * 0.25);
     let (up_l, up_r) = wrist(dur * 0.5);
-    let (left_l, left_r) = wrist(dur * 0.75);
-    assert!(right_l[1] > right_r[1] + 0.05, "viewer's right: left wrist should be higher {right_l:?} {right_r:?}");
-    assert!(right_l[0] > right_r[0] + 0.05, "viewer's right: left wrist should be further on +X");
-    assert!(left_r[1] > left_l[1] + 0.05, "viewer's left: right wrist should be higher {left_l:?} {left_r:?}");
-    assert!(left_r[0] < left_l[0] - 0.05, "viewer's left: right wrist should be further on -X");
+    let (three_l, three_r) = wrist(dur * 0.75);
+    assert!(quarter_l[1] > quarter_r[1] + 0.05, "quarter: left wrist should be higher {quarter_l:?} {quarter_r:?}");
+    assert!(quarter_l[0] > quarter_r[0] + 0.05, "quarter: left wrist should be further on +X");
+    assert!(three_r[1] > three_l[1] + 0.05, "three-quarter: right wrist should be higher {three_l:?} {three_r:?}");
+    assert!(three_r[0] < three_l[0] - 0.05, "three-quarter: right wrist should be further on -X");
     assert!((up_l[1] - up_r[1]).abs() < 0.05, "above: wrists should match in height {up_l:?} {up_r:?}");
     assert!(up_l[1] > down_l[1] + 0.2 && up_r[1] > down_r[1] + 0.2, "above should clear the low pose");
     let root = a.rig.joint("root").unwrap();
