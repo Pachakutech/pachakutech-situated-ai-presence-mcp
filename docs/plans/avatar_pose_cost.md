@@ -2,6 +2,8 @@
 
 This task is for the agent on this machine. The daemon, the Iris Xe, and the live figure are all here. It is not a handoff to a machine without a GPU. The acceptance of the GPU path is a readback on this device, and the process CPU is remeasured after it is on.
 
+Strategy 1 has landed. `avatar_expand.comp` skins and reconstructs on the Iris Xe. The startup check compared all 50,000 splats to `evaluate` on a breath, a side point, and an open jaw: max position error 3.6e-7, rotation dot 1.0, 50,000 discs. The CPU path stays. With the figure breathing, the process sat at about 3% of one core (main thread 1.5%, capture 0.5%), down from about 18% while the expand was still on the CPU.
+
 The interface that skins a cloud from a bone palette is real, and this avatar does not use it. Every visible tick skins the proxy mesh on the CPU, rebuilds all 50,000 splats, and uploads the finished cloud. `write_bone` has no callers. The palette is filled once with identity and left there.
 
 ## What is actually uploaded
@@ -34,7 +36,7 @@ Sampling the clip is not the cost. Skinning the vertices, rebuilding every splat
 
 Eight percent is the whole process, not a line profile. `top`'s `%CPU` counts one logical CPU as 100%. This machine has 8. On 2026-10-19, with the figure up and breathing, the daemon averaged 8.8% of one core over 7 minutes 40 seconds. Three one-second samples read 5.0, 9.2, and 9.2. Fence waits inside `pipeline.tick` are not in that number.
 
-`evaluate` alone, release, one hundred breath frames after a warmup, measured 3.108 ms per call before this task changed the expand. A 4.8 MB `memcpy` of the cloud measured 0.414 ms. At a 33 ms tick, 3.1 ms is about nine percent of one core, which is the whole process measurement. The copy is the smaller part. After strategy 3 the same harness measured 2.330 ms and 0.322 ms. The remaining two milliseconds are the vertex skin and the per-splat scatter. Strategy 1 is what takes those off the CPU.
+`evaluate` alone, release, one hundred breath frames after a warmup, measured 3.108 ms per call before this task changed the expand. A 4.8 MB `memcpy` of the cloud measured 0.414 ms. At a 33 ms tick, 3.1 ms is about nine percent of one core, which is the whole process measurement. The copy is the smaller part. After strategy 3 the same harness measured 2.330 ms and 0.322 ms. The remaining two milliseconds were the vertex skin and the per-splat scatter. Strategy 1 took those off the CPU. On 2026-10-19, after that dispatch was the live path, a two-second sample read 3.0% for the process, 1.5% for the main thread, and 0.5% for capture. The earlier 17.8% reading was that same main thread, one process, with speech idle.
 
 ## Constant animation and caching
 
@@ -56,7 +58,7 @@ Strategy 1 is the one that makes the running path match the interface above. The
 
 ### 1. Skin and reconstruct on the GPU
 
-Upload the rest vertices, indices, weights, morph deltas, splatbind records, and rest frames once. Each tick, write the skin matrices `Rig::skin_matrices` already computes, plus the morph weights. That matrix buffer is the length of the GLB skin, 181 on this export, and it is not the 64-slot projection palette. One compute dispatch skins with the same linear blend as `ProxyMesh::skin`, builds one frame per triangle, reconstructs each splat, and stores `AnimatedSplatGpu` in the existing buffer with rigid skin. `gpu_layout.rs` and the projection shader stay as they are. `deform.rs` stays the oracle.
+Landed. `daemon/shaders/avatar_expand.comp` and `daemon/src/avatar_expand.rs` upload the rest vertices, indices, weights, morph deltas, splatbind records, and rest frames once. Each tick writes the skin matrices `prepare_skin` computes, plus the morph weights. That matrix buffer is the length of the GLB skin, 181 on this export, and it is not the 64-slot projection palette. One compute dispatch skins with the same linear blend as `ProxyMesh::skin`, builds one frame per triangle, reconstructs each splat, and stores `AnimatedSplatGpu` in the existing buffer with rigid skin. `gpu_layout.rs` and the projection shader stay as they are. `deform.rs` stays the oracle. `tick_avatar` runs the dispatch. If the startup check fails, it leaves the CPU upload in place.
 
 Match those matrices. Do not switch the oracle to the projection shader's dual quaternions. That would move the silhouette. Keep morph weights in the dispatch even though this export's target list is empty, so a viseme export does not need a second port.
 
@@ -95,15 +97,15 @@ On the GPU path the split is a dispatch range, not a second shader. The head can
 
 A 10 Hz cloud held for three ticks steps. Keep the previous expand and the new one. For the ticks in between, blend positions and slerp rotations by how far the clock is across the floor interval. A jaw or an arm that took the immediate path starts a new interval. The blend is a few thousand bytes of indices if strategy 5 has already limited the range, or one pass over the cloud if it has not.
 
-When strategy 1 is skinning every frame from the latest palette, this blend is retired. Until then it is what makes strategy 2 look like motion instead of a held pose. Do not bake a breath cycle into a stack of full clouds. The point clock and the jaw compose on top of the breath, and a baked cycle cannot carry them.
+Strategy 1 skins every frame from the latest palette, so this blend is retired. Do not bake a breath cycle into a stack of full clouds. The point clock and the jaw compose on top of the breath, and a baked cycle cannot carry them.
 
 ## Order of work
 
 1. Time `evaluate` and a 4.8 MB copy. Done. 3.108 ms and 0.414 ms before strategy 3. 2.330 ms and 0.322 ms after.
 2. Land strategy 3. Done. The bit-match test is the acceptance.
-3. Land strategy 1. Readback against `evaluate` on this GPU, then run it on the live figure and sample `%CPU` again.
-4. Land strategies 4 and 5 on the palette and the dispatch ranges, so a turn and a jaw do not reskin the body.
-5. Land strategy 2 as the palette gate. If a held interval is visible before strategy 1 is smooth at full rate, land strategy 6 for that interval only.
+3. Land strategy 1. Done. All 50,000 splats matched `evaluate` within 3.6e-7 and a rotation dot of 1.0 on breath, point, and jaw, and the live process measured about 3% of one core.
+4. Strategies 4 and 5 stay open. They are no longer what removes the expand from the CPU. They matter if a turn or a jaw should stop reskinning the whole body on the device.
+5. Strategy 2 stays optional on the GPU path. Strategy 6 is retired: the dispatch already runs every frame.
 
 ## Leave these alone
 
