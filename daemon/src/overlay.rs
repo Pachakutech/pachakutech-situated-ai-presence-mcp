@@ -2944,9 +2944,7 @@ pub fn run(
             let boxes = server.visible_interests();
             overlay.sync_marks(&boxes)
         };
-        if !hide {
-            gpu.set_heat_marks(mark_rects);
-        }
+        gpu.set_heat_marks(mark_rects);
 
         // --- Session ingress power policy (L1 + L2 + L3) ---
         // Edge-triggered: only act on hide transitions, not steady-state.

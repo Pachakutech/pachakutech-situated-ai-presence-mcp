@@ -147,8 +147,9 @@ fn jaw_opens_chin_without_moving_forehead() {
             brow_move += moved;
             brow_n += 1.0;
         }
-        // Lower face, in front of the head, and actually displaced by the hinge.
-        if r.position[1] > head_y && r.position[1] < brow_y - 0.05 && r.position[2] > 0.02 && moved > 0.002 {
+        // Lower face, on the side she faces after the half turn about +Y, and
+        // actually displaced by the hinge.
+        if r.position[1] > head_y && r.position[1] < brow_y - 0.05 && r.position[2] < -0.02 && moved > 0.002 {
             chin_drop += r.position[1] - a.posed[i].position[1];
             chin_n += 1.0;
         }

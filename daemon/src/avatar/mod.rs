@@ -72,7 +72,13 @@ pub struct AvatarActor {
     pub bound_presence: Option<String>,
     /// True while an utterance is actually playing. The point reads this.
     talking: bool,
+    /// Pose clock. Theta 0 is the arms-down frame of `Point`.
     aim: aim::AimSpring,
+    /// Body yaw. Tracks `aim_yaw` of the commanded angle, not of `aim.theta`,
+    /// so the arms can pass a side frame while the body stays facing forward.
+    yaw_aim: aim::AimSpring,
+    /// Restarts when speech or the mark changes. The springs do not.
+    gesture: aim::GestureClock,
     /// `Point` arm joints copied onto the breath. Empty when those names are absent.
     point_joints: Vec<usize>,
     time: f32,
@@ -131,7 +137,11 @@ impl AvatarActor {
             demo_motion: true, time: 0.,
             speech: crate::speech::Speaker::new(crate::speech::SpeechConfig::from_env()),
             visible: true, autoload: true, bound_presence: None,
-            talking: false, aim: aim::AimSpring::default(), point_joints,
+            talking: false,
+            aim: aim::AimSpring::default(),
+            yaw_aim: aim::AimSpring::default(),
+            gesture: aim::GestureClock::default(),
+            point_joints,
             posed_verts: vec![], posed: vec![], stats: DeformStats::default(),
         };
         a.play("idle", true);
@@ -175,6 +185,8 @@ impl AvatarActor {
                 self.root = RootState { pos: [0.; 3], yaw: 0. };
                 self.rest();
                 self.aim.reset();
+                self.yaw_aim.reset();
+                self.gesture.reset();
                 self.talking = false;
                 self.face = FaceFrame::default();
             }
@@ -186,6 +198,8 @@ impl AvatarActor {
                     self.visible = self.autoload;
                     self.demo_motion = self.autoload;
                     self.aim.reset();
+                    self.yaw_aim.reset();
+                    self.gesture.reset();
                     self.talking = false;
                 }
             }
@@ -207,6 +221,8 @@ impl AvatarActor {
                 self.walk_target = None;
                 self.root.yaw = 0.0;
                 self.aim.reset();
+                self.yaw_aim.reset();
+                self.gesture.reset();
                 self.talking = false;
                 self.face = FaceFrame::default();
             }
@@ -284,9 +300,14 @@ impl AvatarActor {
         )
     }
 
-    /// Aim the damped spring. `highlight` is the mark still on screen for the
+    /// Aim the two springs. `highlight` is the mark still on screen for the
     /// presence that owns the body, not the box left behind after it fades.
     /// Demo sway keeps the yaw when `demo_motion` is set; the caller skips this.
+    ///
+    /// Talking with a mark waves between the ends of the corner arc, after a
+    /// hold in the middle. Talking with no mark waves 10° off the low pose.
+    /// Otherwise both springs ease back to 0. A new mode or a new rect restarts
+    /// the wave clock and leaves the springs to travel from where they are.
     pub fn steer(
         &mut self,
         dt: f32,
@@ -294,13 +315,27 @@ impl AvatarActor {
         figure: (f32, f32),
         screen: (f32, f32),
     ) {
-        let aim = highlight.filter(|_| screen.0 > 1.0 && screen.1 > 1.0).map(|b| {
-            let (bx, by) = aim::box_center(b.u, b.v, b.w, b.h, screen.0, screen.1);
-            aim::aim_theta(figure.0, figure.1, bx, by)
-        });
-        let target = aim::gesture_target(self.talking, aim);
-        self.aim.step(target, dt);
-        self.root.yaw = aim::aim_yaw(self.aim.theta);
+        let mark = highlight.filter(|_| screen.0 > 1.0 && screen.1 > 1.0);
+        let mode = if !self.talking {
+            aim::GestureMode::Rest
+        } else if let Some(b) = mark {
+            aim::GestureMode::Wave([b.u.to_bits(), b.v.to_bits(), b.w.to_bits(), b.h.to_bits()])
+        } else {
+            aim::GestureMode::Talk
+        };
+        let t = self.gesture.sample(mode, dt);
+        let commanded = match mark {
+            Some(b) if self.talking => {
+                let corners = aim::box_corners(b.u, b.v, b.w, b.h, screen.0, screen.1);
+                let (start, end) = aim::wave_endpoints(figure.0, figure.1, corners);
+                aim::sweep_angle(start, end, t)
+            }
+            None if self.talking => aim::talk_wave(t),
+            _ => 0.0,
+        };
+        self.aim.step(commanded, dt);
+        self.yaw_aim.step(aim::aim_yaw(commanded), dt);
+        self.root.yaw = self.yaw_aim.theta;
     }
 
     /// Breath, with `Point`'s arms at the current aim. Theta 0 is the low pose,
@@ -337,7 +372,10 @@ impl AvatarActor {
             let ang = self.face.jaw_open.clamp(0., 1.) * self.jaw_max_rad;
             if ang != 0.0 { pose.r[j] = quat_mul(pose.r[j], quat_axis_angle(self.jaw_axis, ang)); }
         }
-        let mut root = mat4_from_trs(self.root.pos, quat_axis_angle([0., 1., 0.], self.root.yaw));
+        let mut root = mat4_from_trs(
+            self.root.pos,
+            quat_axis_angle([0., 1., 0.], self.root.yaw + aim::FACING_YAW),
+        );
         root[13] -= self.ground_offset; // soles to y = 0
         let mats = self.rig.skin_matrices(&pose, &root);
         self.mesh.skin(&self.face.morphs, &mats, &mut self.posed_verts);

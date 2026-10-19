@@ -38,6 +38,19 @@ const W_MOTION: f32 = 1.2;
 /// brightness barely moves when grey type is rewritten, so this is the
 /// term that makes a live paragraph the hot end of the field.
 const W_CHANGING: f32 = 8.0;
+/// Highlight interior. Hotter than text, short of a cell whose letters are
+/// changing. The shader writes 0 there (the tint is not the page); the copy
+/// replaces that 0 with this.
+const W_MARK_HOT: f32 = 4.0;
+/// Subtracted from the frame just outside the highlight and its margin.
+/// About one text-weight, so a blank frame is cooler than blank desktop and
+/// a changing paragraph there stays hot.
+const W_MARK_COOL: f32 = 1.0;
+/// Pixels outside the rect that still count with the highlight, at text weight.
+const MARK_MARGIN_PX: f32 = 12.0;
+/// Pixels outside that margin that cool. One cell of the 40 px grid, so the
+/// ring has a center to land in.
+const MARK_FRAME_PX: f32 = 40.0;
 
 #[repr(C)]
 struct HeatPush {
@@ -69,6 +82,8 @@ struct Written {
     mask_b: (i32, i32),
     disc_a: i32,
     disc_b: i32,
+    /// Rects the dispatch masked. The stamp uses these, not a later set.
+    marks: [[f32; 4]; 3],
 }
 
 pub struct ScreenHeat {
@@ -251,9 +266,10 @@ impl ScreenHeat {
         self.disc_px = side.max(1);
     }
 
-    /// Screen-pixel rects the next dispatch should treat like the disc.
-    /// A width of 0 is no rect. These are not the disc size: the seat window
-    /// still comes from `mask_a.z`.
+    /// Screen-pixel rects of marks that are showing. A width of 0 is none.
+    /// The shader still masks the interior so the tint is not measured. The
+    /// copy stamps heat from the rects that dispatch used. These are not the
+    /// disc size: the seat window still comes from `mask_a.z`.
     pub fn set_marks(&mut self, marks: [[f32; 4]; 3]) {
         self.marks = marks;
     }
@@ -276,6 +292,14 @@ impl ScreenHeat {
             );
             self.logged = true;
         }
+        stamp_visible_marks(
+            &mut heat,
+            written.cols,
+            written.rows,
+            written.cell_px,
+            &written.marks,
+            &[(written.mask_a, written.disc_a), (written.mask_b, written.disc_b)],
+        );
         self.ready = Some(HeatGrid {
             cols: written.cols,
             rows: written.rows,
@@ -416,6 +440,7 @@ impl ScreenHeat {
             mask_b,
             disc_a: side_a,
             disc_b: side_b,
+            marks: self.marks,
         });
         Ok(())
     }
@@ -465,6 +490,148 @@ fn grid_shape(w: u32, h: u32) -> (u32, u32, u32) {
 
 fn div_up(n: u32, d: u32) -> u32 {
     n.saturating_add(d - 1) / d.max(1)
+}
+
+/// Distance from a point to a rect. 0 when the point is inside. A width of
+/// 1 or less is no rect, matching the shader.
+fn rect_outset(px: f32, py: f32, r: [f32; 4]) -> f32 {
+    let (x, y, w, h) = (r[0], r[1], r[2], r[3]);
+    if w <= 1.0 || h <= 0.0 {
+        return f32::MAX;
+    }
+    let dx = if px < x {
+        x - px
+    } else if px >= x + w {
+        px - (x + w)
+    } else {
+        0.0
+    };
+    let dy = if py < y {
+        y - py
+    } else if py >= y + h {
+        py - (y + h)
+    } else {
+        0.0
+    };
+    if dx == 0.0 && dy == 0.0 {
+        0.0
+    } else {
+        (dx * dx + dy * dy).sqrt()
+    }
+}
+
+fn disc_covers(px: f32, py: f32, origin: (i32, i32), side: i32) -> bool {
+    side > 1
+        && px >= origin.0 as f32
+        && py >= origin.1 as f32
+        && px < origin.0 as f32 + side as f32
+        && py < origin.1 as f32 + side as f32
+}
+
+/// While a mark is showing: interior becomes `W_MARK_HOT`, the 12 px margin
+/// gains text weight, and the next 40 px cools by `W_MARK_COOL`. Cells under
+/// a disc stay as the shader left them. No live rect leaves the grid alone,
+/// which is the revert when the mark has stopped showing.
+fn stamp_visible_marks(
+    heat: &mut [f32],
+    cols: u32,
+    rows: u32,
+    cell_px: u32,
+    marks: &[[f32; 4]; 3],
+    discs: &[((i32, i32), i32)],
+) {
+    if cols == 0 || rows == 0 {
+        return;
+    }
+    let n = (cols as usize).saturating_mul(rows as usize);
+    if heat.len() != n {
+        return;
+    }
+    let live = marks.iter().any(|r| r[2] > 1.0 && r[3] > 0.0);
+    if !live {
+        return;
+    }
+    let cell = cell_px.max(1) as f32;
+    let frame_reach = MARK_MARGIN_PX + MARK_FRAME_PX;
+    for row in 0..rows {
+        for col in 0..cols {
+            let cx = (col as f32 + 0.5) * cell;
+            let cy = (row as f32 + 0.5) * cell;
+            if discs.iter().any(|&(origin, side)| disc_covers(cx, cy, origin, side)) {
+                continue;
+            }
+            let mut inside = false;
+            let mut margin = false;
+            let mut frame = false;
+            for r in marks {
+                let d = rect_outset(cx, cy, *r);
+                if d <= 0.0 {
+                    inside = true;
+                    break;
+                } else if d <= MARK_MARGIN_PX {
+                    margin = true;
+                } else if d <= frame_reach {
+                    frame = true;
+                }
+            }
+            let i = (row * cols + col) as usize;
+            if inside {
+                heat[i] = W_MARK_HOT;
+            } else if margin {
+                heat[i] += W_TEXT;
+            } else if frame {
+                heat[i] -= W_MARK_COOL;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn grid(fill: f32) -> Vec<f32> {
+        vec![fill; 4 * 4]
+    }
+
+    #[test]
+    fn a_showing_mark_heats_the_inside_and_cools_the_frame() {
+        let mut heat = grid(0.5);
+        let mut marks = [[0.0; 4]; 3];
+        // Cells are 40 px, centers at 20, 60, 100, 140.
+        // The rect covers (20, 20) only. (60, 20) is 30 px outside: the frame.
+        // (100, 20) is 70 px outside the 52 px reach.
+        marks[0] = [0.0, 0.0, 30.0, 30.0];
+        stamp_visible_marks(&mut heat, 4, 4, 40, &marks, &[]);
+        let at = |c, r| heat[(r * 4 + c) as usize];
+        assert_eq!(at(0, 0), W_MARK_HOT);
+        assert!((at(1, 0) - (0.5 - W_MARK_COOL)).abs() < 1e-5, "frame {}", at(1, 0));
+        assert!((at(2, 0) - 0.5).abs() < 1e-5, "untouched {}", at(2, 0));
+    }
+
+    #[test]
+    fn the_margin_adds_text_weight_and_a_gone_mark_adds_nothing() {
+        let mut heat = grid(0.2);
+        let mut marks = [[0.0; 4]; 3];
+        // Center (60, 60) is 4 px outside a rect that ends at x=56.
+        marks[0] = [0.0, 48.0, 56.0, 24.0];
+        stamp_visible_marks(&mut heat, 4, 4, 40, &marks, &[]);
+        let margin = heat[1 * 4 + 1];
+        assert!((margin - (0.2 + W_TEXT)).abs() < 1e-5, "margin {margin}");
+        let mut cleared = grid(0.2);
+        stamp_visible_marks(&mut cleared, 4, 4, 40, &[[0.0; 4]; 3], &[]);
+        assert!(cleared.iter().all(|h| (*h - 0.2).abs() < 1e-5));
+    }
+
+    #[test]
+    fn the_disc_is_not_stamped() {
+        let mut heat = grid(0.0);
+        let mut marks = [[0.0; 4]; 3];
+        marks[0] = [0.0, 0.0, 200.0, 200.0];
+        stamp_visible_marks(&mut heat, 4, 4, 40, &marks, &[((0, 0), 80)]);
+        assert_eq!(heat[0], 0.0);
+        assert_eq!(heat[2 * 4 + 2], W_MARK_HOT);
+    }
 }
 
 fn alloc(

@@ -1,12 +1,23 @@
 //! Screen aim for the sitting figure.
 //!
-//! Theta is a clock on the screen. Screen y grows down. The camera is a 180°
-//! yaw, so world +X appears on the viewer's left and the horizontal delta is
-//! `figure_x - box_x`. `atan2(dx, dy)` is 0 below her, −π/2 to the viewer's
-//! right, π above, and +π/2 to the viewer's left. The same angle picks a frame
-//! of `Point` and a root yaw. A critically damped spring carries theta, so a
-//! turn from one side to the other settles instead of snapping. An exact tie
-//! between the high pose and the low pose takes the low pose.
+//! Theta is a clock on the screen: 0 below her, +π/2 to the viewer's right,
+//! π above, −π/2 to the viewer's left. That angle picks a frame of `Point`.
+//! Root yaw comes from the commanded angle, not from the frame the arms are
+//! passing through, so a raise from the low pose to straight up does not yaw
+//! the body out to the side and back. The mesh is exported facing away, so
+//! the actor adds a half turn about +Y on top of that yaw and she faces the
+//! viewer at rest. Two critically damped springs carry the pose clock and the
+//! yaw. An exact tie between the high pose and the low pose takes the low pose.
+//!
+//! A highlight is a wave between two corners. Those are the two nearest when
+//! they tie, and otherwise the two that are neither nearest nor farthest.
+//! The farthest corner lies between that pair. She starts in the middle of
+//! the arc. Talking with no mark is a small wave on the same clip, from the
+//! low pose out to one side.
+
+/// Half turn about +Y. The exported mesh faces away from the camera; this
+/// brings her face toward the viewer. Aim yaw is added on top.
+pub const FACING_YAW: f32 = std::f32::consts::PI;
 
 /// One breath. The 15 s clip is played through in this many seconds.
 pub const BREATH_PERIOD_S: f32 = 4.0;
@@ -52,21 +63,26 @@ pub fn shortest_delta(from: f32, to: f32) -> f32 {
     }
 }
 
-/// Screen y grows down. `dx` is `figure_x - box_x` because the camera mirrors
-/// X. `atan2(dx, dy)`: 0 below, −π/2 on the viewer's right, π above, +π/2 on
-/// the viewer's left.
+/// Screen y grows down. `atan2(dx, dy)`: 0 below, +π/2 to the viewer's right.
 pub fn aim_theta(figure_x: f32, figure_y: f32, box_x: f32, box_y: f32) -> f32 {
-    let dx = figure_x - box_x;
+    let dx = box_x - figure_x;
     let dy = box_y - figure_y;
     dx.atan2(dy)
 }
 
-pub fn box_center(u: f32, v: f32, w: f32, h: f32, screen_w: f32, screen_h: f32) -> (f32, f32) {
-    ((u + w * 0.5) * screen_w, (v + h * 0.5) * screen_h)
+/// The four corners of a highlight, in screen pixels. Screen y grows down.
+pub fn box_corners(u: f32, v: f32, w: f32, h: f32, screen_w: f32, screen_h: f32) -> [(f32, f32); 4] {
+    let x0 = u * screen_w;
+    let y0 = v * screen_h;
+    let x1 = (u + w) * screen_w;
+    let y1 = (v + h) * screen_h;
+    [(x0, y0), (x1, y0), (x0, y1), (x1, y1)]
 }
 
-/// `Point` time for this theta, wrapped into `[0, duration)`. Theta 0 is the
-/// low pose. Theta π/2 is a quarter of the way through the clip.
+/// `Point` time for this theta, wrapped into `[0, duration)`. One turn of the
+/// clock is one play of the clip: theta 0 is the low pose, theta π/2 is a
+/// quarter of the way through. A 15 s export puts straight up at 7.5 s. A
+/// 360 s export, one second per degree, puts it at 180 s with no other change.
 pub fn point_time(theta: f32, duration: f32) -> f32 {
     if duration <= 0.0 {
         return 0.0;
@@ -74,18 +90,143 @@ pub fn point_time(theta: f32, duration: f32) -> f32 {
     (theta / std::f32::consts::TAU).rem_euclid(1.0) * duration
 }
 
-/// Yaw about +Y from the same theta. 0 above and below. The sign follows
-/// theta, so she turns toward the side of the screen the box is on.
+/// Yaw about +Y from the same theta. 0 above and below, +π/2 at the viewer's
+/// right, −π/2 at the viewer's left. `FACING_YAW` is applied on top of this.
 pub fn aim_yaw(theta: f32) -> f32 {
     theta.sin().atan2(theta.cos().abs())
 }
 
-/// Point only while she is talking and a highlight is still on screen.
-/// Otherwise the target is the arms-down pose.
-pub fn gesture_target(talking: bool, aim: Option<f32>) -> f32 {
-    match aim {
-        Some(theta) if talking => theta,
-        _ => 0.0,
+/// Hold the middle of a highlight arc this long before the wave leaves it.
+/// The aim spring settles in about a second.
+pub const SWEEP_SETTLE_S: f32 = 1.0;
+
+/// One trip out to a corner and across to the other.
+pub const SWEEP_PERIOD_S: f32 = 3.0;
+
+/// One trip out and back while talking with no mark.
+pub const TALK_WAVE_PERIOD_S: f32 = 3.0;
+
+/// How far that wave leaves the arms-down pose, toward the viewer's right.
+pub const TALK_WAVE_RAD: f32 = 10.0 * std::f32::consts::PI / 180.0;
+
+/// Ends of the wave, as angles.
+///
+/// Sort the corners by distance from the figure. A tie of the two nearest
+/// (the near edge of a box straight above) makes those two the ends.
+/// Otherwise the ends are the two that are neither nearest nor farthest, and
+/// the arc is the one with the farthest corner between them. `start` to `end`
+/// runs in the direction of increasing angle.
+pub fn wave_endpoints(figure_x: f32, figure_y: f32, corners: [(f32, f32); 4]) -> (f32, f32) {
+    let mut order = [0usize, 1, 2, 3];
+    let dist = corners.map(|(x, y)| {
+        let dx = x - figure_x;
+        let dy = y - figure_y;
+        dx * dx + dy * dy
+    });
+    order.sort_by(|&i, &j| dist[i].total_cmp(&dist[j]).then(i.cmp(&j)));
+    let d = |i: usize| dist[order[i]].sqrt();
+    let tied = |near: f32, far: f32| far <= near * (1.0 + 1e-3) + 1e-2;
+    let theta = |i: usize| {
+        let (x, y) = corners[order[i]];
+        aim_theta(figure_x, figure_y, x, y)
+    };
+    if tied(d(0), d(1)) && !tied(d(1), d(2)) {
+        return arc_through(theta(0), theta(1), theta(3));
+    }
+    if !tied(d(0), d(1)) {
+        return arc_through(theta(1), theta(2), theta(3));
+    }
+    // She is inside the box: three or four corners are the same distance.
+    // The short arc that contains every corner is the only wedge left.
+    let mut ang = corners.map(|(x, y)| aim_theta(figure_x, figure_y, x, y));
+    ang.sort_by(|a, b| a.total_cmp(b));
+    let tau = std::f32::consts::TAU;
+    let mut best_gap = -1.0_f32;
+    let mut best_i = 0_usize;
+    for i in 0..4 {
+        let next = if i + 1 == 4 { ang[0] + tau } else { ang[i + 1] };
+        let gap = next - ang[i];
+        if gap > best_gap {
+            best_gap = gap;
+            best_i = i;
+        }
+    }
+    let start = if best_i + 1 == 4 { ang[0] } else { ang[best_i + 1] };
+    (start, ang[best_i])
+}
+
+/// The arc from `a` to `b` that contains `far`. Increasing angle from the
+/// returned start reaches `far` before the end.
+fn arc_through(a: f32, b: f32, far: f32) -> (f32, f32) {
+    let tau = std::f32::consts::TAU;
+    let span = (b - a).rem_euclid(tau);
+    let along = (far - a).rem_euclid(tau);
+    if along <= span + 1e-4 {
+        (a, b)
+    } else {
+        (b, a)
+    }
+}
+
+/// Length of the containing arc from `start` to `end`, in `[0, τ)`.
+pub fn containing_span(start: f32, end: f32) -> f32 {
+    (end - start).rem_euclid(std::f32::consts::TAU)
+}
+
+/// Hold the middle, then swing out to each end of the containing arc.
+pub fn sweep_angle(start: f32, end: f32, t: f32) -> f32 {
+    let span = containing_span(start, end);
+    let mid = wrap_pi(start + span * 0.5);
+    if t < SWEEP_SETTLE_S {
+        return mid;
+    }
+    let phase = (t - SWEEP_SETTLE_S) / SWEEP_PERIOD_S * std::f32::consts::TAU;
+    wrap_pi(mid + (span * 0.5) * phase.sin())
+}
+
+/// Arms-down, out to 10° on the viewer's right, and back. `t` 0 and the
+/// period are the low pose. The peak is half a period later.
+pub fn talk_wave(t: f32) -> f32 {
+    let phase = t / TALK_WAVE_PERIOD_S * std::f32::consts::TAU;
+    TALK_WAVE_RAD * 0.5 * (1.0 - phase.cos())
+}
+
+/// What the gesture clock is counting. A change restarts it at the middle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GestureMode {
+    Rest,
+    Talk,
+    /// Highlight rect, as `to_bits` of u, v, w, h.
+    Wave([u32; 4]),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct GestureClock {
+    pub t: f32,
+    mode: GestureMode,
+}
+
+impl Default for GestureClock {
+    fn default() -> Self {
+        Self { t: 0.0, mode: GestureMode::Rest }
+    }
+}
+
+impl GestureClock {
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Seconds since this mode began. A new mode returns 0 and does not
+    /// consume `dt`, so the first sample is the middle of the new wave.
+    pub fn sample(&mut self, mode: GestureMode, dt: f32) -> f32 {
+        if self.mode != mode {
+            self.mode = mode;
+            self.t = 0.0;
+        } else {
+            self.t += dt.max(0.0);
+        }
+        self.t
     }
 }
 
@@ -146,18 +287,19 @@ mod tests {
         assert!(near(point_time(pi, dur), 7.5));
         assert!(near(point_time(-pi / 2.0, dur), 11.25));
         assert!(near(point_time(3.0 * pi / 2.0, dur), 11.25));
+        // One second per degree lands straight up at t = 180.
+        assert!(near(point_time(pi, 360.0), 180.0));
     }
 
     #[test]
     fn screen_quadrants() {
         let pi = std::f32::consts::PI;
         let (fx, fy) = (100.0, 100.0);
-        // y grows down. A larger x is the viewer's right, and the camera
-        // mirrors X, so that box is −π/2.
+        // y grows down. A larger x is the viewer's right.
         assert!(near(aim_theta(fx, fy, 100.0, 180.0), 0.0));
-        assert!(near(aim_theta(fx, fy, 180.0, 100.0), -pi / 2.0));
+        assert!(near(aim_theta(fx, fy, 180.0, 100.0), pi / 2.0));
         assert!(near(aim_theta(fx, fy, 100.0, 20.0), pi));
-        assert!(near(aim_theta(fx, fy, 20.0, 100.0), pi / 2.0));
+        assert!(near(aim_theta(fx, fy, 20.0, 100.0), -pi / 2.0));
     }
 
     #[test]
@@ -188,11 +330,90 @@ mod tests {
         assert!((spring.theta + pi / 2.0).abs() < 0.08, "settled at {}", spring.theta);
     }
 
+    fn near_angle(a: f32, b: f32) -> bool {
+        shortest_delta(a, b).abs() < 1e-3
+    }
+
     #[test]
-    fn gesture_requires_talking_and_a_mark() {
-        assert_eq!(gesture_target(false, Some(1.0)), 0.0);
-        assert_eq!(gesture_target(true, None), 0.0);
-        assert_eq!(gesture_target(false, None), 0.0);
-        assert!(near(gesture_target(true, Some(1.2)), 1.2));
+    fn overhead_box_starts_up_and_reaches_both_near_corners() {
+        let pi = std::f32::consts::PI;
+        // Figure at (100, 100). The near edge y=40 ties the two closest corners.
+        let corners = [(40.0, 40.0), (160.0, 40.0), (40.0, 10.0), (160.0, 10.0)];
+        let (start, end) = wave_endpoints(100.0, 100.0, corners);
+        assert!(near_angle(start, 3.0 * pi / 4.0), "start {start}");
+        assert!(near_angle(end, -3.0 * pi / 4.0), "end {end}");
+        assert!(near_angle(sweep_angle(start, end, 0.0), pi));
+        assert!(near_angle(sweep_angle(start, end, SWEEP_SETTLE_S - 0.01), pi));
+        let out = sweep_angle(start, end, SWEEP_SETTLE_S + SWEEP_PERIOD_S * 0.25);
+        let back = sweep_angle(start, end, SWEEP_SETTLE_S + SWEEP_PERIOD_S * 0.75);
+        assert!(near_angle(out, -3.0 * pi / 4.0), "quarter {out}");
+        assert!(near_angle(back, 3.0 * pi / 4.0), "three quarters {back}");
+        let again = sweep_angle(start, end, SWEEP_SETTLE_S + SWEEP_PERIOD_S * 0.5);
+        assert!(near_angle(again, pi));
+    }
+
+    #[test]
+    fn side_box_waves_between_the_middle_corners() {
+        let figure = (100.0_f32, 100.0_f32);
+        let corners = [(200.0, 80.0), (280.0, 80.0), (200.0, 140.0), (280.0, 140.0)];
+        let mut order = [0usize, 1, 2, 3];
+        let dist = corners.map(|(x, y)| {
+            let dx = x - figure.0;
+            let dy = y - figure.1;
+            dx * dx + dy * dy
+        });
+        order.sort_by(|&i, &j| dist[i].total_cmp(&dist[j]));
+        let theta = |i: usize| aim_theta(figure.0, figure.1, corners[i].0, corners[i].1);
+        let near = theta(order[0]);
+        let mid_a = theta(order[1]);
+        let mid_b = theta(order[2]);
+        let far = theta(order[3]);
+        let (start, end) = wave_endpoints(figure.0, figure.1, corners);
+        assert!(near_angle(start, mid_a) || near_angle(start, mid_b), "start {start}");
+        assert!(near_angle(end, mid_a) || near_angle(end, mid_b), "end {end}");
+        assert!(!near_angle(start, end));
+        let span = containing_span(start, end);
+        let along = |t: f32| (t - start).rem_euclid(std::f32::consts::TAU);
+        assert!(along(far) <= span + 1e-3, "farthest {far} outside {start}.. span {span}");
+        assert!(along(near) > span + 1e-2, "nearest {near} fell inside the wave");
+    }
+
+    #[test]
+    fn talk_wave_is_ten_degrees_to_one_side() {
+        let ten = 10.0_f32.to_radians();
+        assert!(near(talk_wave(0.0), 0.0));
+        assert!(near(talk_wave(TALK_WAVE_PERIOD_S * 0.5), ten));
+        assert!(near(talk_wave(TALK_WAVE_PERIOD_S), 0.0));
+        assert!(talk_wave(0.4) > 0.0);
+        assert!(talk_wave(TALK_WAVE_PERIOD_S * 0.25) < ten);
+    }
+
+    #[test]
+    fn pointing_up_keeps_the_yaw_target_forward() {
+        let pi = std::f32::consts::PI;
+        assert!(near(aim_yaw(pi), 0.0));
+        let mut pose = AimSpring::default();
+        let mut yaw = AimSpring::default();
+        for _ in 0..90 {
+            pose.step(pi, 1.0 / 30.0);
+            yaw.step(aim_yaw(pi), 1.0 / 30.0);
+            assert!(yaw.theta.abs() < 0.02, "yaw left forward: {}", yaw.theta);
+        }
+        assert!(
+            shortest_delta(pose.theta, pi).abs() < 0.05 || shortest_delta(pose.theta, -pi).abs() < 0.05,
+            "pose settled at {}",
+            pose.theta
+        );
+    }
+
+    #[test]
+    fn a_new_mark_restarts_the_gesture_clock() {
+        let mut clock = GestureClock::default();
+        assert_eq!(clock.sample(GestureMode::Talk, 0.5), 0.0);
+        assert!(near(clock.sample(GestureMode::Talk, 0.5), 0.5));
+        let wave = GestureMode::Wave([1, 2, 3, 4]);
+        assert_eq!(clock.sample(wave, 0.5), 0.0);
+        assert!(near(clock.sample(wave, 0.25), 0.25));
+        assert_eq!(clock.sample(GestureMode::Rest, 0.1), 0.0);
     }
 }
