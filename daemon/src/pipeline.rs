@@ -447,6 +447,36 @@ impl SplatPipeline {
         }
     }
 
+    /// Writes `splats` into consecutive slots starting at `index`. One copy.
+    /// A range that would pass `capacity` is clipped, same as refusing a
+    /// single `write_splat` past the end.
+    pub fn write_splats(&self, index: u32, splats: &[AnimatedSplatGpu]) {
+        if splats.is_empty() || index >= self.capacity {
+            if index >= self.capacity && !splats.is_empty() {
+                eprintln!(
+                    "[pipeline] write_splats index {index} out of range (capacity {}) — skipped",
+                    self.capacity
+                );
+            }
+            return;
+        }
+        let room = (self.capacity - index) as usize;
+        let n = splats.len().min(room);
+        if n < splats.len() {
+            eprintln!(
+                "[pipeline] write_splats clipped {} of {} (capacity {})",
+                splats.len() - n,
+                splats.len(),
+                self.capacity
+            );
+        }
+        let stride = std::mem::size_of::<AnimatedSplatGpu>();
+        unsafe {
+            let dst = (self.dynamic_splats.mapped_ptr as *mut u8).add(index as usize * stride);
+            std::ptr::copy_nonoverlapping(splats.as_ptr() as *const u8, dst, n * stride);
+        }
+    }
+
     /// Poses one bone. Bone 0 defaults to identity (see `SplatPipeline::new`)
     /// — an unrigged splat cloud rigidly bound to bone 0 moves as a whole
     /// body under whatever this sets bone 0 to, including never calling

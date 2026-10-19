@@ -137,15 +137,15 @@ impl Rig {
     }
 
     /// World matrices (with `root_xf` applied above all roots) -> skin matrices (world * IBM).
-    pub fn skin_matrices(&self, pose: &Pose, root_xf: &Mat4) -> Vec<Mat4> {
+    /// `world` and `out` are reused by the caller. Both end up length `names.len()`.
+    pub fn skin_matrices_into(&self, pose: &Pose, root_xf: &Mat4, world: &mut Vec<Mat4>, out: &mut Vec<Mat4>) {
         let n = self.names.len();
-        let mut world = vec![MAT4_IDENTITY; n];
-        let mut out = vec![MAT4_IDENTITY; n];
+        world.resize(n, MAT4_IDENTITY);
+        out.resize(n, MAT4_IDENTITY);
         for &j in &self.order {
             let local = mat4_from_trs(pose.t[j], pose.r[j]);
             world[j] = match self.parent[j] { Some(p) => mat4_mul(&world[p], &local), None => mat4_mul(root_xf, &local) };
             out[j] = mat4_mul(&world[j], &self.ibm[j]);
         }
-        out
     }
 }

@@ -10,7 +10,9 @@ The interface that skins a cloud from a bone palette is real, and this avatar do
 
 The projection shader still runs `blend_bones` on every splat (`daemon/shaders/splat_projection.comp`). With `skin = None`, `to_gpu_splat` stores joint 0 and weight 1. Joint 0 is the identity dual quaternion written at pipeline startup (`SplatPipeline::new`). The blend multiplies an already-posed position by identity. No skeleton crosses that boundary.
 
-The palette cannot hold this rig even if something called `write_bone`. `MAX_BONES` is 64 (`daemon/src/actors/gpu_layout.rs`). The skin in `assets/humanoid_proxy_rigged.glb` has 181 joints. A palette of 64 was the interface for a small rigged cloud, not for this skeleton.
+The palette cannot hold this rig even if something called `write_bone`. `MAX_BONES` is 64 (`daemon/src/actors/gpu_layout.rs`). The skin in `assets/humanoid_proxy_rigged.glb` has 181 joints. A palette of 64 was the interface for a small rigged cloud, not for this skeleton. The projection shader sizes `bones[]` from that buffer, so 64 is an allocation, not a shader constant. Growing the allocation is still a different task.
+
+The MakeHuman rig stays. This epic does not ask for a mesh cut down to 64 bones, and it does not enlarge `MAX_BONES` until the skeleton fits. The compute dispatch gets its own skin-matrix buffer, as long as the loaded skin. On this export that is 181. A later export with a different joint count sizes the same buffer from the file. Bone 0 of the existing 64-slot palette is the only slot the avatar uses, and only for the rigid root in strategy 4.
 
 That split was a decision, not an accident that the code drifted into. `docs/plans/complete/cues-to-splats.md` made the avatar a producer of finished splats so the projection layout could stay put. `docs/plans/complete/REVIEW-and-skinned-proxy-notes.md` records the conflict: the skinned-proxy spec's GPU LBS checkbox lost to the later CPU producer. The checkbox is still open in `docs/plans/complete/skinned-proxy-triangle-barycentric-gaussian-avatar-spec.md`. `deform.rs` calls itself the CPU reference. This task is that checkbox, done on the machine that can run it.
 
@@ -32,7 +34,7 @@ Sampling the clip is not the cost. Skinning the vertices, rebuilding every splat
 
 Eight percent is the whole process, not a line profile. `top`'s `%CPU` counts one logical CPU as 100%. This machine has 8. On 2026-10-19, with the figure up and breathing, the daemon averaged 8.8% of one core over 7 minutes 40 seconds. Three one-second samples read 5.0, 9.2, and 9.2. Fence waits inside `pipeline.tick` are not in that number.
 
-The first measurement of this task is `evaluate` alone, a few hundred breath frames, next to one 4.8 MB copy. Both are CPU. That split says how much of the eight percent this expand is. It does not need the device. The rest of the task does.
+`evaluate` alone, release, one hundred breath frames after a warmup, measured 3.108 ms per call before this task changed the expand. A 4.8 MB `memcpy` of the cloud measured 0.414 ms. At a 33 ms tick, 3.1 ms is about nine percent of one core, which is the whole process measurement. The copy is the smaller part. After strategy 3 the same harness measured 2.330 ms and 0.322 ms. The remaining two milliseconds are the vertex skin and the per-splat scatter. Strategy 1 is what takes those off the CPU.
 
 ## Constant animation and caching
 
@@ -54,7 +56,7 @@ Strategy 1 is the one that makes the running path match the interface above. The
 
 ### 1. Skin and reconstruct on the GPU
 
-Upload the rest vertices, indices, weights, morph deltas, splatbind records, and rest frames once. Each tick, write the skin matrices `Rig::skin_matrices` already computes, plus the morph weights. One compute dispatch skins with the same linear blend as `ProxyMesh::skin`, builds one frame per triangle, reconstructs each splat, and stores `AnimatedSplatGpu` in the existing buffer with rigid skin. `gpu_layout.rs` and the projection shader stay as they are. `deform.rs` stays the oracle.
+Upload the rest vertices, indices, weights, morph deltas, splatbind records, and rest frames once. Each tick, write the skin matrices `Rig::skin_matrices` already computes, plus the morph weights. That matrix buffer is the length of the GLB skin, 181 on this export, and it is not the 64-slot projection palette. One compute dispatch skins with the same linear blend as `ProxyMesh::skin`, builds one frame per triangle, reconstructs each splat, and stores `AnimatedSplatGpu` in the existing buffer with rigid skin. `gpu_layout.rs` and the projection shader stay as they are. `deform.rs` stays the oracle.
 
 Match those matrices. Do not switch the oracle to the projection shader's dual quaternions. That would move the silhouette. Keep morph weights in the dispatch even though this export's target list is empty, so a viseme export does not need a second port.
 
@@ -73,11 +75,9 @@ On the GPU path this gate decides whether a new palette is worth writing. Skinni
 
 ### 3. One frame per triangle, and one copy of the cloud
 
-On the CPU oracle, and on any tick that still expands there: build each triangle frame into a scratch buffer, then scatter the 50,000 samples. Reuse the skin-matrix vectors. Replace the `write_splat` loop with one ranged write of the 96-byte records.
+Landed. `Reconstructor::reconstruct` builds each triangle frame and its quaternion once, then scatters the 50,000 samples. `Rig::skin_matrices_into` reuses two vectors on the actor. `SplatPipeline::write_splats` copies the packed records in one range. `one_frame_per_triangle_matches_the_per_splat_rebuild` checks positions and rotations against the old per-splat loop, bit for bit, on the rest pose, a breath frame, and an open jaw.
 
-Same math, so one frame can match the current reconstruct exactly. A few hundred breath calls of `evaluate`, before and after, are the benchmark. Expect a real drop and not an order of magnitude. The frame runs about twice for every triangle, and the upload pays fifty thousand call boundaries. SIMD on the vertex loop waits until that benchmark still shows the skin on top.
-
-This lands before strategy 1 so the oracle is fast and the pixel match is easy to check. It also makes the live figure cheaper on the days the compute path is off.
+The release timing dropped from 3.108 ms to 2.330 ms. That is a real cut and not an order of magnitude. The per-splat scatter is still most of the call. SIMD on the vertex loop waits until a profile shows the skin on top of that scatter. The CPU path stays the oracle for strategy 1.
 
 ### 4. Lift the rigid root out of the skin
 
@@ -99,8 +99,8 @@ When strategy 1 is skinning every frame from the latest palette, this blend is r
 
 ## Order of work
 
-1. Time `evaluate` and a 4.8 MB copy. Write the numbers back into this note.
-2. Land strategy 3. Pixels match. The benchmark is the acceptance.
+1. Time `evaluate` and a 4.8 MB copy. Done. 3.108 ms and 0.414 ms before strategy 3. 2.330 ms and 0.322 ms after.
+2. Land strategy 3. Done. The bit-match test is the acceptance.
 3. Land strategy 1. Readback against `evaluate` on this GPU, then run it on the live figure and sample `%CPU` again.
 4. Land strategies 4 and 5 on the palette and the dispatch ranges, so a turn and a jaw do not reskin the body.
 5. Land strategy 2 as the palette gate. If a held interval is visible before strategy 1 is smooth at full rate, land strategy 6 for that interval only.
@@ -111,5 +111,5 @@ When strategy 1 is skinning every frame from the latest palette, this blend is r
 - Heat, the seat, `DEADBAND`, `COOL_SIGMAS`, and the mark stamp.
 - The viseme assertion. This export has no morph targets. The jaw still moves. An empty target list is not a reason to drop morphs from the dispatch.
 - Point-at-area aim. This task consumes the pose. It does not retune the wave.
-- Raising `MAX_BONES` to 181 and skinning each splat with averaged vertex weights. That is the approximation the splatbind was built to avoid.
+- Raising `MAX_BONES` to 181, and skinning each splat with averaged vertex weights. That is the approximation the splatbind was built to avoid. The rig is not reduced to 64 bones to fit the old palette either.
 - A second skin implementation that drifts from `ProxyMesh::skin`. `deform.rs` remains the definition of a correct cloud.

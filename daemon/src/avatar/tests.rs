@@ -217,6 +217,116 @@ fn layer_camera_frames_the_body_upright() {
     assert!(head[1] < mid[1] && mid[1] < feet[1], "head {head:?} chest {mid:?} feet {feet:?} should stack top to bottom");
 }
 
+/// `cargo test --bin presence-daemon -- --ignored time_the_breath_expand`
+#[test]
+#[ignore]
+fn time_the_breath_expand() {
+    let mut a = rest_actor();
+    a.demo_motion = false;
+    for _ in 0..10 {
+        a.advance(1.0 / 30.0);
+        a.evaluate();
+    }
+    let n = 100;
+    let started = std::time::Instant::now();
+    for _ in 0..n {
+        a.advance(1.0 / 30.0);
+        a.evaluate();
+    }
+    let eval_ms = started.elapsed().as_secs_f64() * 1000.0 / n as f64;
+    let bytes = a.splat_count() * 96;
+    let src = vec![1u8; bytes];
+    let mut dst = vec![0u8; bytes];
+    let copies = 100;
+    let copy_started = std::time::Instant::now();
+    for _ in 0..copies {
+        dst.copy_from_slice(&src);
+    }
+    let copy_ms = copy_started.elapsed().as_secs_f64() * 1000.0 / copies as f64;
+    eprintln!(
+        "evaluate {eval_ms:.3} ms/call over {n}, memcpy {bytes} bytes {copy_ms:.3} ms"
+    );
+}
+
+/// The old expand built a triangle frame once per splat. This is that loop,
+/// kept so the one-frame-per-triangle path has to match it bit for bit.
+fn per_splat_rebuild(a: &AvatarActor) -> (Vec<crate::actors::scene_memory::GaussianSplat>, usize) {
+    use crate::actors::scene_memory::GaussianSplat;
+    let indices = &a.mesh.indices;
+    let posed = &a.posed_verts;
+    let rest = &a.mesh.rest;
+    let mut out = Vec::with_capacity(a.binding.records.len());
+    let mut degenerate = std::collections::HashSet::new();
+    for r in &a.binding.records {
+        let t = r.tri as usize;
+        let (i0, i1, i2) = (indices[3 * t] as usize, indices[3 * t + 1] as usize, indices[3 * t + 2] as usize);
+        let (v0, v1, v2) = (posed[i0], posed[i1], posed[i2]);
+        let b0 = (1.0 - r.b1 - r.b2).max(0.0);
+        let mut p = [0.0f32; 3];
+        for c in 0..3 {
+            p[c] = b0 * v0[c] + r.b1 * v1[c] + r.b2 * v2[c];
+        }
+        let f = match super::deform::tri_frame(v0, v1, v2) {
+            Some(f) => f,
+            None => {
+                degenerate.insert(t);
+                a.recon.rest_frames[t]
+            }
+        };
+        for c in 0..3 {
+            p[c] += r.off[0] * f[2][c] + r.off[1] * f[0][c] + r.off[2] * f[1][c];
+        }
+        let q = super::math::quat_from_columns(f[0], f[1], f[2]);
+        let mut rot = [q[3], q[0], q[1], q[2]];
+        if !(p.iter().all(|x| x.is_finite()) && rot.iter().all(|x| x.is_finite())) {
+            let (aa, bb, cc) = (rest[i0], rest[i1], rest[i2]);
+            for c in 0..3 {
+                p[c] = b0 * aa[c] + r.b1 * bb[c] + r.b2 * cc[c];
+            }
+            rot = [1., 0., 0., 0.];
+        }
+        out.push(GaussianSplat {
+            position: p,
+            scale: a.recon.scale,
+            rotation: rot,
+            color: a.recon.colors[t],
+        });
+    }
+    (out, degenerate.len())
+}
+
+fn same_bits(got: &[crate::actors::scene_memory::GaussianSplat], expect: &[crate::actors::scene_memory::GaussianSplat]) {
+    assert_eq!(got.len(), expect.len());
+    for (i, (g, e)) in got.iter().zip(expect).enumerate() {
+        for c in 0..3 {
+            assert_eq!(g.position[c].to_bits(), e.position[c].to_bits(), "position {i} [{c}]");
+        }
+        for c in 0..4 {
+            assert_eq!(g.rotation[c].to_bits(), e.rotation[c].to_bits(), "rotation {i} [{c}]");
+            assert_eq!(g.color[c].to_bits(), e.color[c].to_bits(), "color {i} [{c}]");
+        }
+    }
+}
+
+#[test]
+fn one_frame_per_triangle_matches_the_per_splat_rebuild() {
+    let mut a = rest_actor();
+    let (expect, degen) = per_splat_rebuild(&a);
+    same_bits(&a.posed, &expect);
+    assert_eq!(a.stats.degenerate_triangles, degen);
+    a.demo_motion = false;
+    a.advance(1.7);
+    a.evaluate();
+    let (expect, degen) = per_splat_rebuild(&a);
+    same_bits(&a.posed, &expect);
+    assert_eq!(a.stats.degenerate_triangles, degen);
+    a.set_face(FaceFrame { jaw_open: 1.0, morphs: vec![] });
+    a.evaluate();
+    let (expect, degen) = per_splat_rebuild(&a);
+    same_bits(&a.posed, &expect);
+    assert_eq!(a.stats.degenerate_triangles, degen);
+}
+
 #[test]
 fn degenerate_triangle_uses_fallback_and_is_counted() {
     let a = AvatarActor::load(&manifest()).unwrap();
@@ -225,6 +335,7 @@ fn degenerate_triangle_uses_fallback_and_is_counted() {
     let t = a.binding.records[0].tri as usize;
     let i0 = a.mesh.indices[3 * t] as usize;
     for k in 1..3 { verts[a.mesh.indices[3 * t + k] as usize] = verts[i0]; }
+    let mut a = a;
     let mut out = vec![];
     let st = a.recon.reconstruct(&a.binding, &a.mesh.indices, &verts, &a.mesh.rest, &mut out);
     assert!(st.degenerate_triangles >= 1);

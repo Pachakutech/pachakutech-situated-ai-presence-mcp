@@ -84,6 +84,12 @@ pub struct Reconstructor {
     pub rest_frames: Vec<Frame>,
     pub colors: Vec<[f32; 4]>,
     pub scale: [f32; 3],
+    /// One frame per triangle for the latest posed mesh. Reused across ticks.
+    frames: Vec<Frame>,
+    /// `(w, x, y, z)` from that frame, so the splat loop does not rebuild it.
+    rots: Vec<[f32; 4]>,
+    /// 0 sound, 1 degenerate and not yet counted, 2 degenerate and counted.
+    degen: Vec<u8>,
 }
 
 const PALETTE: [[f32; 3]; 10] = [
@@ -117,32 +123,59 @@ impl Reconstructor {
             let p = PALETTE[j as usize % PALETTE.len()];
             colors.push([p[0], p[1], p[2], 1.0]);
         }
-        Reconstructor { rest_frames, colors, scale: [s, s, s * 0.25] }
+        Reconstructor {
+            rest_frames,
+            colors,
+            scale: [s, s, s * 0.25],
+            frames: Vec::new(),
+            rots: Vec::new(),
+            degen: Vec::new(),
+        }
     }
 
     /// Reconstruct every bound splat from the deformed triangle: centre =
     /// barycentric surface point + F'.o_s; rotation = quat(F') (= R*quat(F0),
-    /// R = F'F0^T). Degenerate triangles fall back to the rest frame and are
-    /// counted; no NaN/Inf can leave this function.
-    pub fn reconstruct(&self, b: &SplatBinding, indices: &[u32], posed: &[[f32; 3]], rest: &[[f32; 3]], out: &mut Vec<GaussianSplat>) -> DeformStats {
+    /// R = F'F0^T). The triangle frame is built once per triangle. Degenerate
+    /// triangles that a splat actually uses fall back to the rest frame and
+    /// are counted once. No NaN/Inf can leave this function.
+    pub fn reconstruct(&mut self, b: &SplatBinding, indices: &[u32], posed: &[[f32; 3]], rest: &[[f32; 3]], out: &mut Vec<GaussianSplat>) -> DeformStats {
+        let tri_count = indices.len() / 3;
+        self.frames.resize(tri_count, IDENTITY_FRAME);
+        self.rots.resize(tri_count, [1.0, 0.0, 0.0, 0.0]);
+        self.degen.resize(tri_count, 0);
+        for t in 0..tri_count {
+            let (i0, i1, i2) = (indices[3 * t] as usize, indices[3 * t + 1] as usize, indices[3 * t + 2] as usize);
+            let f = match tri_frame(posed[i0], posed[i1], posed[i2]) {
+                Some(f) => {
+                    self.degen[t] = 0;
+                    f
+                }
+                None => {
+                    self.degen[t] = 1;
+                    self.rest_frames[t]
+                }
+            };
+            self.frames[t] = f;
+            let q = quat_from_columns(f[0], f[1], f[2]);
+            self.rots[t] = [q[3], q[0], q[1], q[2]];
+        }
         out.clear();
         out.reserve(b.records.len());
         let mut st = DeformStats::default();
-        let mut degenerate_tris = std::collections::HashSet::new();
         for r in &b.records {
             let t = r.tri as usize;
+            if self.degen[t] == 1 {
+                st.degenerate_triangles += 1;
+                self.degen[t] = 2;
+            }
             let (i0, i1, i2) = (indices[3 * t] as usize, indices[3 * t + 1] as usize, indices[3 * t + 2] as usize);
             let (v0, v1, v2) = (posed[i0], posed[i1], posed[i2]);
             let b0 = (1.0 - r.b1 - r.b2).max(0.0);
             let mut p = [0.0f32; 3];
             for c in 0..3 { p[c] = b0 * v0[c] + r.b1 * v1[c] + r.b2 * v2[c]; }
-            let f = match tri_frame(v0, v1, v2) {
-                Some(f) => f,
-                None => { degenerate_tris.insert(t); self.rest_frames[t] }
-            };
+            let f = self.frames[t];
             for c in 0..3 { p[c] += r.off[0] * f[2][c] + r.off[1] * f[0][c] + r.off[2] * f[1][c]; }
-            let q = quat_from_columns(f[0], f[1], f[2]);
-            let mut rot = [q[3], q[0], q[1], q[2]]; // (w,x,y,z)
+            let mut rot = self.rots[t];
             if !(p.iter().all(|x| x.is_finite()) && rot.iter().all(|x| x.is_finite())) {
                 st.nonfinite_repaired += 1;
                 let (a, bb, cc) = (rest[i0], rest[i1], rest[i2]);
@@ -151,7 +184,6 @@ impl Reconstructor {
             }
             out.push(GaussianSplat { position: p, scale: self.scale, rotation: rot, color: self.colors[t] });
         }
-        st.degenerate_triangles = degenerate_tris.len();
         st
     }
 }

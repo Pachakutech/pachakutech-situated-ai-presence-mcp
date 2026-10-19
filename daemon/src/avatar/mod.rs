@@ -17,7 +17,9 @@ pub mod splatbind;
 #[cfg(test)]
 mod tests;
 
-use crate::actors::gpu_layout::{to_gpu_splat, DualQuatGpu, ProjectionUniformsGpu, FLAG_SOFT_GAUSSIAN_FALLOFF};
+use crate::actors::gpu_layout::{
+    to_gpu_splat, AnimatedSplatGpu, DualQuatGpu, ProjectionUniformsGpu, FLAG_SOFT_GAUSSIAN_FALLOFF,
+};
 use crate::actors::scene_memory::GaussianSplat;
 use crate::pipeline::SplatPipeline;
 use crate::protocol::AvatarCommand;
@@ -85,6 +87,11 @@ pub struct AvatarActor {
     posed_verts: Vec<[f32; 3]>,
     pub posed: Vec<GaussianSplat>,
     pub stats: DeformStats,
+    /// Scratch for `skin_matrices_into`. Kept so a tick does not allocate them.
+    skin_world: Vec<math::Mat4>,
+    skin_mats: Vec<math::Mat4>,
+    /// Packed GPU records for the ranged upload. Capacity stays at the splat count.
+    gpu_scratch: Vec<AnimatedSplatGpu>,
 }
 
 /// Rigid camera: on +Z, looking at the origin, with the body upright.
@@ -143,6 +150,7 @@ impl AvatarActor {
             gesture: aim::GestureClock::default(),
             point_joints,
             posed_verts: vec![], posed: vec![], stats: DeformStats::default(),
+            skin_world: Vec::new(), skin_mats: Vec::new(), gpu_scratch: Vec::new(),
         };
         a.play("idle", true);
         a.evaluate();
@@ -380,21 +388,25 @@ impl AvatarActor {
             quat_axis_angle([0., 1., 0.], self.root.yaw + aim::FACING_YAW),
         );
         root[13] -= self.ground_offset; // soles to y = 0
-        let mats = self.rig.skin_matrices(&pose, &root);
-        self.mesh.skin(&self.face.morphs, &mats, &mut self.posed_verts);
+        self.rig.skin_matrices_into(&pose, &root, &mut self.skin_world, &mut self.skin_mats);
+        self.mesh.skin(&self.face.morphs, &self.skin_mats, &mut self.posed_verts);
         self.stats = self.recon.reconstruct(&self.binding, &self.mesh.indices, &self.posed_verts, &self.mesh.rest, &mut self.posed);
         &self.posed
     }
 
     /// Write posed splats into pipeline slots [slot_base, ..), clipped to capacity.
-    pub fn upload(&self, pipeline: &SplatPipeline, slot_base: u32, owner_id: u32, frame: u32) -> u32 {
+    /// One ranged copy. The records match `write_splat` of each `to_gpu_splat`.
+    pub fn upload(&mut self, pipeline: &SplatPipeline, slot_base: u32, owner_id: u32, frame: u32) -> u32 {
         let room = pipeline.capacity().saturating_sub(slot_base) as usize;
         let n = self.posed.len().min(room);
-        for (i, s) in self.posed.iter().take(n).enumerate() {
+        self.gpu_scratch.clear();
+        self.gpu_scratch.reserve(n);
+        for s in self.posed.iter().take(n) {
             let mut g = to_gpu_splat(s, None, owner_id, frame, 255);
             g.flags |= FLAG_SOFT_GAUSSIAN_FALLOFF;
-            pipeline.write_splat(slot_base + i as u32, &g);
+            self.gpu_scratch.push(g);
         }
+        pipeline.write_splats(slot_base, &self.gpu_scratch);
         n as u32
     }
 }
