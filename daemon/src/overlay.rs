@@ -27,6 +27,7 @@ use crate::actors::ingress::screen_wlr::WlrScreenSource;
 use crate::actors::ingress::webcam_dmabuf::{self, WebcamMsg, WEBCAM_YIELD_ACK};
 use crate::actors::ingress::{DmabufFrame, DmabufPlane, FrameSource, IngressFrame, DRM_FORMAT_RG88};
 use crate::avatar::AvatarActor;
+use crate::avatar_expand::AvatarExpand;
 use crate::pipeline::SplatPipeline;
 use crate::socket::SocketServer;
 use crate::splat_sprites::SplatSprites;
@@ -2650,6 +2651,7 @@ fn figure_and_screen(overlay: &Overlay) -> ((f32, f32), (f32, f32)) {
 fn tick_avatar(
     avatar: &mut Option<AvatarActor>,
     pipeline: &SplatPipeline,
+    mut expand: Option<&mut AvatarExpand>,
     gpu: &mut OverlayGpu,
     vk: &VulkanContext,
     server: &mut SocketServer,
@@ -2702,8 +2704,25 @@ fn tick_avatar(
         gpu.enqueue_patch(job);
     }
     gpu.sync_appearance(&avatar.appearance);
-    avatar.evaluate();
     let count = avatar.splat_count() as u32;
+    let room = pipeline.capacity().saturating_sub(base);
+    let n = count.min(room);
+    let mut gpu_expand = false;
+    if let Some(ex) = expand.as_mut() {
+        if ex.is_live() {
+            avatar.prepare_skin();
+            match ex.record(avatar.skin_matrices(), avatar.morph_weights(), base, n, 1, *frame) {
+                Ok(()) => gpu_expand = true,
+                Err(e) => {
+                    eprintln!("[avatar] gpu expand stopped, CPU path: {e}");
+                    ex.set_live(false);
+                }
+            }
+        }
+    }
+    if !gpu_expand {
+        avatar.evaluate();
+    }
     pipeline.clear_projected(base, count);
     let extent = gpu.layer_extent();
     pipeline.set_projection_uniforms(AvatarActor::layer_camera(
@@ -2711,10 +2730,33 @@ fn tick_avatar(
         extent.height as f32,
         *frame,
     ));
-    let uploaded = avatar.upload(pipeline, base, 1, *frame);
-    pipeline.tick(*frame, 600)?;
+    let mut uploaded = if gpu_expand {
+        n
+    } else {
+        avatar.upload(pipeline, base, 1, *frame)
+    };
+    if gpu_expand {
+        let cb = expand.as_ref().map(|ex| ex.command_buffer());
+        pipeline.tick_with(*frame, 600, cb)?;
+    } else {
+        pipeline.tick(*frame, 600)?;
+    }
     if !*projection_checked {
-        let live = pipeline.count_projected_discs(base, uploaded);
+        let mut live = pipeline.count_projected_discs(base, uploaded);
+        if live < 1000 && gpu_expand {
+            eprintln!(
+                "[avatar] gpu expand projected {live} discs, falling back to the CPU path. {}",
+                pipeline.debug_projection_range(base, uploaded)
+            );
+            if let Some(ex) = expand.as_mut() {
+                ex.set_live(false);
+            }
+            avatar.evaluate();
+            pipeline.clear_projected(base, count);
+            uploaded = avatar.upload(pipeline, base, 1, *frame);
+            pipeline.tick(*frame, 600)?;
+            live = pipeline.count_projected_discs(base, uploaded);
+        }
         if live < 1000 {
             return Err(format!(
                 "avatar projection wrote {live} live discs (need at least 1000). {}",
@@ -2751,6 +2793,7 @@ pub fn run(
     pipeline: &SplatPipeline,
     socket_path: &Path,
     avatar: &mut Option<AvatarActor>,
+    mut expand: Option<&mut AvatarExpand>,
 ) -> Result<(), String> {
     let mut server = SocketServer::bind(socket_path).map_err(|e| format!("socket bind: {e}"))?;
     let _pid = crate::socket::PidFile::create(socket_path).map_err(|e| format!("pid file: {e}"))?;
@@ -2886,6 +2929,7 @@ pub fn run(
     tick_avatar(
         avatar,
         pipeline,
+        expand.as_deref_mut(),
         gpu,
         vk,
         &mut server,
@@ -3052,6 +3096,7 @@ pub fn run(
                 tick_avatar(
                     avatar,
                     pipeline,
+                    expand.as_deref_mut(),
                     gpu,
                     vk,
                     &mut server,

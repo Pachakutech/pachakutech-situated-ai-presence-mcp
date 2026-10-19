@@ -357,6 +357,31 @@ impl SplatPipeline {
         (self.projected_output.buffer, self.projected_output.size)
     }
 
+    /// The dynamic splat SSBO. The avatar expand writes the posed cloud here.
+    pub fn dynamic_splats_buffer(&self) -> (vk::Buffer, vk::DeviceSize) {
+        (self.dynamic_splats.buffer, self.dynamic_splats.size)
+    }
+
+    /// Host read of `count` splats at `index`, after a fence on the writer.
+    pub fn read_splats(&self, index: u32, count: u32) -> Vec<AnimatedSplatGpu> {
+        if index >= self.capacity || count == 0 {
+            return Vec::new();
+        }
+        let n = count.min(self.capacity - index) as usize;
+        let stride = std::mem::size_of::<AnimatedSplatGpu>();
+        let range = vk::MappedMemoryRange::default()
+            .memory(self.dynamic_splats.memory)
+            .offset(0)
+            .size(vk::WHOLE_SIZE);
+        let _ = unsafe { self.device.invalidate_mapped_memory_ranges(&[range]) };
+        let mut out = vec![INACTIVE_SPLAT; n];
+        unsafe {
+            let src = (self.dynamic_splats.mapped_ptr as *const u8).add(index as usize * stride);
+            std::ptr::copy_nonoverlapping(src, out.as_mut_ptr() as *mut u8, n * stride);
+        }
+        out
+    }
+
     /// Zero a range of projected discs before a dispatch. The compute shader
     /// leaves culled slots untouched, so a stale disc would keep drawing.
     pub fn clear_projected(&self, start: u32, count: u32) {
@@ -511,6 +536,17 @@ impl SplatPipeline {
     /// `EvictedTextures.count` is an accumulating atomic the shader adds
     /// to, not something it resets itself.
     pub fn tick(&self, current_frame: u32, absolute_max_age: u32) -> Result<(), String> {
+        self.tick_with(current_frame, absolute_max_age, None)
+    }
+
+    /// Projection and eviction, with an optional prefix (the avatar expand)
+    /// in the same submit so the cloud is visible to the projection dispatch.
+    pub fn tick_with(
+        &self,
+        current_frame: u32,
+        absolute_max_age: u32,
+        prefix: Option<vk::CommandBuffer>,
+    ) -> Result<(), String> {
         self.eviction_uniforms.write(std::slice::from_ref(&EvictionUniformsGpu::new(
             self.capacity,
             current_frame,
@@ -522,8 +558,12 @@ impl SplatPipeline {
 
         unsafe { self.device.reset_fences(&[self.fence]) }.map_err(|e| format!("vkResetFences failed: {e:?}"))?;
 
-        let command_buffers = [self.command_buffer];
-        let submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers);
+        let own = self.command_buffer;
+        let bufs = match prefix {
+            Some(pre) => vec![pre, own],
+            None => vec![own],
+        };
+        let submit_info = vk::SubmitInfo::default().command_buffers(&bufs);
         unsafe { self.device.queue_submit(self.graphics_queue, &[submit_info], self.fence) }
             .map_err(|e| format!("vkQueueSubmit failed: {e:?}"))?;
 
@@ -678,13 +718,15 @@ fn record_dispatch_commands(
     // mapped splat and uniform buffers are not visible to the shader unless
     // a HOST → COMPUTE dependency runs at the start of each submission.
     // Without it the second tick still sees the smoke-test cache.
+    // SHADER_WRITE covers the avatar expand recorded in the same submit,
+    // ahead of this command buffer. A tick with no prefix has nothing there.
     let host_to_shader = vk::MemoryBarrier::default()
-        .src_access_mask(vk::AccessFlags::HOST_WRITE)
+        .src_access_mask(vk::AccessFlags::HOST_WRITE | vk::AccessFlags::SHADER_WRITE)
         .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::UNIFORM_READ);
     unsafe {
         device.cmd_pipeline_barrier(
             cmd,
-            vk::PipelineStageFlags::HOST,
+            vk::PipelineStageFlags::HOST | vk::PipelineStageFlags::COMPUTE_SHADER,
             vk::PipelineStageFlags::COMPUTE_SHADER,
             vk::DependencyFlags::empty(),
             &[host_to_shader],

@@ -44,6 +44,7 @@ fn main() {
         "screen_patch.comp",
         "screen_heat.comp",
         "screen_heat_seat.comp",
+        "avatar_expand.comp",
         "overlay_quad.vert",
         "overlay_quad.frag",
         "splat_disc.vert",

@@ -1,8 +1,7 @@
-//! Skinned-proxy avatar producer (docs/plans/skinned-proxy-*.md, with the
-//! integration decision from docs/plans/cues-to-splats.md): deform the proxy
-//! mesh on the CPU, reconstruct the barycentrically bound Gaussians, and write
-//! them into the *existing* AnimatedSplatGpu buffer as rigid (skin = None)
-//! splats. The projection shader and gpu_layout.rs are untouched.
+//! Skinned-proxy avatar producer. `evaluate` is the CPU oracle: morph, linear
+//! blend, then barycentric reconstruct into rigid `AnimatedSplatGpu` records.
+//! `avatar_expand` is the live consumer when its dispatch matches that oracle
+//! on this device. `gpu_layout.rs` and the projection shader stay as they are.
 //!
 //! The overlay loop ticks this at 30 Hz and draws the projected discs. Speech
 //! stays out: `FaceFrame` is demo motion or a socket command.
@@ -376,8 +375,9 @@ impl AvatarActor {
         pose
     }
 
-    /// Run clip -> face -> FK -> morph/LBS -> barycentric reconstruction.
-    pub fn evaluate(&mut self) -> &[GaussianSplat] {
+    /// Sample the pose, fold the jaw, and write skin matrices. The GPU expand
+    /// uploads those matrices. `evaluate` skins and reconstructs from them.
+    pub(crate) fn prepare_skin(&mut self) {
         let mut pose = self.skeleton_pose();
         if let Some(j) = self.jaw_joint {
             let ang = self.face.jaw_open.clamp(0., 1.) * self.jaw_max_rad;
@@ -389,6 +389,44 @@ impl AvatarActor {
         );
         root[13] -= self.ground_offset; // soles to y = 0
         self.rig.skin_matrices_into(&pose, &root, &mut self.skin_world, &mut self.skin_mats);
+    }
+
+    pub(crate) fn skin_matrices(&self) -> &[Mat4] {
+        &self.skin_mats
+    }
+
+    pub(crate) fn morph_weights(&self) -> &[f32] {
+        &self.face.morphs
+    }
+
+    pub(crate) fn recon_frames(&self) -> &[deform::Frame] {
+        &self.recon.rest_frames
+    }
+
+    pub(crate) fn recon_colors(&self) -> &[[f32; 4]] {
+        &self.recon.colors
+    }
+
+    /// Direct pose for the device check. Does not step the springs.
+    pub(crate) fn pose_for_check(&mut self, time: f32, aim_theta: f32, yaw: f32, jaw_open: f32) {
+        self.time = time;
+        self.aim.theta = aim_theta;
+        self.root.yaw = yaw;
+        self.face.jaw_open = jaw_open;
+    }
+
+    /// Undo `pose_for_check` so the live figure starts from rest.
+    pub(crate) fn clear_check_pose(&mut self) {
+        self.time = 0.0;
+        self.aim.reset();
+        self.yaw_aim.reset();
+        self.root.yaw = 0.0;
+        self.face.jaw_open = 0.0;
+    }
+
+    /// Run clip -> face -> FK -> morph/LBS -> barycentric reconstruction.
+    pub fn evaluate(&mut self) -> &[GaussianSplat] {
+        self.prepare_skin();
         self.mesh.skin(&self.face.morphs, &self.skin_mats, &mut self.posed_verts);
         self.stats = self.recon.reconstruct(&self.binding, &self.mesh.indices, &self.posed_verts, &self.mesh.rest, &mut self.posed);
         &self.posed

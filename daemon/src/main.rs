@@ -6,6 +6,7 @@ mod placement;
 mod screen_heat;
 mod screen_patch;
 mod pipeline;
+mod avatar_expand;
 mod protocol;
 mod registry;
 mod socket;
@@ -173,8 +174,27 @@ fn main() {
         }
     };
 
+    let mut expand = None;
+    if let Some(actor) = avatar.as_mut() {
+        match avatar_expand::AvatarExpand::new(&vk, &pipeline, actor) {
+            Ok(mut ex) => {
+                match ex.check(actor, &pipeline) {
+                    Ok(report) => {
+                        ex.set_live(true);
+                        println!("[avatar] gpu expand on: {report}");
+                    }
+                    Err(e) => {
+                        eprintln!("[avatar] gpu expand check failed, CPU path stays: {e}");
+                    }
+                }
+                expand = Some(ex);
+            }
+            Err(e) => eprintln!("[avatar] gpu expand unavailable, CPU path stays: {e}"),
+        }
+    }
+
     let path = socket_path();
-    let result = overlay::run(&mut overlay, &mut gpu, &vk, &pipeline, &path, &mut avatar);
+    let result = overlay::run(&mut overlay, &mut gpu, &vk, &pipeline, &path, &mut avatar, expand.as_mut());
     gpu.destroy(&vk);
     if let Err(e) = result {
         eprintln!("[overlay] {e}");
