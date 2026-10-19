@@ -305,9 +305,11 @@ impl AvatarActor {
     /// Demo sway keeps the yaw when `demo_motion` is set; the caller skips this.
     ///
     /// Talking with a mark waves between the ends of the corner arc, after a
-    /// hold in the middle. Talking with no mark waves 10° off the low pose.
-    /// Otherwise both springs ease back to 0. A new mode or a new rect restarts
-    /// the wave clock and leaves the springs to travel from where they are.
+    /// hold in the middle, and the body turns with that wave. Talking with no
+    /// mark takes the arms to frame 20 and back, and yaws the body only a
+    /// couple of degrees. Otherwise both springs ease back to 0. A new mode
+    /// or a new rect restarts the wave clock and leaves the springs to travel
+    /// from where they are.
     pub fn steer(
         &mut self,
         dt: f32,
@@ -324,17 +326,18 @@ impl AvatarActor {
             aim::GestureMode::Talk
         };
         let t = self.gesture.sample(mode, dt);
-        let commanded = match mark {
+        let (commanded, yaw_cmd) = match mark {
             Some(b) if self.talking => {
                 let corners = aim::box_corners(b.u, b.v, b.w, b.h, screen.0, screen.1);
                 let (start, end) = aim::wave_endpoints(figure.0, figure.1, corners);
-                aim::sweep_angle(start, end, t)
+                let angle = aim::sweep_angle(start, end, t);
+                (angle, aim::aim_yaw(angle))
             }
-            None if self.talking => aim::talk_wave(t),
-            _ => 0.0,
+            None if self.talking => (aim::talk_wave(t), aim::talk_yaw(t)),
+            _ => (0.0, 0.0),
         };
         self.aim.step(commanded, dt);
-        self.yaw_aim.step(aim::aim_yaw(commanded), dt);
+        self.yaw_aim.step(yaw_cmd, dt);
         self.root.yaw = self.yaw_aim.theta;
     }
 

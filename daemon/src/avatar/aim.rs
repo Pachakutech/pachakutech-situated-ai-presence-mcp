@@ -12,8 +12,9 @@
 //! A highlight is a wave between two corners. Those are the two nearest when
 //! they tie, and otherwise the two that are neither nearest nor farthest.
 //! The farthest corner lies between that pair. She starts in the middle of
-//! the arc. Talking with no mark is a small wave on the same clip, from the
-//! low pose out to one side.
+//! the arc, and that wave still turns her with it. Talking with no mark is
+//! separate: the arms go out to frame 20 and back to the low pose, and the
+//! body only yaws a couple of degrees the same way.
 
 /// Half turn about +Y. The exported mesh faces away from the camera; this
 /// brings her face toward the viewer. Aim yaw is added on top.
@@ -23,8 +24,8 @@ pub const FACING_YAW: f32 = std::f32::consts::PI;
 pub const BREATH_PERIOD_S: f32 = 4.0;
 
 /// Natural frequency of the aim spring, in rad/s. Critically damped, so a
-/// side-to-side turn settles in about a second.
-pub const AIM_OMEGA: f32 = 4.0;
+/// side-to-side turn settles in about five seconds.
+pub const AIM_OMEGA: f32 = 0.8;
 
 /// Arm joints copied from `Point` onto the breath. Spine stays on `Breathe`.
 pub const ARM_JOINTS: &[&str] = &[
@@ -97,17 +98,21 @@ pub fn aim_yaw(theta: f32) -> f32 {
 }
 
 /// Hold the middle of a highlight arc this long before the wave leaves it.
-/// The aim spring settles in about a second.
-pub const SWEEP_SETTLE_S: f32 = 1.0;
+/// The aim spring settles in about five seconds, so the hold matches.
+pub const SWEEP_SETTLE_S: f32 = 5.0;
 
 /// One trip out to a corner and across to the other.
-pub const SWEEP_PERIOD_S: f32 = 3.0;
+pub const SWEEP_PERIOD_S: f32 = 15.0;
 
 /// One trip out and back while talking with no mark.
-pub const TALK_WAVE_PERIOD_S: f32 = 3.0;
+pub const TALK_WAVE_PERIOD_S: f32 = 15.0;
 
-/// How far that wave leaves the arms-down pose, toward the viewer's right.
-pub const TALK_WAVE_RAD: f32 = 10.0 * std::f32::consts::PI / 180.0;
+/// Frame 20 of the 360-frame `Point` clip, toward the viewer's right.
+/// Frame 340 is the same trip on the viewer's left.
+pub const TALK_WAVE_RAD: f32 = 20.0 * std::f32::consts::PI / 180.0;
+
+/// Body yaw on that trip. The arms take the clip frames; the turn stays small.
+pub const TALK_YAW_RAD: f32 = 2.0 * std::f32::consts::PI / 180.0;
 
 /// Ends of the wave, as angles.
 ///
@@ -184,11 +189,21 @@ pub fn sweep_angle(start: f32, end: f32, t: f32) -> f32 {
     wrap_pi(mid + (span * 0.5) * phase.sin())
 }
 
-/// Arms-down, out to 10° on the viewer's right, and back. `t` 0 and the
-/// period are the low pose. The peak is half a period later.
-pub fn talk_wave(t: f32) -> f32 {
+/// 0 at the low pose, 1 at the far end of the talk trip, 0 again one period later.
+fn talk_envelope(t: f32) -> f32 {
     let phase = t / TALK_WAVE_PERIOD_S * std::f32::consts::TAU;
-    TALK_WAVE_RAD * 0.5 * (1.0 - phase.cos())
+    0.5 * (1.0 - phase.cos())
+}
+
+/// Arms from the low pose out to frame 20 and back. `t` 0 and the period are
+/// frame 0. The peak, half a period later, is frame 20.
+pub fn talk_wave(t: f32) -> f32 {
+    talk_envelope(t) * TALK_WAVE_RAD
+}
+
+/// The same trip for the body, a couple of degrees instead of the arm frames.
+pub fn talk_yaw(t: f32) -> f32 {
+    talk_envelope(t) * TALK_YAW_RAD
 }
 
 /// What the gesture clock is counting. A change restarts it at the middle.
@@ -321,7 +336,7 @@ mod tests {
         assert!(spring.theta < pi / 2.0);
         assert!(spring.theta > 0.0, "one frame should not reach the low pose, got {}", spring.theta);
         let mut prev = spring.theta;
-        for _ in 0..120 {
+        for _ in 0..600 {
             spring.step(-pi / 2.0, 1.0 / 30.0);
             assert!(spring.theta <= prev + 1e-3, "turned back up: {prev} -> {}", spring.theta);
             assert!(spring.theta > -pi / 2.0 - 0.2, "overshot the left side: {}", spring.theta);
@@ -379,13 +394,19 @@ mod tests {
     }
 
     #[test]
-    fn talk_wave_is_ten_degrees_to_one_side() {
-        let ten = 10.0_f32.to_radians();
+    fn talk_wave_reaches_frame_twenty_and_the_body_barely_turns() {
+        let frame = 20.0_f32.to_radians();
+        let yaw = 2.0_f32.to_radians();
         assert!(near(talk_wave(0.0), 0.0));
-        assert!(near(talk_wave(TALK_WAVE_PERIOD_S * 0.5), ten));
+        assert!(near(talk_yaw(0.0), 0.0));
+        assert!(near(talk_wave(TALK_WAVE_PERIOD_S * 0.5), frame));
+        assert!(near(talk_yaw(TALK_WAVE_PERIOD_S * 0.5), yaw));
         assert!(near(talk_wave(TALK_WAVE_PERIOD_S), 0.0));
+        assert!(near(talk_yaw(TALK_WAVE_PERIOD_S), 0.0));
         assert!(talk_wave(0.4) > 0.0);
-        assert!(talk_wave(TALK_WAVE_PERIOD_S * 0.25) < ten);
+        assert!(talk_yaw(0.4) > 0.0);
+        assert!(talk_wave(TALK_WAVE_PERIOD_S * 0.25) < frame);
+        assert!(talk_yaw(TALK_WAVE_PERIOD_S * 0.5) < talk_wave(TALK_WAVE_PERIOD_S * 0.5) * 0.2);
     }
 
     #[test]
@@ -394,7 +415,7 @@ mod tests {
         assert!(near(aim_yaw(pi), 0.0));
         let mut pose = AimSpring::default();
         let mut yaw = AimSpring::default();
-        for _ in 0..90 {
+        for _ in 0..450 {
             pose.step(pi, 1.0 / 30.0);
             yaw.step(aim_yaw(pi), 1.0 / 30.0);
             assert!(yaw.theta.abs() < 0.02, "yaw left forward: {}", yaw.theta);
