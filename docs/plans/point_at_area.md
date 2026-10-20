@@ -39,7 +39,7 @@ Both clips run 15 seconds, 24 fps, keys from frame 1 through frame 360. The glTF
 
 +X is the figure's left. Frame 90 puts `wrist.L` out on +X. Frame 270 puts `wrist.R` out on −X. Frame 180 is both hands up. That is the clock in the skeleton, before the camera.
 
-The camera is `Ry(π)` on +Z, looking back at the origin (`body_camera_dq`). That one half turn brings mesh +Z toward the viewer and sends skeleton +X to the viewer's left. The root does not add a second half turn: `FACING_YAW` is 0. Two half turns showed her back, and from behind frame 90 read as the other side of the clock. Root yaw is the negation of `atan2(sin theta, abs(cos theta))`, so a target on the viewer's right (theta +π/2, frame 90, her left hand) yaws −π/2 and that raised hand lands nearer and on the viewer's right. A target on the viewer's left uses frame 270, her right hand, and yaw +π/2. Andrew confirmed the clip in Blender: frames 1–150 raise her left hand, frames 210–360 raise her right. Talk uses frames 1–20. A gesture to the right of the avatar uses frames 1–180. Do not negate `point_time` or `talk_wave`.
+The camera is `Rx(π)` on +Z, looking back at the origin (`body_camera_dq`). That one half turn brings mesh +Z toward the viewer and keeps skeleton +X (her left) on the viewer's right. `Ry(π)` did the face turn and also swapped left and right, so a logged `wrist.L` read as her right arm. The root does not add a second half turn: `FACING_YAW` is 0. Two half turns showed her back. Root yaw is `atan2(sin theta, abs(cos theta))`, so a target on the viewer's right (theta +π/2, frame 90, her left hand) yaws +π/2 and her nose turns that way. A target on the viewer's left uses frame 270, her right hand, and yaw −π/2. While she is still facing the viewer, frame 90 puts the raised left hand nearer and on the viewer's right. Andrew confirmed the clip in Blender: frames 1–150 raise her left hand, frames 210–360 raise her right. Talk uses frames 1–20. A gesture to the right of the avatar uses frames 1–180. Do not negate `point_time` or `talk_wave`.
 
 ## What to clean up in Blender
 
@@ -68,10 +68,10 @@ theta = atan2(dx, dy)          // 0 below, +π/2 viewer's right, π above, −π
 Root yaw, in radians, from the commanded theta (the angle she is waving toward, not the frame the arms are crossing):
 
 ```
-yaw = -atan2(sin(theta), abs(cos(theta)))
+yaw = atan2(sin(theta), abs(cos(theta)))
 ```
 
-That is 0 below and above, −π/2 at the viewer's right, +π/2 at the viewer's left, and a straight blend along each quadrant. The camera half turn already faces her at rest, so the actor does not add another π about +Y. It does not rotate the `root` bone inside the clip.
+That is 0 below and above, +π/2 at the viewer's right, −π/2 at the viewer's left, and a straight blend along each quadrant. The camera half turn already faces her at rest, so the actor does not add another π about +Y. It does not rotate the `root` bone inside the clip.
 
 The wave's two ends are two of the corners, chosen by distance from the figure. When the two nearest are the same distance, those are the ends: a wide box straight above, middle at π, hands up, no turn. Otherwise the ends are the two corners that are neither nearest nor farthest, and the arc is the direction that puts the farthest corner between them. The nearest corner can sit just outside that wedge. That is the wave.
 
@@ -80,7 +80,7 @@ Each avatar tick:
 1. Sample `Breathe` looped. Play the clip through in 4 seconds (`t = seconds * duration / 4`), so a breath is visible. The constant stays one number.
 2. While the presence that owns the body is talking and her mark is still on screen, the commanded angle is that arc. She holds the middle for five seconds, then a 15 s sine carries the command out to each end and back. Sample `Point` at the pose spring's theta and copy these joint rotations onto the breathe pose: `upperarm01`, `upperarm02`, `lowerarm01`, `lowerarm02`, `wrist`, left and right. Leave the spine on `Breathe`, so she keeps breathing while she points. The IK curves stay unloaded. The mark's own timer is what takes it down. Speech does not extend it.
 3. Two critically damped springs (`AIM_OMEGA = 0.8`). The error on each is the short way around the clock. A jump from one side to the other takes the short arc, and an exact tie goes down through the low pose rather than over the top. The pose spring follows the commanded angle, so a trip from the low pose to straight up still samples the side frame on the way. Those frames are the Blender edit. The yaw spring follows `aim_yaw` of the commanded angle. Straight up commands yaw 0, so the body stays facing the viewer while the arms rise, and a yaw change from the viewer's right to the viewer's left passes through facing forward.
-4. While she is talking and the mark is gone, the arm command is `20° * ½ * (1 − cos(2π t / 15))`, which is frame 20 of the 360-frame clip (her left hand), and the yaw command is `-2° * ½ * (1 − cos(2π t / 15))`. The two springs are separate. A highlight still yaws with `aim_yaw` of its wave. When she is not talking, both commands are 0. Both springs ease home: yaw back to 0, arms back to `Point`'s low frame, which is the rest. `InterestBook` still keeps the box until replace or retire. The gesture does not read that leftover. Bind, unbind, and rest zero both springs and the wave clock. A new mark, or speech starting or stopping, restarts the clock at the middle and leaves the springs where they are.
+4. While she is talking and the mark is gone, the arm command is `20° * ½ * (1 − cos(2π t / 15))`, which is frame 20 of the 360-frame clip (her left hand), and the yaw command is `+2° * ½ * (1 − cos(2π t / 15))`. The two springs are separate. A highlight still yaws with `aim_yaw` of its wave. When she is not talking, both commands are 0. Both springs ease home: yaw back to 0, arms back to `Point`'s low frame, which is the rest. `InterestBook` still keeps the box until replace or retire. The gesture does not read that leftover. Bind, unbind, and rest zero both springs and the wave clock. A new mark, or speech starting or stopping, restarts the clock at the middle and leaves the springs where they are.
 5. The jaw multiply stays after the pose, as it is now.
 
 `Rig::sample` already does the clip read. The new code is the mix of those two poses, the atan2, and the damped spring. The deform, the splat upload, the glass, and the placement seek stay on their current paths.
@@ -95,11 +95,11 @@ Headless, no GPU:
 - At `Point` time 3.75 s, `wrist.L` is higher and further on +X than `wrist.R`. At 11.25 s the sides swap. At 7.5 s the two wrist heights match and both are above the frame-1 height.
 - `root` rotation does not change across those times.
 - Sampling `Breathe` does not gesture `upperarm01`.
-- `yaw(0) = 0`, `yaw(π/2) = −π/2`, `yaw(π) = 0`, `yaw(3π/2) = +π/2`.
+- `yaw(0) = 0`, `yaw(π/2) = +π/2`, `yaw(π) = 0`, `yaw(3π/2) = −π/2`.
 - A side-to-side target moves theta through the low pose, and one frame does not arrive.
 - A box above the figure, near edge tying the two closest corners, waves between those corners and holds the middle at π. After the five-second hold, a quarter of the 15 s period reaches one end and three quarters reaches the other.
 - A box to the side waves between the two middle-distance corners. The farthest corner lies on that arc. The nearest does not.
-- Talking with no mark is frame 0 at t = 0, frame 20 at half of the 15 s period, and frame 0 again at the period. The arm wave stays positive. The yaw on that trip peaks at −2°.
+- Talking with no mark is frame 0 at t = 0, frame 20 at half of the 15 s period, and frame 0 again at the period. The arm wave stays positive. The yaw on that trip peaks at +2°.
 - Commanding π keeps the yaw spring at 0 while the pose spring travels.
 - `point_time(π, 360) = 180`.
 
@@ -107,4 +107,4 @@ The fingerprint check reads the sidecar. The empty-clip assertion is gone. The p
 
 ## First look
 
-Restart onto this GLB only when the slice is in. The figure on screen today was loaded before this export. The first thing to check is the sit inside the disc, facing the viewer, then a box to the viewer's right (root yaw −90°, frame 90, her left hand), a box above (both hands, aim yaw 0), and a box to the viewer's left (frame 270, her right hand). Focal length stays put.
+Restart onto this GLB only when the slice is in. The figure on screen today was loaded before this export. The first thing to check is the sit inside the disc, facing the viewer, then a box to the viewer's right (root yaw +90°, frame 90, her left hand), a box above (both hands, aim yaw 0), and a box to the viewer's left (frame 270, her right hand). Focal length stays put.

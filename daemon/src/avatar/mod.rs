@@ -94,12 +94,15 @@ pub struct AvatarActor {
 }
 
 /// Rigid camera: on +Z, looking at the origin, with the body upright.
-/// `Ry(π)` turns the face (+Z) toward the camera. Translation is `-R * camera`.
+/// `Rx(π)` turns the face (+Z) toward the camera and keeps skeleton +X
+/// (her left) on the viewer's right. `Ry(π)` did the same face turn and
+/// also swapped left and right, so `wrist.L` read as her right arm.
+/// Translation is `-R * camera`.
 fn body_camera_dq() -> DualQuatGpu {
-    let q = quat_axis_angle([0.0, 1.0, 0.0], std::f32::consts::PI);
+    let q = quat_axis_angle([1.0, 0.0, 0.0], std::f32::consts::PI);
     let cam_y = 0.90_f32;
     let cam_z = 2.55_f32;
-    let t = [0.0_f32, -cam_y, cam_z];
+    let t = [0.0_f32, cam_y, cam_z];
     let dual = quat_mul([t[0], t[1], t[2], 0.0], q);
     DualQuatGpu {
         real: [q[3], q[0], q[1], q[2]],
@@ -298,7 +301,7 @@ impl AvatarActor {
         let focal = width.max(height) * 1.2;
         ProjectionUniformsGpu::new(
             body_camera_dq(),
-            [focal, -focal],
+            [focal, focal],
             [width * 0.5, height * 0.5],
             [width, height],
             0.022,
@@ -314,7 +317,7 @@ impl AvatarActor {
     /// Talking with a mark waves between the ends of the corner arc, after a
     /// hold in the middle, and the body turns with that wave. Talking with no
     /// mark takes the arms to frame 20 (her left hand) and back, and yaws the
-    /// body only a couple of degrees the other way. Otherwise both springs
+    /// body only a couple of degrees toward that hand. Otherwise both springs
     /// ease back to 0. A new mode or a new rect restarts the wave clock and
     /// leaves the springs to travel from where they are.
     pub fn steer(

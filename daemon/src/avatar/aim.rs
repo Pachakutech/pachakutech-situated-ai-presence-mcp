@@ -6,9 +6,10 @@
 //! the viewer's right is frames 1–180 and a talk with no mark is frames 1–20.
 //! Root yaw comes from the commanded angle, not from the frame the arms are
 //! passing through, so a raise from the low pose to straight up does not yaw
-//! the body out to the side and back. The camera's Ry(π) is the half turn
-//! that faces her. The root does not add another. Yaw is negated so that
-//! mirrored X still puts her left hand on the viewer's right. Two critically
+//! the body out to the side and back. The camera's Rx(π) is the half turn
+//! that faces her and keeps her left on the viewer's right. The root does
+//! not add another. Yaw is the same sign as theta, so she turns toward the
+//! mark. Two critically
 //! damped springs carry the pose clock and the yaw. An exact tie between the
 //! high pose and the low pose takes the low pose.
 //!
@@ -19,9 +20,9 @@
 //! separate: the arms go out to frame 20, her left hand, and back to the low
 //! pose, and the body only yaws a couple of degrees the other way.
 
-/// Left at 0. `body_camera_dq` is already Ry(π) and brings mesh +Z toward
-/// the viewer. A second half turn on the root showed her back. Do not put π
-/// back here, and do not rotate about Z.
+/// Left at 0. `body_camera_dq` is already Rx(π) and brings mesh +Z toward
+/// the viewer without swapping left and right. A second half turn on the
+/// root showed her back. Do not put π back here, and do not rotate about Z.
 pub const FACING_YAW: f32 = 0.0;
 
 /// One breath. The 15 s clip is played through in this many seconds.
@@ -95,12 +96,12 @@ pub fn point_time(theta: f32, duration: f32) -> f32 {
     (theta / std::f32::consts::TAU).rem_euclid(1.0) * duration
 }
 
-/// Yaw about +Y from the same theta. 0 above and below. The camera's Ry(π)
-/// mirrors skeleton +X onto the viewer's left, so a target on the viewer's
-/// right returns −π/2 and a target on the viewer's left returns +π/2. The
-/// raised hand then sits on the same side as the target. `FACING_YAW` stays 0.
+/// Yaw about +Y from the same theta. 0 above and below. The camera's Rx(π)
+/// keeps skeleton +X on the viewer's right, so a target on the viewer's
+/// right returns +π/2 and a target on the viewer's left returns −π/2.
+/// Her nose turns toward the mark. `FACING_YAW` stays 0.
 pub fn aim_yaw(theta: f32) -> f32 {
-    -theta.sin().atan2(theta.cos().abs())
+    theta.sin().atan2(theta.cos().abs())
 }
 
 /// Hold the middle of a highlight arc this long before the wave leaves it.
@@ -208,11 +209,11 @@ pub fn talk_wave(t: f32) -> f32 {
     talk_envelope(t) * TALK_WAVE_RAD
 }
 
-/// The same trip for the body, a couple of degrees, opposite sign to the arm
-/// clock. The camera's remaining half turn mirrors X, so the body turns the
-/// other way from `talk_wave` and the raised left hand stays on the viewer's right.
+/// The same trip for the body, a couple of degrees, same sign as the arm
+/// clock. Her left hand is already on the viewer's right, and this glance
+/// turns her nose that way.
 pub fn talk_yaw(t: f32) -> f32 {
-    -talk_envelope(t) * TALK_YAW_RAD
+    talk_envelope(t) * TALK_YAW_RAD
 }
 
 /// What the gesture clock is counting. A change restarts it at the middle.
@@ -296,10 +297,10 @@ mod tests {
     fn yaw_matches_the_four_compass_points() {
         let pi = std::f32::consts::PI;
         assert!(near(aim_yaw(0.0), 0.0));
-        assert!(near(aim_yaw(pi / 2.0), -pi / 2.0));
+        assert!(near(aim_yaw(pi / 2.0), pi / 2.0));
         assert!(near(aim_yaw(pi), 0.0));
-        assert!(near(aim_yaw(-pi / 2.0), pi / 2.0));
-        assert!(near(aim_yaw(3.0 * pi / 2.0), pi / 2.0));
+        assert!(near(aim_yaw(-pi / 2.0), -pi / 2.0));
+        assert!(near(aim_yaw(3.0 * pi / 2.0), -pi / 2.0));
     }
 
     #[test]
@@ -405,7 +406,7 @@ mod tests {
     #[test]
     fn talk_wave_reaches_frame_twenty_and_the_body_barely_turns() {
         let frame = 20.0_f32.to_radians();
-        let yaw = -2.0_f32.to_radians();
+        let yaw = 2.0_f32.to_radians();
         assert!(near(talk_wave(0.0), 0.0));
         assert!(near(talk_yaw(0.0), 0.0));
         assert!(near(talk_wave(TALK_WAVE_PERIOD_S * 0.5), frame));
@@ -413,7 +414,7 @@ mod tests {
         assert!(near(talk_wave(TALK_WAVE_PERIOD_S), 0.0));
         assert!(near(talk_yaw(TALK_WAVE_PERIOD_S), 0.0));
         assert!(talk_wave(0.4) > 0.0);
-        assert!(talk_yaw(0.4) < 0.0);
+        assert!(talk_yaw(0.4) > 0.0);
         assert!(talk_wave(TALK_WAVE_PERIOD_S * 0.25) < frame);
         assert!(talk_yaw(TALK_WAVE_PERIOD_S * 0.5).abs() < talk_wave(TALK_WAVE_PERIOD_S * 0.5) * 0.2);
     }

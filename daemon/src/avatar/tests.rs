@@ -63,9 +63,10 @@ fn rest_pose_is_a_sitting_body() {
     assert!(height > 0.4 && height < 2.2, "body height {height}");
 }
 
-/// Rest faces the camera. The viewer's right samples frame 90, her left hand,
-/// and yaws so that hand is nearer and further right than the other wrist.
-/// The viewer's left samples frame 270, her right hand, on that side.
+/// Rest faces the camera. Frame 90 raises her left hand, and while she is
+/// still facing us that hand is on the viewer's right and nearer. A target
+/// on the viewer's right yaws +π/2, so her nose turns that way. The viewer's
+/// left is frame 270 and yaw −π/2.
 #[test]
 fn left_hand_points_to_the_viewers_right() {
     let a = AvatarActor::load(&manifest()).unwrap();
@@ -95,23 +96,49 @@ fn left_hand_points_to_the_viewers_right() {
     let (_, head_z) = project(head_w);
     assert!(jaw_z < head_z - 0.01, "rest should face the camera, jaw {jaw_z} head {head_z}");
 
+    // Facing the viewer, before the quarter turn. Rx(π) keeps +X on the viewer's right.
+    let facing = |t: f32| {
+        let pose = a.rig.sample(point, t, false);
+        let root = mat4_from_trs(
+            [0.0, 0.0, 0.0],
+            quat_axis_angle([0.0, 1.0, 0.0], aim::FACING_YAW),
+        );
+        let world = |j: usize| transform_point(&root, a.rig.joint_origin(&pose, j));
+        (world(l), world(rgt))
+    };
+    let (lw, rw) = facing(dur * 0.25);
+    assert!(lw[1] > rw[1] + 0.05, "frame 90 should raise the left wrist");
+    let (lx, lz) = project(lw);
+    let (rx, rz) = project(rw);
+    assert!(lx > rx + 20.0, "facing us, her left hand sits to the viewer's right: L {lx} R {rx}");
+    assert!(lz < rz - 0.1, "facing us, her left hand is nearer: L {lz} R {rz}");
+    let (lw, rw) = facing(dur * 0.75);
+    assert!(rw[1] > lw[1] + 0.05, "frame 270 should raise the right wrist");
+    let (lx, lz) = project(lw);
+    let (rx, rz) = project(rw);
+    assert!(rx < lx - 20.0, "facing us, her right hand sits to the viewer's left: L {lx} R {rx}");
+    assert!(rz < lz - 0.1, "facing us, her right hand is nearer: L {lz} R {rz}");
+
+    let nose_x = |theta: f32| {
+        let root = mat4_from_trs(
+            [0.0, 0.0, 0.0],
+            quat_axis_angle([0.0, 1.0, 0.0], aim::aim_yaw(theta) + aim::FACING_YAW),
+        );
+        let nose = transform_point(&root, [0.0, 0.90, 0.30]);
+        let chest = transform_point(&root, [0.0, 0.90, 0.0]);
+        project(nose).0 - project(chest).0
+    };
     let (t, lw, rw, _, _) = place(std::f32::consts::FRAC_PI_2);
     let frame = t / dur * 360.0;
     assert!((frame - 90.0).abs() < 0.5, "viewer's right should be frame 90, got {frame}");
     assert!(lw[1] > rw[1] + 0.05, "left wrist should be the raised one");
-    let (lx, lz) = project(lw);
-    let (rx, rz) = project(rw);
-    assert!(lx > rx + 20.0, "raised left hand should sit to the viewer's right: L {lx} R {rx}");
-    assert!(lz < rz - 0.1, "raised left hand should be nearer: L {lz} R {rz}");
+    assert!(nose_x(std::f32::consts::FRAC_PI_2) > 20.0, "she should turn toward the viewer's right");
 
     let (t, lw, rw, _, _) = place(-std::f32::consts::FRAC_PI_2);
     let frame = t / dur * 360.0;
     assert!((frame - 270.0).abs() < 0.5, "viewer's left should be frame 270, got {frame}");
     assert!(rw[1] > lw[1] + 0.05, "right wrist should be the raised one");
-    let (lx, lz) = project(lw);
-    let (rx, rz) = project(rw);
-    assert!(rx < lx - 20.0, "raised right hand should sit to the viewer's left: L {lx} R {rx}");
-    assert!(rz < lz - 0.1, "raised right hand should be nearer: L {lz} R {rz}");
+    assert!(nose_x(-std::f32::consts::FRAC_PI_2) < -20.0, "she should turn toward the viewer's left");
 }
 
 #[test]
@@ -127,8 +154,7 @@ fn point_compass_frames_place_the_wrists() {
     };
     let (down_l, down_r) = wrist(0.0);
     // Skeleton, before the camera. A quarter of the clip raises wrist.L on +X
-    // (her left hand, frames 1–150). The camera mirrors +X, and aim_yaw is
-    // negated so that hand lands on the viewer's right.
+    // (her left hand, frames 1–150). Rx(π) keeps that hand on the viewer's right.
     let (quarter_l, quarter_r) = wrist(dur * 0.25);
     let (up_l, up_r) = wrist(dur * 0.5);
     let (three_l, three_r) = wrist(dur * 0.75);
@@ -256,7 +282,7 @@ fn layer_camera_frames_the_body_upright() {
     let mid_px = side * 0.5;
     let project = |p: [f32; 3]| {
         let c = camera_space(p);
-        [focal * c[0] / c[2] + mid_px, -focal * c[1] / c[2] + mid_px]
+        [focal * c[0] / c[2] + mid_px, focal * c[1] / c[2] + mid_px]
     };
     let head = project([0.0, 1.62, 0.0]);
     let mid = project([0.0, 0.90, 0.0]);
