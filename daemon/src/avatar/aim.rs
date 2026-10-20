@@ -28,6 +28,12 @@ pub const FACING_YAW: f32 = 0.0;
 /// One breath. The 15 s clip is played through in this many seconds.
 pub const BREATH_PERIOD_S: f32 = 4.0;
 
+///Scales body yaw towards a highlight
+pub const YAW_SCALE: f32 = 1.0;
+
+/// Exponent on normalized yaw 1.0 = linear 2.0 = softer
+pub const YAW_POWER: f32 = 6.0;
+
 /// Natural frequency of the aim spring, in rad/s. Critically damped, so a
 /// side-to-side turn settles in about five seconds.
 pub const AIM_OMEGA: f32 = 0.8;
@@ -101,7 +107,11 @@ pub fn point_time(theta: f32, duration: f32) -> f32 {
 /// right returns +π/2 and a target on the viewer's left returns −π/2.
 /// Her nose turns toward the mark. `FACING_YAW` stays 0.
 pub fn aim_yaw(theta: f32) -> f32 {
-    theta.sin().atan2(theta.cos().abs())
+    let linear = theta.sin().atan2(theta.cos().abs());
+    let half_pi = std::f32::consts::FRAC_PI_2;
+    let u = (linear / half_pi).clamp(-1.0, 1.0);
+    let shaped = u.abs().powf(YAW_POWER).copysign(u);
+    shaped * half_pi
 }
 
 /// Hold the middle of a highlight arc this long before the wave leaves it.
