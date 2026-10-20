@@ -89,6 +89,12 @@ impl SplatSprites {
             .line_width(1.0);
         let msaa = vk::PipelineMultisampleStateCreateInfo::default()
             .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+        // Nearer disc wins. The fragment shader discards the faint rim so a
+        // soft edge cannot write depth and punch a hole through the skin.
+        let depth = vk::PipelineDepthStencilStateCreateInfo::default()
+            .depth_test_enable(true)
+            .depth_write_enable(true)
+            .depth_compare_op(vk::CompareOp::LESS);
         let blend_attach = vk::PipelineColorBlendAttachmentState::default()
             .blend_enable(true)
             .src_color_blend_factor(vk::BlendFactor::ONE)
@@ -109,6 +115,7 @@ impl SplatSprites {
             .viewport_state(&viewport)
             .rasterization_state(&raster)
             .multisample_state(&msaa)
+            .depth_stencil_state(&depth)
             .color_blend_state(&blend)
             .dynamic_state(&dynamic)
             .layout(layout)

@@ -1029,6 +1029,10 @@ pub struct OverlayGpu {
     image_views: Vec<vk::ImageView>,
     format: vk::Format,
     extent: vk::Extent2D,
+    /// Shared by every framebuffer. One image is in flight at a time.
+    depth_image: vk::Image,
+    depth_mem: vk::DeviceMemory,
+    depth_view: vk::ImageView,
     render_pass: vk::RenderPass,
     framebuffers: Vec<vk::Framebuffer>,
     pipeline_layout: vk::PipelineLayout,
@@ -1155,8 +1159,9 @@ impl OverlayGpu {
             create_swapchain(vk, &swapchain_loader, surface_loader, surface, extent, vk::SwapchainKHR::null())?;
 
         let image_views = create_image_views(&vk.device, format, &images)?;
+        let (depth_image, depth_mem, depth_view) = create_depth(vk, extent)?;
         let render_pass = create_render_pass(&vk.device, format)?;
-        let framebuffers = create_framebuffers(&vk.device, render_pass, extent, &image_views)?;
+        let framebuffers = create_framebuffers(&vk.device, render_pass, extent, &image_views, depth_view)?;
 
         // Always start on SHM. The feed switches to dmabuf only when the
         // capture thread confirms the first dmabuf frame — so a failed
@@ -1199,6 +1204,9 @@ impl OverlayGpu {
             image_views,
             format,
             extent,
+            depth_image,
+            depth_mem,
+            depth_view,
             render_pass,
             framebuffers,
             pipeline_layout,
@@ -1262,8 +1270,12 @@ impl OverlayGpu {
         self.format = format;
         self.extent = extent;
         self.image_views = create_image_views(&vk.device, format, &images)?;
+        let (depth_image, depth_mem, depth_view) = create_depth(vk, extent)?;
+        self.depth_image = depth_image;
+        self.depth_mem = depth_mem;
+        self.depth_view = depth_view;
         self.render_pass = create_render_pass(&vk.device, format)?;
-        self.framebuffers = create_framebuffers(&vk.device, self.render_pass, extent, &self.image_views)?;
+        self.framebuffers = create_framebuffers(&vk.device, self.render_pass, extent, &self.image_views, self.depth_view)?;
         let (layout, pipeline) = create_quad_pipeline(
             &vk.device,
             self.render_pass,
@@ -1687,13 +1699,16 @@ impl OverlayGpu {
             vk.graphics_queue_family,
         );
 
-        let clear = vk::ClearValue { color: vk::ClearColorValue { float32: [0.0, 0.0, 0.0, 0.0] } };
+        let clears = [
+            vk::ClearValue { color: vk::ClearColorValue { float32: [0.0, 0.0, 0.0, 0.0] } },
+            vk::ClearValue { depth_stencil: vk::ClearDepthStencilValue { depth: 1.0, stencil: 0 } },
+        ];
         let render_area = vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent: self.extent };
         let rp_begin = vk::RenderPassBeginInfo::default()
             .render_pass(self.render_pass)
             .framebuffer(self.framebuffers[image_index as usize])
             .render_area(render_area)
-            .clear_values(std::slice::from_ref(&clear));
+            .clear_values(&clears);
         unsafe {
             vk.device.cmd_begin_render_pass(
                 self.command_buffer,
@@ -1806,6 +1821,9 @@ impl OverlayGpu {
             for view in self.image_views.drain(..) {
                 device.destroy_image_view(view, None);
             }
+            device.destroy_image_view(self.depth_view, None);
+            device.destroy_image(self.depth_image, None);
+            device.free_memory(self.depth_mem, None);
             device.destroy_render_pass(self.render_pass, None);
         }
     }
@@ -2302,8 +2320,46 @@ fn create_image_views(
         .collect()
 }
 
+fn create_depth(
+    vk: &VulkanContext,
+    extent: vk::Extent2D,
+) -> Result<(vk::Image, vk::DeviceMemory, vk::ImageView), String> {
+    let device = &vk.device;
+    let image_info = vk::ImageCreateInfo::default()
+        .image_type(vk::ImageType::TYPE_2D)
+        .format(vk::Format::D32_SFLOAT)
+        .extent(vk::Extent3D { width: extent.width.max(1), height: extent.height.max(1), depth: 1 })
+        .mip_levels(1)
+        .array_layers(1)
+        .samples(vk::SampleCountFlags::TYPE_1)
+        .tiling(vk::ImageTiling::OPTIMAL)
+        .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
+        .sharing_mode(vk::SharingMode::EXCLUSIVE)
+        .initial_layout(vk::ImageLayout::UNDEFINED);
+    let image = unsafe { device.create_image(&image_info, None) }
+        .map_err(|e| format!("vkCreateImage (depth) failed: {e:?}"))?;
+    let req = unsafe { device.get_image_memory_requirements(image) };
+    let mem = alloc_memory(vk, req, vk::MemoryPropertyFlags::DEVICE_LOCAL)?;
+    unsafe { device.bind_image_memory(image, mem, 0) }
+        .map_err(|e| format!("vkBindImageMemory (depth) failed: {e:?}"))?;
+    let view_info = vk::ImageViewCreateInfo::default()
+        .image(image)
+        .view_type(vk::ImageViewType::TYPE_2D)
+        .format(vk::Format::D32_SFLOAT)
+        .subresource_range(vk::ImageSubresourceRange {
+            aspect_mask: vk::ImageAspectFlags::DEPTH,
+            base_mip_level: 0,
+            level_count: 1,
+            base_array_layer: 0,
+            layer_count: 1,
+        });
+    let view = unsafe { device.create_image_view(&view_info, None) }
+        .map_err(|e| format!("vkCreateImageView (depth) failed: {e:?}"))?;
+    Ok((image, mem, view))
+}
+
 fn create_render_pass(device: &ash::Device, format: vk::Format) -> Result<vk::RenderPass, String> {
-    let attachment = vk::AttachmentDescription::default()
+    let color = vk::AttachmentDescription::default()
         .format(format)
         .samples(vk::SampleCountFlags::TYPE_1)
         .load_op(vk::AttachmentLoadOp::CLEAR)
@@ -2312,21 +2368,36 @@ fn create_render_pass(device: &ash::Device, format: vk::Format) -> Result<vk::Re
         .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
         .initial_layout(vk::ImageLayout::UNDEFINED)
         .final_layout(vk::ImageLayout::PRESENT_SRC_KHR);
+    let depth = vk::AttachmentDescription::default()
+        .format(vk::Format::D32_SFLOAT)
+        .samples(vk::SampleCountFlags::TYPE_1)
+        .load_op(vk::AttachmentLoadOp::CLEAR)
+        .store_op(vk::AttachmentStoreOp::DONT_CARE)
+        .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+        .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+        .initial_layout(vk::ImageLayout::UNDEFINED)
+        .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+    let attachments = [color, depth];
     let color_ref = vk::AttachmentReference {
         attachment: 0,
         layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
     };
+    let depth_ref = vk::AttachmentReference {
+        attachment: 1,
+        layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+    };
     let subpass = vk::SubpassDescription::default()
         .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
-        .color_attachments(std::slice::from_ref(&color_ref));
+        .color_attachments(std::slice::from_ref(&color_ref))
+        .depth_stencil_attachment(&depth_ref);
     let dependency = vk::SubpassDependency::default()
         .src_subpass(vk::SUBPASS_EXTERNAL)
         .dst_subpass(0)
-        .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
-        .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
-        .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE);
+        .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS)
+        .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS)
+        .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE);
     let info = vk::RenderPassCreateInfo::default()
-        .attachments(std::slice::from_ref(&attachment))
+        .attachments(&attachments)
         .subpasses(std::slice::from_ref(&subpass))
         .dependencies(std::slice::from_ref(&dependency));
     unsafe { device.create_render_pass(&info, None) }
@@ -2338,13 +2409,15 @@ fn create_framebuffers(
     render_pass: vk::RenderPass,
     extent: vk::Extent2D,
     views: &[vk::ImageView],
+    depth: vk::ImageView,
 ) -> Result<Vec<vk::Framebuffer>, String> {
     views
         .iter()
         .map(|&view| {
+            let attachments = [view, depth];
             let info = vk::FramebufferCreateInfo::default()
                 .render_pass(render_pass)
-                .attachments(std::slice::from_ref(&view))
+                .attachments(&attachments)
                 .width(extent.width)
                 .height(extent.height)
                 .layers(1);
@@ -2385,6 +2458,12 @@ fn create_quad_pipeline(
         .line_width(1.0);
     let msaa = vk::PipelineMultisampleStateCreateInfo::default()
         .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+    // The crystal ball is the only draw while the figure is absent. It does
+    // not take part in the body's depth test.
+    let depth_state = vk::PipelineDepthStencilStateCreateInfo::default()
+        .depth_test_enable(false)
+        .depth_write_enable(false)
+        .depth_compare_op(vk::CompareOp::ALWAYS);
     let blend_attach = vk::PipelineColorBlendAttachmentState::default()
         .blend_enable(true)
         .src_color_blend_factor(vk::BlendFactor::ONE)
@@ -2417,6 +2496,7 @@ fn create_quad_pipeline(
         .viewport_state(&viewport)
         .rasterization_state(&raster)
         .multisample_state(&msaa)
+        .depth_stencil_state(&depth_state)
         .color_blend_state(&blend)
         .dynamic_state(&dynamic)
         .layout(pipeline_layout)

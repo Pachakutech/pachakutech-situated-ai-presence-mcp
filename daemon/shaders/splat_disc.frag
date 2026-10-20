@@ -180,6 +180,10 @@ void main() {
     }
     rgb += vec3(1.0, 0.97, 0.90) * star * (face ? 1.45 : 1.15);
 
-    float a = v_color.a * exp(-r * r * 2.2);
-    outColor = vec4(rgb * a, a);
+    // Peak alpha is already 1. The gaussian only softens the rim, and without
+    // a depth test a later splat paints over a nearer one. Discard that rim
+    // and draw the core opaque, so the front of the body hides the back.
+    float gauss = exp(-r * r * 2.2);
+    if (v_color.a * gauss < 0.35) discard;
+    outColor = vec4(rgb, 1.0);
 }
