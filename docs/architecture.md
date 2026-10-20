@@ -1,5 +1,9 @@
 # Architecture: two processes, one contract
 
+The behaviour of the figure, the highlight, and speech is
+[`situated-presence.md`](situated-presence.md). This file is the split
+between the two processes and the wire between them.
+
 ## Why two processes
 
 MCP's TypeScript SDK runs on Node. There's no mature way to hold a `VkDevice`
@@ -11,9 +15,9 @@ or import a `dma_buf` fd directly from Node. So the design is a split:
   Unix socket (`src/daemonClient.ts`) and falls back to the notify-send stub
   if nothing is listening.
 - **Presence Daemon** (`daemon/`, Rust) — owns the GPU. Holds the Vulkan
-  device, runs a compute splat pipeline (projection + LRU eviction), and
-  serves the actor registry over the socket. Knows nothing about MCP.
-  Webcam/screen ingress clients exist as modules and are not ticked yet.
+  device, a process-lifetime compute pipeline (projection, eviction, and
+  the avatar expand), the layer-shell surfaces, and the actor registry.
+  Knows nothing about MCP. Screen and webcam ingress are ticked.
 
 They talk over a local Unix socket, one line of JSON per message, proposal
 in, result out. Nothing dense — no buffers, no pixels — crosses that
@@ -22,16 +26,17 @@ carry" rule the whole substrate is built on, drawn as a process boundary on
 desktop instead of a CPU/GPU boundary on a phone.
 
 ```
- agent CLI (Claude Code, Codex, ...)
+ agent CLI (Claude Code, Codex, Grok, ...)
         │  MCP over stdio
         ▼
  MCP Binding (Node)  ── policy gate, typed tools ──
-        │  Unix socket, JSON lines
+        │  Unix socket, JSON lines; the daemon accepts several clients
         ▼
- Presence Daemon (Rust) ── Vulkan device, compute pipeline, actor registry ──
+ Presence Daemon (Rust) ── Vulkan device, live pipeline, registry, body ──
         │
         ▼
- GPU: projected splat buffer (compute). Overlay / dma_buf ingress not yet.
+ GPU: dma-buf screen and webcam, avatar expand, depth-tested discs
+      on a layer-shell surface
 ```
 
 ## The socket protocol
@@ -59,57 +64,52 @@ Every tool in `src/index.ts` has a matching `Proposal` variant in
 for now. If this grows much further, generating one from the other becomes
 worth it; at six, it isn't yet.
 
-## Ingress (written, not ticked)
+## Ingress
 
-Two capture backends live under `daemon/src/actors/ingress/` and compile
-into the daemon. Neither is called from `main.rs` yet — there is no frame
-loop feeding `SplatPipeline::write_splat`.
+Screen and webcam are ticked.
 
-- **Screen, v0:** `wlr-screencopy-unstable-v1` copying into `wl_shm`, then
-  `frame_to_billboard` (one textured-billboard `AnimatedSplat`). This is a
-  copy path, not dma_buf.
-- **Webcam, v0:** raw V4L2 `ioctl(2)` (layouts checked against kernel
-  headers). Same billboard conversion.
+- **Screen.** The steady path is `zwlr_export_dmabuf_manager_v1`. The
+  compositor's dma-buf is imported with `VkImportMemoryFdInfoKHR`. When
+  that path is unavailable the daemon falls back to
+  `wlr-screencopy-unstable-v1` into one reused `wl_shm` memfd, at about
+  10 frames per second.
+- **Webcam.** V4L2, YUYV, buffers exported as dma-bufs and imported the
+  same way. The steady path does not map those buffers for a CPU read.
 
-The **eventual** zero-copy path is still the one `vulkan.rs` probes for on
-startup (`VK_KHR_external_memory_fd` + `VK_EXT_external_memory_dma_buf`,
-confirmed present on the Intel Xe this was last run on):
+`vulkan.rs` still probes `VK_KHR_external_memory_fd` and
+`VK_EXT_external_memory_dma_buf` at startup and reports the result. On
+the Iris Xe this machine uses, the probe succeeds and the log says the
+feed switched from SHM to the dma-buf import.
 
-```c
-struct v4l2_requestbuffers req = { .count = 4, .type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
-                                    .memory = V4L2_MEMORY_MMAP };
-ioctl(fd, VIDIOC_REQBUFS, &req);
+## Compute pipeline
 
-struct v4l2_exportbuffer expbuf = { .type = V4L2_BUF_TYPE_VIDEO_CAPTURE, .index = i };
-ioctl(fd, VIDIOC_EXPBUF, &expbuf);   // expbuf.fd is now a dma_buf handle
-```
+`daemon/src/pipeline.rs` allocates the dynamic splat SSBO, the 64-slot
+bone palette, the projected-output SSBO, and the eviction list. SPIR-V
+for `splat_projection.comp` and `splat_eviction.comp` is compiled at
+build time and embedded. Startup runs a one-splat smoke tick and refuses
+to serve if the dispatch fails. The pipeline then stays up for the life
+of the process.
 
-Hyprland can also hand back a dma_buf-backed `wl_buffer`. Both import with
-`VkImportMemoryFdInfoKHR` / `VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT`.
-Do not conflate that with the SHM client that exists today.
-
-## Compute pipeline (built and smoked)
-
-`daemon/src/pipeline.rs` allocates the dynamic splat SSBO, bone palette,
-projected-output SSBO, and eviction list; embeds SPIR-V compiled at build
-time from `splat_projection.comp` and `splat_eviction.comp`; dispatches
-both in one command buffer. On daemon start it runs a one-splat smoke tick
-and refuses to serve if dispatch fails.
-
-What it does **not** do: rasterize, present, or stay alive for actors.
-Smoke constructs, ticks, destroys. A process-lifetime pipeline plus a
-`wlr-layer-shell` surface is the next compositing step.
+The avatar does not travel through that 64-slot palette. `avatar_expand.comp`
+skins the 181-joint proxy and writes finished Gaussians. The projection
+pass consumes those positions. The raster is a depth-tested disc on the
+layer-shell surface, not a deferred step. The September note that the
+pipeline was destroyed after the smoke tick is history. The shader bugs
+from that period are kept in
+[`gpu-splat-pipeline.md`](gpu-splat-pipeline.md) because the dual-quaternion
+arithmetic is still the one in the binary.
 
 ## Composing the overlay
 
-A `wlr-layer-shell-unstable-v1` surface covering the output, with
-`exclusive_zone = -1` (does not reserve space) and an **empty input
-region** (clicks and keyboard fall through to whatever is underneath).
-That is the Presence default: visible, not modal.
+A `wlr-layer-shell-unstable-v1` surface, `exclusive_zone = -1`, empty
+input region. Pointer and keyboard fall through. The surface is the size
+of the disc: 220 pixels while no presence owns the body, 330 once one
+does. It is not a fullscreen transparent window. A second layer carries
+the highlight tint, under the figure.
 
-As of 2026-09-22 this is live: a 200×200 premultiplied-alpha quad in the
-center of a fullscreen transparent overlay (`daemon/src/overlay.rs`). The
-hyperbubble / splat raster comes next and draws into this same surface.
+The disc moves. `placement.rs` reads a heat grid built from the screen
+capture and seeks a cold seat. A visible mark is stamped hot so the body
+does not sit on it.
 
 ## Scope: is this the runtime, or a client of the runtime?
 
@@ -154,11 +154,12 @@ frame; we follow their lead:
    Memory — the canonical pose, plus (eventually) skinning weights per
    Gaussian.
 2. **Presence actor** maps `animatePresence`'s `text` to a compact
-   pose/expression code (this is the one piece that needs a real model —
-   likely the most involved unbuilt piece of this whole design).
-3. That code drives classical LBS/DQS deformation of the canonical cloud,
-   the same mechanism every cited method above uses, rather than a fresh
-   generative pass per frame.
+   pose. A learned model for that map is not in the tree. The running
+   body samples `Breathe` and `Point` instead, as
+   [`situated-presence.md`](situated-presence.md) records.
+3. Either path deforms a canonical cloud, rather than regenerating
+   Gaussian positions from scratch each frame. The avatar expand does
+   that deformation on the device.
 
 ## Artifact scope: splat clouds only, on purpose
 
@@ -169,21 +170,20 @@ polycount) this project doesn't need to solve to answer the question that
 matters — can an agent hand a Presence actor something concrete to look
 like.
 
-## What's honestly unbuilt
+## What is still open
 
-- A process-lifetime `SplatPipeline` that Control/Presence/Ingress write
-  into (smoke currently tears it down before the socket accepts).
-- Raster + `wlr-layer-shell` presentation of `ProjectedSplat`.
-- Ticking the V4L2 / wlr-screencopy backends into the splat buffer.
-- `text_to_pose_code` — still returns a zero pose.
-- Resolving something like "the red error banner" to actual screen
-  coordinates is a real perception problem — a vision model over the
-  captured frame. No shortcut exists for this; it lives inside the daemon's
-  registry once built.
-- Concurrent socket clients (today: one connection at a time) and moving
-  presence/artifact caps out of the per-MCP-process Policy Gate so the
-  shared-substrate claim is true in the process graph.
-- Microphone / audio clock (named in `docs/vision.md`, no code).
+- A learned map from `animatePresence`'s text to a pose code. The running
+  body samples `Breathe` and `Point`. A log line that still calls the
+  pose-code apply unbuilt refers to that older design.
+- Resolving a phrase such as "the red banner" to a rectangle. The daemon
+  receives `u`, `v`, `w`, and `h`. The measurement belongs to the caller.
+- Viseme morph targets on the current GLB. The jaw moves. The shape keys
+  do not, because they are not in the file.
+- A microphone ingress actor. Speech playback is not that actor.
+- Moving the presence and artifact caps out of the per-session policy
+  gate and into the daemon, so two MCP processes share one budget. The
+  socket already accepts more than one client. The body is still one
+  body, given to the first live presence.
 
 `wlr-screencopy` and `wlr-layer-shell` are wlroots-protocol-based; Hyprland
 implements them independently now (it dropped its wlroots dependency in

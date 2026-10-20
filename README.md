@@ -1,36 +1,92 @@
-# Pachakutech Presence — an MCP Binding for the Presence Layer
+# Pachakutech Presence
 
-Not another agent harness! A **Presence Layer**: a small, typed, policy-gated
-set of actions — Manifestations — through which an agent can put sensory
-stimuli directly into your UI instead of only describing it in text. This
-package allows AI to instantiate that avatar in the user space through an
-MCP Binding and a presence daemon evaluating a time-rectified sensory perception:
-the Eros for LLM/AI Logos to learn by.
+A local agent is given one body on the compositor the person is already
+using, and six typed actions for marking that screen and speaking
+through the body. The package is the MCP binding, the `presence` CLI,
+and a Linux x86_64 daemon that owns Vulkan and Wayland. The account of
+what that daemon actually does is
+[`docs/situated-presence.md`](docs/situated-presence.md). Read it before
+the notes under `docs/plans/`.
 
-## The contract
+![Situated presence](docs/assets/nomind.jpg)
+
+## What is running
+
+- A layer-shell disc, 220 pixels while idle and 330 once a presence owns
+  the body. It takes no pointer input and reserves no layout space. A
+  heat field over the captured screen chooses the seat. A visible mark
+  is written into that field as hot.
+- A MakeHuman proxy, 181 joints, about 50,000 Gaussians, skinned and
+  reconstructed on the GPU and checked against a CPU oracle at startup.
+  The rig is not cut down to the 64-bone palette used for ordinary
+  splat clouds.
+- Screen and webcam enter as dma-bufs when the device allows it. Body
+  colour is sampled from those images. `PRESENCE_APPEARANCE_BAKE=1`
+  draws the joint palette instead, and is read only at process start.
+- The discs occlude one another. Depth is tested and written. The
+  fragment outputs a covered sample at full alpha.
+- Speech is Piper and Rhubarb, on this machine. The jaw follows the
+  audio. This export of the mesh has no `viseme_*` shape keys, and the
+  log says so. The jaw still moves.
+- While she is speaking, a visible mark selects a frame of the `Point`
+  clip by screen angle. Frames 1–180 are her left hand, which is the
+  hand for a mark on the viewer's right. Frame 270 is her right hand.
+  The camera is one half-turn about X, so the face comes forward and
+  left stays on the viewer's right. She yaws up to a quarter turn
+  toward the mark. With no mark, the arms go out to frame 20 and back,
+  and the body yaws about two degrees.
+
+Shader history is [`docs/gpu-splat-pipeline.md`](docs/gpu-splat-pipeline.md).
+The process split is [`docs/architecture.md`](docs/architecture.md).
+The reason the contract looks like this is [`docs/vision.md`](docs/vision.md).
+
+## Speaking and marking
+
+The daemon copies its environment once, at start. The shell that runs
+`presence daemon start` has to export `PRESENCE_PIPER_MODEL`,
+`PRESENCE_RHUBARB_BIN`, `WAYLAND_DISPLAY`, and `XDG_RUNTIME_DIR`. Rhubarb's
+`res/` directory sits beside the rhubarb binary. A variable exported
+after start does not reach the process, and `speak` still returns
+success.
+
+```bash
+presence daemon start
+id=$(presence spawn)                 # stdout is only the id
+presence highlight "$id" 0.53 0.46 0.12 0.12 45
+presence speak "$id" "The sentence inside the mark."
+presence retire "$id"
+```
+
+`u`, `v`, `w`, and `h` are fractions of the whole composited output,
+origin at the top left, `v` downward. The default tint lasts 5 seconds.
+The daemon clamps a duration to between 1 and 60. The arms move only
+while audio is playing and the tint is still up. After the tint fades,
+the stored rectangle does not hold the pose. `speak` returns when the
+line is accepted. A second `speak` replaces the line still playing. A
+daemon restart drops every live id.
+
+The same proposals exist as MCP tools: `spawnPresence`,
+`animatePresence`, `manifestHighlight`, `retirePresence`, `addArtifact`,
+`retireArtifact`. Full schemas are in [`src/index.ts`](src/index.ts).
+Expected motion, the corner rule, and the camera are written out in
+[`docs/situated-presence.md`](docs/situated-presence.md). A one-page
+printing of the contract is
+[`docs/contract-onepager.html`](docs/contract-onepager.html).
 
 | Tool | Pattern | Does |
 |---|---|---|
-| `manifestHighlight` | ephemeral | Tints a full-screen UV box for a live presence. The mark fades; the box stays until replace or retire |
-| `spawnPresence` | instanced (1/3) | Spawns a persistent audio-visual presence derived from context (optionally from a held artifact), returns a `presenceId` |
-| `animatePresence` | instanced (2/3) | Feeds new content to a spawned presence |
-| `retirePresence` | instanced (3/3) | Ends a presence and frees its slot |
-| `addArtifact` | instanced (1/2) | Adds a Gaussian splat cloud to the substrate as reference material — held, not rendered directly, for `spawnPresence` to build from |
-| `retireArtifact` | instanced (2/2) | Removes a held artifact and frees its slot |
+| `manifestHighlight` | ephemeral | Tints a full-screen UV box. The tint fades. The box remains until replace or retire |
+| `spawnPresence` | instanced | Returns a `presenceId`. The first live presence receives the body |
+| `animatePresence` | instanced | Speaks `text` through that presence |
+| `retirePresence` | instanced | Ends it and frees the slot |
+| `addArtifact` | instanced | Holds a local `.splat` or `.ply`. The file is read by the daemon. The cloud is not the avatar |
+| `retireArtifact` | instanced | Drops a held cloud |
 
-Every call passes a Policy Gate first: a 1.5s minimum interval between calls
-to the same tool (except `retirePresence` / `retireArtifact`, which are
-never rate-limited), a cap of 3 concurrent presences, a cap of 20 held
-artifacts — presences and artifacts are capped independently since they're
-different risk classes (one is actively rendered, the other is inert content
-sitting in the substrate).
-
-Full schemas are in [`src/index.ts`](src/index.ts); the reasoning behind the
-ephemeral/instanced split, why artifacts are a separate registry from
-presences, and why the tool *list* stays fixed while what each tool generates
-remains versatile is in [`skills/presence/SKILL.md`](skills/presence/SKILL.md).
-A one-page version of this contract, formatted for printing/sharing, is in
-[`docs/contract-onepager.html`](docs/contract-onepager.html).
+The MCP process applies a policy gate before the socket: 1.5 seconds
+between calls to the same tool, at most three presences, at most twenty
+artifacts. Retire is not rate-limited. A presence started from the CLI
+does not pass through that gate. The CLI and the MCP server write the
+same socket.
 
 ## Install — Linux x86_64
 
@@ -41,172 +97,86 @@ presence daemon start
 presence setup claude
 ```
 
-`@pachakutech/presence-mcp` is one package. It includes the Node MCP binding,
-the `presence` CLI, a prebuilt Linux x86_64 `presence-daemon`, and the agent
-skill at `skills/presence/SKILL.md`. You do not need Rust or Cargo, and
-install does not compile or start anything.
+The package contains the Node binding, the CLI, a prebuilt
+`presence-daemon`, and `skills/presence/SKILL.md`. Install does not
+compile anything and does not start the daemon. `presence setup claude`
+runs `claude mcp add presence -- presence mcp` and copies the skill to
+`~/.claude/skills/presence`. `setup codex` and `setup grok` do the same
+for those clients. The agent then launches `presence mcp` on stdio. That
+process talks to `$XDG_RUNTIME_DIR/pachakutech/presence.sock`.
 
-`presence setup claude` runs `claude mcp add presence -- presence mcp` and
-installs the skill under `~/.claude/skills/presence`. `presence setup codex`
-and `presence setup grok` register the same MCP command and install the skill
-under `~/.codex/skills/presence` and `~/.grok/skills/presence`. Your agent
-client then launches `presence mcp` over stdio. That
-process talks to the daemon on a local Unix socket
-(`$XDG_RUNTIME_DIR/pachakutech/presence.sock`).
-
-The daemon is a separate process. It owns the Wayland and Vulkan integration
-and runs only in a logged-in Linux desktop session, as that user, never as
-root. Start it yourself with `presence daemon start`. Stop it with
-`presence daemon stop`. `presence doctor` is the diagnostic.
-
-npm can ship the executable. It cannot ship the host session:
-
-- Linux x86_64.
-- A Wayland desktop session (`WAYLAND_DISPLAY`).
-- A Vulkan loader and a vendor driver.
-- GPU render-node access (`/dev/dri/renderD128`).
-- Webcam access only when webcam features are used.
-- Hyprland is the reference compositor.
-
-On a machine with no Vulkan driver the daemon prints a clear error and exits.
-On a working desktop it reports the GPU name and dma_buf support, runs a
-one-splat compute smoke tick (fatal if dispatch fails), then listens on the
-socket above. `presence daemon path` prints the bundled binary it will launch.
-Stdout and stderr from that process go to
+The daemon runs in a logged-in desktop session, as that user, never as
+root. Stop it with `presence daemon stop`. `presence daemon path` prints
+the binary that `start` will launch. Its stdout and stderr go to
 `$XDG_RUNTIME_DIR/pachakutech/presence-daemon.log`.
 
-![Situated Agentic Presence Runtime](docs/assets/nomind.jpg)
+The host session is not in the package:
 
-## Updating
+- Linux x86_64.
+- A Wayland session (`WAYLAND_DISPLAY`). Hyprland is the compositor this
+  was built against.
+- A Vulkan loader and a vendor driver.
+- The DRM render node (`/dev/dri/renderD128`). logind grants this to the
+  seat. Membership of the `render` group is the fallback.
+- `/dev/video*` when the webcam is wanted. On most distributions that is
+  the `video` group. A missing webcam permission fails quietly.
 
-Presence does not auto-update.
+On a machine with no Vulkan driver the daemon prints the error and exits.
+On a working desktop it names the GPU, reports whether dma-buf import is
+available, runs a one-splat smoke dispatch, and only then listens. A
+failed smoke dispatch is fatal.
 
-Check for available global npm updates:
+If the daemon is down, the binding falls back to `notify-send` and
+appends to `~/.local/state/pachakutech-presence/log.jsonl`.
+
+There is no auto-update.
 
 ```bash
 npm outdated -g --depth=0
-```
-
-Update Presence:
-
-```bash
 npm update -g @pachakutech/presence-mcp
-```
-
-Restart the local daemon after updating:
-
-```bash
 presence daemon restart
-```
-
-Confirm installed versions:
-
-```bash
 presence --version
 presence daemon status
 ```
 
-On Omarchy, [`docs/omarchy.md`](docs/omarchy.md) describes a planned
-`omarchy-mise-install` line. That path is not verified yet. The npm install
-above is the one to use.
+On Omarchy, [`docs/omarchy.md`](docs/omarchy.md) records an
+`omarchy-mise-install` line that has not been verified. The npm install
+above is the one that matches this tree.
 
-## Building from source — contributors
+## Building from this repository
 
-Rust and Cargo are required only when building the daemon from this
-repository. A normal npm install uses the bundled binary.
-
-Shader compile needs `glslangValidator` at build time (Arch/Omarchy: `glslang`).
-Run time needs `vulkan-icd-loader` and a vendor driver (`vulkan-intel`,
-`vulkan-radeon`, or `nvidia-utils`).
+Rust and Cargo are required only for a daemon built here. Shader compile
+needs `glslangValidator` (`glslang` on Arch). Run time needs
+`vulkan-icd-loader` and a vendor driver.
 
 ```bash
 git clone https://github.com/Pachakutech/pachakutech-situated-ai-presence-mcp.git
 cd pachakutech-situated-ai-presence-mcp
 npm install
-npm run prepare:package   # tsc, cargo build --release, copy into native/linux-x64
-npm link                  # puts `presence` on your PATH from this checkout
+npm run prepare:package   # tsc, cargo build --release, stage into native/linux-x64
+npm link
 ```
 
-`prepare:package` means "assemble what the tarball contains." It is not a
-second npm package. `npm publish` runs it via `prepublishOnly`. `npm install`
-does not.
+`presence daemon start` runs `native/linux-x64/presence-daemon`. A binary
+left in `daemon/target` is not that file. `scripts/stage-daemon.mjs`
+copies the release build into place. The contributor recipe, including
+the speech variables, is [`docs/dev/debug_build.txt`](docs/dev/debug_build.txt).
+The overlay and the ingress path are summarized in
+[`daemon/README.md`](daemon/README.md).
 
-See [`daemon/README.md`](daemon/README.md) for the overlay and ingress
-details. The daemon presents a 330×330 layer-shell disc
-(`exclusive_zone = -1`). Do not leave an older fullscreen-capture build
-running; that exhausted Hyprland's memory.
+`prepare:package` assembles the tarball. `npm publish` runs it from
+`prepublishOnly`. `npm install` does not.
 
-## Where this runs, and what it needs access to
+## Where the process sits
 
-The MCP server is **local** — spawned as a subprocess of your agent CLI, on
-your machine, over stdio. There is no cloud round-trip and nothing to
-authenticate; the same reason this differs architecturally from something
-like Astra is that there's no server to stand up and no session to hand
-over. Because your agent CLI runs inside your own logged-in desktop session,
-the MCP server it spawns inherits that session's environment automatically —
-`WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR`, `DBUS_SESSION_BUS_ADDRESS` — with no
-separate setup step, unlike a systemd service, which would need its
-environment imported explicitly.
+The MCP server is a child of the agent CLI, on stdio, on this machine.
+It inherits the desktop session, including `WAYLAND_DISPLAY`,
+`XDG_RUNTIME_DIR`, and `DBUS_SESSION_BUS_ADDRESS`. A systemd unit would
+have to be given that environment on purpose. This process does not.
 
-If the daemon isn't running, `src/daemonStub.ts` only calls
-`notify-send` and appends to a log file, so the only real dependency is
-Node. If the daemon *is* running, the Binding talks to it over the Unix
-socket and those session variables matter.
+The binding knows the schema. The daemon knows the device. They exchange
+one JSON object per line and no buffers. That boundary is described in
+[`docs/architecture.md`](docs/architecture.md).
 
-**The daemon** needs two more things, both standard on a modern desktop
-session and checked by `presence doctor`:
-- **GPU access**, via the DRM render node (`/dev/dri/renderD128`) — for
-  Vulkan. On most current distros this is granted automatically to whoever
-  is logged in at the console, through `systemd-logind`'s dynamic ACLs, not
-  through group membership. If it isn't, adding your user to the `render`
-  group fixes it.
-- **Webcam access**, via `/dev/video*` — gated by the `video` group on most
-  distros. Desktop users are typically in this group already; worth knowing
-  explicitly, since a missing webcam permission fails silently rather than
-  with a clear error.
-
-Neither requires root, a privileged daemon, or a setup wizard — just the
-ordinary permissions of an interactively logged-in desktop user.
-
-A packaging note: this has no dependency on Arch/pacman specifically, or on
-any particular init system. If a distro's packaging base changes, none of the
-above changes with it — Hyprland has full first-class support under NixOS
-and Home Manager as of today, so a Nix-based distro would run this exactly
-the same way.
-
-## What's real vs. stubbed right now
-
-The MCP surface — schemas, Policy Gate, CLI, and the Unix-socket client —
-is real. With `presence-daemon` up, tool calls hit the Rust registry; without
-it, they hit `notify-send` plus `~/.local/state/pachakutech-presence/log.jsonl`.
-The daemon owns a Vulkan device and a compute splat pipeline that smokes on
-startup, and it presents a 330×330 layer-shell disc on Hyprland. Screen
-ingress imports a dmabuf when the device and compositor allow it, and
-otherwise falls back to a shared-memory copy at about 10 fps. `addArtifact`'s
-`sourceUri` is a local `.splat`/`.ply` path the daemon reads from disk —
-description-only holds an empty cloud. The boundary is deliberate: the daemon owns the GPU,
-the MCP layer owns the contract, and they talk over a small, typed protocol
-rather than sharing buffers. See [`docs/architecture.md`](docs/architecture.md).
-
-## Why this exists
-
-Every agent CLI today speaks fluently in files, shells, and text. None of
-them have a vocabulary for situational presence — putting something *into
-the user's perception* — a highlight, a persistent character, a spatial cue
-— governed by the same kind of explicit, inspectable contract you'd expect
-from any other tool call. This is that vocabulary, built as an open MCP
-server rather than a pitch deck, because the fastest way to have this
-conversation with anyone is to hand them something that already runs.
-
-This isn't an attempt to out-cloud Google's Astra — it's a different
-starting point aimed at a different person: someone already running an
-open-weight model locally (Llama, Gemma, Qwen — whatever), who right now has
-no way to give that model a body. No persistent perceptual memory, nothing
-it can manifest into their space, nothing past a text prompt. That's the gap
-this fills: a common, open-source, local-first, open-weight-model-ready
-multimodal presence layer, starting on Linux. See
-[`docs/vision.md`](docs/vision.md) for the fuller version of why, including
-where this is headed if local models keep closing the gap with cloud ones.
-
-MIT licensed. Contributions and forks welcome, at
+MIT licensed.
 [github.com/Pachakutech/pachakutech-situated-ai-presence-mcp](https://github.com/Pachakutech/pachakutech-situated-ai-presence-mcp).

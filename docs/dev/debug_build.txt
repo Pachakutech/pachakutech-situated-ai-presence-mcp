@@ -7,4 +7,8 @@ presence daemon start runs native/linux-x64/presence-daemon.
 The stage script is what copies the release build there.
 A cargo build that stays in daemon/target does not.
 
-The four exports on that same start, when the shell does not already have them, are PRESENCE_PIPER_MODEL, PRESENCE_RHUBARB_BIN, WAYLAND_DISPLAY=wayland-1, and XDG_RUNTIME_DIR=/run/user/1000
+The exports on that same start, when the shell does not already have them, are PRESENCE_PIPER_MODEL, PRESENCE_RHUBARB_BIN, WAYLAND_DISPLAY=wayland-1, XDG_RUNTIME_DIR=/run/user/1000, and DISPLAY=:0.
+
+PRESENCE_APPEARANCE_BAKE=1 draws the joint palette. Unset, the body takes colour from the screen and the webcam. The daemon reads the variable once, at start.
+
+What the figure does with a highlight and a sentence is docs/situated-presence.md.

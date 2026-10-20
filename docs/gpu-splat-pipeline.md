@@ -1,17 +1,24 @@
-# The GPU splat pipeline: shaders, dispatch, and how ingress will feed it
+# The GPU splat pipeline: shaders, dispatch, and how ingress feeds it
 
-This documents the compute shaders in `daemon/shaders/` and the dispatch
-layer in `daemon/src/pipeline.rs` — the DQ-skinned, LRU-managed
-`AnimatedSplat` runtime buffer that Scene Memory (CPU) feeds and that a
-future rasterization pass will read from.
+This note is the shader arithmetic and the bugs found in it. The running
+system that consumes the pipeline is
+[`situated-presence.md`](situated-presence.md).
 
-**As of 2026-09-22:** `pipeline.rs` allocates those buffers, embeds SPIR-V
-compiled at build time (`build.rs` → `glslangValidator`), and dispatches
-projection then eviction. `presence-daemon` runs a one-splat smoke tick on
-startup (Intel Iris Xe: screen (640, 360), depth 2, radius 20px) and
-exits if dispatch fails. The pipeline is then destroyed; actors do not
-yet write into a live buffer, and nothing is rasterized to a Wayland
-surface. Shader-bug history below is kept because the math is load-bearing.
+**As of October 2026** the pipeline is process-lifetime. Startup still
+smokes one splat and exits if the dispatch fails. After that smoke, the
+buffers stay. Screen and webcam ingress write into them. The avatar is
+skinned by `avatar_expand.comp` into finished positions, projected, and
+drawn as depth-tested discs on the layer-shell surface. The 64-slot bone
+palette remains the path for an ordinary cloud bound to bone 0. It is
+not the path for the 181-joint proxy.
+
+**As of 2026-09-22,** recorded below because the math is load-bearing:
+`pipeline.rs` allocated those buffers, embedded SPIR-V compiled at build
+time (`build.rs`, `glslangValidator`), and dispatched projection then
+eviction. The smoke tick on Intel Iris Xe projected splat 0 to screen
+(640, 360), depth 2, radius 20px. At that date the pipeline was destroyed
+after the smoke, and nothing was presented. That is no longer the case.
+The bug list is unchanged in substance.
 
 ## What changed on the Rust side, and why
 

@@ -67,7 +67,7 @@ GPU: dma_buf-imported webcam/screen frames, wlr-layer-shell output</div>
 <h2>The six tools</h2>
 <table>
 <tr><th>Tool</th><th>Pattern</th><th>Contract</th></tr>
-<tr><td><code>manifestHighlight</code></td><td>ephemeral</td><td>description, durationSeconds (1–30) → fires once, resolves, done</td></tr>
+<tr><td><code>manifestHighlight</code></td><td>ephemeral</td><td>UV box, durationSeconds clamped to 1–60 (default 5). The tint fades. The box remains until replace or retire. She aims only while speech plays and the tint is up</td></tr>
 <tr><td><code>spawnPresence</code></td><td>instanced 1/3</td><td>sourceContext, styleHint?, artifactId? → presenceId</td></tr>
 <tr><td><code>animatePresence</code></td><td>instanced 2/3</td><td>presenceId, text → feeds new content to a live presence</td></tr>
 <tr><td><code>retirePresence</code></td><td>instanced 3/3</td><td>presenceId → ends it, frees the slot (max 3 concurrent)</td></tr>
@@ -109,7 +109,7 @@ GPU: dma_buf-imported webcam/screen frames, wlr-layer-shell output</div>
 <p>One JSON line per message, nothing dense crosses this boundary — no buffers, no pixels. Every MCP tool has a matching Rust <code>Proposal</code> variant, kept in lockstep by hand at six tools; regenerating one from the other becomes worth it past that.</p>
 
 <div class="status">
-<b>Status:</b> <span class="real">As of 2026-09-22</span> — MCP server, Policy Gate, CLI, Unix-socket client (falls back to notify-send if the daemon isn't up), Vulkan device init, and a compute splat pipeline that smokes on daemon start (Intel Iris Xe: projected splat at screen 640×360). <span class="stub">Not yet</span> — process-lifetime pipeline for actors, Hyprland overlay / raster, ticking webcam/screen into the buffer, text-to-pose, concurrent socket clients. The contract is finished; pixels on the compositor are next.
+<b>Status, October 2026:</b> <span class="real">Running</span> — the six tools, the policy gate, the socket (more than one client), a process-lifetime pipeline, dma-buf screen and webcam, a layer-shell disc, GPU skinning of the proxy, local speech, and the Point clip. <span class="stub">Open</span> — a learned pose model, viseme shape keys on this GLB, a shared cap across MCP processes, a microphone actor. The behaviour is <code>docs/situated-presence.md</code>.
 </div>
 
 <div class="footer">pachakutech-presence · MIT licensed · github.com/Pachakutech/pachakutech-situated-ai-presence-mcp</div>

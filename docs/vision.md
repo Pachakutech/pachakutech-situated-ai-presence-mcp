@@ -77,14 +77,14 @@ methodological behaviorism. Together with the Ingress Actors, they form
 a Temporal Resource Ledger--the context in which other Actors form observations
 and store feedback.
 
-**Where the code is today:** the daemon's registry
-(`daemon/src/registry.rs`) is the one place this shared state is meant to
-live, since it's a single persistent process reachable over one socket.
-The MCP Binding *does* connect to that socket when `presence-daemon` is
-running (`src/daemonClient.ts`), and falls back to `daemonStub.ts`
-otherwise. Caps and live IDs still live in the per-session Policy Gate,
-and the socket still accepts one connection at a time, so the multi-agent
-claim is not yet something you can point two agents at and watch happen.
-The daemon also runs a compute splat pipeline on startup (verified on
-Intel Iris Xe, dma_buf import present) but does not yet present pixels
-or keep that pipeline alive for actors.
+**Where the code is today.** The registry in `daemon/src/registry.rs`
+is the shared state, in one process, on one socket that accepts more
+than one client. The binding connects when the daemon is up
+(`src/daemonClient.ts`) and falls back to `daemonStub.ts` otherwise.
+Caps still live in the per-session policy gate, so two MCP processes do
+not yet share one budget. They do share the body: the daemon has one,
+and the first live presence is given it. The pipeline stays up after
+the smoke tick. The disc is on the compositor, the screen and the
+webcam are imported, and speech plus the `Point` clip are the motion.
+That behaviour is written in
+[`situated-presence.md`](situated-presence.md), not in this essay.
