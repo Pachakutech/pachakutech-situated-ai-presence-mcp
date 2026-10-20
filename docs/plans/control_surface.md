@@ -68,3 +68,15 @@ The joint record does not change between them. Lotus, a gesture, a yaw, and a se
 The projection contract stays pure dual-quaternion for everything that is not this avatar. The avatar continues to arrive as finished splats. The heat field stays a shared memory other actors can query. The glass, the sparks, and the jaw stay where they are. No walk, no path finding, no picture read back to the CPU.
 
 The thing to be proud of is the record. Sitting teacher fills it in. The GPU learns to wear it.
+
+## Parked beside the running interface
+
+The running account is `docs/control-surface.md`. These are the ideas that were set down around it and are not part of that account.
+
+- Hold the last cloud while joint locals, the jaw, the morph weights, and root yaw match the pose that filled the buffer. The breath retimes the spine every tick, so the compare does not fire on the seated figure.
+- While the only motion is the breath, expand the body around 10 Hz. Expand on that tick when the jaw, or a joint `Point` copies onto the breath, has moved by more than about half a degree.
+- Lift root yaw out of the skin matrices and onto bone 0 of the 64-slot palette. Every rigid splat is already bound there. A pure turn would skip the expand. The camera half-turn stays a projection uniform.
+- Partition the splatbind by the dominant joint of each triangle. On this export the jaw and the tongue and mouth joints under it dominate 363 of 14,517 vertices and 676 of 26,756 triangles. A jaw tick rebuilds that range. The saving is the rest of the dispatch, and it appears on a frame where those other matrices are unchanged. The breath dirties them on the same tick, so the split waits on a slower body expand.
+- Blend the previous cloud toward the new one on the ticks between those slower expands. The live dispatch runs every frame, so there is no interval to fill.
+- A solver that writes joint locals for a target the authored actions do not contain. `Breathe`, `Breathe.001`, `Breathe.002`, and `Point` each key translation, rotation, and scale on all 181 joints, deform bones and the `*_ik` controls together. The constraints were solved when the actions were baked.
+- A guest rig retargeted into these joint locals, a second glass weight for a cloud that brings its own albedo, and a log line of the joint locals. The record above is what they would read and write.
