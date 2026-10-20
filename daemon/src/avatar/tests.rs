@@ -63,6 +63,57 @@ fn rest_pose_is_a_sitting_body() {
     assert!(height > 0.4 && height < 2.2, "body height {height}");
 }
 
+/// Rest faces the camera. The viewer's right samples frame 90, her left hand,
+/// and yaws so that hand is nearer and further right than the other wrist.
+/// The viewer's left samples frame 270, her right hand, on that side.
+#[test]
+fn left_hand_points_to_the_viewers_right() {
+    let a = AvatarActor::load(&manifest()).unwrap();
+    let point = a.rig.clip("Point").unwrap();
+    let dur = point.duration;
+    let l = a.rig.joint("wrist.L").unwrap();
+    let rgt = a.rig.joint("wrist.R").unwrap();
+    let jaw = a.rig.joint("jaw").unwrap();
+    let head = a.rig.joint("head").unwrap();
+    let focal = 330.0 * 1.2;
+    let project = |world: [f32; 3]| {
+        let c = camera_space(world);
+        (focal * c[0] / c[2] + 165.0, c[2])
+    };
+    let place = |theta: f32| {
+        let t = aim::point_time(theta, dur);
+        let pose = a.rig.sample(point, t, false);
+        let root = mat4_from_trs(
+            [0.0, 0.0, 0.0],
+            quat_axis_angle([0.0, 1.0, 0.0], aim::aim_yaw(theta) + aim::FACING_YAW),
+        );
+        let world = |j: usize| transform_point(&root, a.rig.joint_origin(&pose, j));
+        (t, world(l), world(rgt), world(jaw), world(head))
+    };
+    let (_, _, _, jaw_w, head_w) = place(0.0);
+    let (_, jaw_z) = project(jaw_w);
+    let (_, head_z) = project(head_w);
+    assert!(jaw_z < head_z - 0.01, "rest should face the camera, jaw {jaw_z} head {head_z}");
+
+    let (t, lw, rw, _, _) = place(std::f32::consts::FRAC_PI_2);
+    let frame = t / dur * 360.0;
+    assert!((frame - 90.0).abs() < 0.5, "viewer's right should be frame 90, got {frame}");
+    assert!(lw[1] > rw[1] + 0.05, "left wrist should be the raised one");
+    let (lx, lz) = project(lw);
+    let (rx, rz) = project(rw);
+    assert!(lx > rx + 20.0, "raised left hand should sit to the viewer's right: L {lx} R {rx}");
+    assert!(lz < rz - 0.1, "raised left hand should be nearer: L {lz} R {rz}");
+
+    let (t, lw, rw, _, _) = place(-std::f32::consts::FRAC_PI_2);
+    let frame = t / dur * 360.0;
+    assert!((frame - 270.0).abs() < 0.5, "viewer's left should be frame 270, got {frame}");
+    assert!(rw[1] > lw[1] + 0.05, "right wrist should be the raised one");
+    let (lx, lz) = project(lw);
+    let (rx, rz) = project(rw);
+    assert!(rx < lx - 20.0, "raised right hand should sit to the viewer's left: L {lx} R {rx}");
+    assert!(rz < lz - 0.1, "raised right hand should be nearer: L {lz} R {rz}");
+}
+
 #[test]
 fn point_compass_frames_place_the_wrists() {
     let a = AvatarActor::load(&manifest()).unwrap();
@@ -75,8 +126,9 @@ fn point_compass_frames_place_the_wrists() {
         (l, r)
     };
     let (down_l, down_r) = wrist(0.0);
-    // Skeleton, before the camera. A quarter of the clip is wrist.L on +X.
-    // Ry(π) shows that arm on the viewer's left; aim_theta accounts for it.
+    // Skeleton, before the camera. A quarter of the clip raises wrist.L on +X
+    // (her left hand, frames 1–150). The camera mirrors +X, and aim_yaw is
+    // negated so that hand lands on the viewer's right.
     let (quarter_l, quarter_r) = wrist(dur * 0.25);
     let (up_l, up_r) = wrist(dur * 0.5);
     let (three_l, three_r) = wrist(dur * 0.75);
@@ -147,9 +199,9 @@ fn jaw_opens_chin_without_moving_forehead() {
             brow_move += moved;
             brow_n += 1.0;
         }
-        // Lower face, on the side she faces after the half turn about +Y, and
-        // actually displaced by the hinge.
-        if r.position[1] > head_y && r.position[1] < brow_y - 0.05 && r.position[2] < -0.02 && moved > 0.002 {
+        // Lower face, on mesh +Z. The camera's half turn brings that side near.
+        // A second half turn on the root would put the chin on −Z.
+        if r.position[1] > head_y && r.position[1] < brow_y - 0.05 && r.position[2] > 0.02 && moved > 0.002 {
             chin_drop += r.position[1] - a.posed[i].position[1];
             chin_n += 1.0;
         }

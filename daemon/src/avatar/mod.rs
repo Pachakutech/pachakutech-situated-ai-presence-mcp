@@ -313,10 +313,10 @@ impl AvatarActor {
     ///
     /// Talking with a mark waves between the ends of the corner arc, after a
     /// hold in the middle, and the body turns with that wave. Talking with no
-    /// mark takes the arms to frame 20 and back, and yaws the body only a
-    /// couple of degrees. Otherwise both springs ease back to 0. A new mode
-    /// or a new rect restarts the wave clock and leaves the springs to travel
-    /// from where they are.
+    /// mark takes the arms to frame 20 (her left hand) and back, and yaws the
+    /// body only a couple of degrees the other way. Otherwise both springs
+    /// ease back to 0. A new mode or a new rect restarts the wave clock and
+    /// leaves the springs to travel from where they are.
     pub fn steer(
         &mut self,
         dt: f32,

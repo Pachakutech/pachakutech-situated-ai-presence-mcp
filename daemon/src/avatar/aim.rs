@@ -2,23 +2,27 @@
 //!
 //! Theta is a clock on the screen: 0 below her, +π/2 to the viewer's right,
 //! π above, −π/2 to the viewer's left. That angle picks a frame of `Point`.
+//! Frames 1–150 raise her left hand and frames 210–360 raise her right, so
+//! the viewer's right is frames 1–180 and a talk with no mark is frames 1–20.
 //! Root yaw comes from the commanded angle, not from the frame the arms are
 //! passing through, so a raise from the low pose to straight up does not yaw
-//! the body out to the side and back. The mesh is exported facing away, so
-//! the actor adds a half turn about +Y on top of that yaw and she faces the
-//! viewer at rest. Two critically damped springs carry the pose clock and the
-//! yaw. An exact tie between the high pose and the low pose takes the low pose.
+//! the body out to the side and back. The camera's Ry(π) is the half turn
+//! that faces her. The root does not add another. Yaw is negated so that
+//! mirrored X still puts her left hand on the viewer's right. Two critically
+//! damped springs carry the pose clock and the yaw. An exact tie between the
+//! high pose and the low pose takes the low pose.
 //!
 //! A highlight is a wave between two corners. Those are the two nearest when
 //! they tie, and otherwise the two that are neither nearest nor farthest.
 //! The farthest corner lies between that pair. She starts in the middle of
 //! the arc, and that wave still turns her with it. Talking with no mark is
-//! separate: the arms go out to frame 20 and back to the low pose, and the
-//! body only yaws a couple of degrees the same way.
+//! separate: the arms go out to frame 20, her left hand, and back to the low
+//! pose, and the body only yaws a couple of degrees the other way.
 
-/// Half turn about +Y. The exported mesh faces away from the camera; this
-/// brings her face toward the viewer. Aim yaw is added on top.
-pub const FACING_YAW: f32 = std::f32::consts::PI;
+/// Left at 0. `body_camera_dq` is already Ry(π) and brings mesh +Z toward
+/// the viewer. A second half turn on the root showed her back. Do not put π
+/// back here, and do not rotate about Z.
+pub const FACING_YAW: f32 = 0.0;
 
 /// One breath. The 15 s clip is played through in this many seconds.
 pub const BREATH_PERIOD_S: f32 = 4.0;
@@ -91,10 +95,12 @@ pub fn point_time(theta: f32, duration: f32) -> f32 {
     (theta / std::f32::consts::TAU).rem_euclid(1.0) * duration
 }
 
-/// Yaw about +Y from the same theta. 0 above and below, +π/2 at the viewer's
-/// right, −π/2 at the viewer's left. `FACING_YAW` is applied on top of this.
+/// Yaw about +Y from the same theta. 0 above and below. The camera's Ry(π)
+/// mirrors skeleton +X onto the viewer's left, so a target on the viewer's
+/// right returns −π/2 and a target on the viewer's left returns +π/2. The
+/// raised hand then sits on the same side as the target. `FACING_YAW` stays 0.
 pub fn aim_yaw(theta: f32) -> f32 {
-    theta.sin().atan2(theta.cos().abs())
+    -theta.sin().atan2(theta.cos().abs())
 }
 
 /// Hold the middle of a highlight arc this long before the wave leaves it.
@@ -107,8 +113,9 @@ pub const SWEEP_PERIOD_S: f32 = 15.0;
 /// One trip out and back while talking with no mark.
 pub const TALK_WAVE_PERIOD_S: f32 = 15.0;
 
-/// Frame 20 of the 360-frame `Point` clip, toward the viewer's right.
-/// Frame 340 is the same trip on the viewer's left.
+/// Frame 20 of the 360-frame `Point` clip. Frames 1–150 raise her left hand,
+/// so this trip is that hand. Facing the viewer, it sits on the viewer's
+/// right. Frame 340 is her right hand, on the viewer's left.
 pub const TALK_WAVE_RAD: f32 = 20.0 * std::f32::consts::PI / 180.0;
 
 /// Body yaw on that trip. The arms take the clip frames; the turn stays small.
@@ -201,9 +208,11 @@ pub fn talk_wave(t: f32) -> f32 {
     talk_envelope(t) * TALK_WAVE_RAD
 }
 
-/// The same trip for the body, a couple of degrees instead of the arm frames.
+/// The same trip for the body, a couple of degrees, opposite sign to the arm
+/// clock. The camera's remaining half turn mirrors X, so the body turns the
+/// other way from `talk_wave` and the raised left hand stays on the viewer's right.
 pub fn talk_yaw(t: f32) -> f32 {
-    talk_envelope(t) * TALK_YAW_RAD
+    -talk_envelope(t) * TALK_YAW_RAD
 }
 
 /// What the gesture clock is counting. A change restarts it at the middle.
@@ -287,10 +296,10 @@ mod tests {
     fn yaw_matches_the_four_compass_points() {
         let pi = std::f32::consts::PI;
         assert!(near(aim_yaw(0.0), 0.0));
-        assert!(near(aim_yaw(pi / 2.0), pi / 2.0));
+        assert!(near(aim_yaw(pi / 2.0), -pi / 2.0));
         assert!(near(aim_yaw(pi), 0.0));
-        assert!(near(aim_yaw(-pi / 2.0), -pi / 2.0));
-        assert!(near(aim_yaw(3.0 * pi / 2.0), -pi / 2.0));
+        assert!(near(aim_yaw(-pi / 2.0), pi / 2.0));
+        assert!(near(aim_yaw(3.0 * pi / 2.0), pi / 2.0));
     }
 
     #[test]
@@ -396,7 +405,7 @@ mod tests {
     #[test]
     fn talk_wave_reaches_frame_twenty_and_the_body_barely_turns() {
         let frame = 20.0_f32.to_radians();
-        let yaw = 2.0_f32.to_radians();
+        let yaw = -2.0_f32.to_radians();
         assert!(near(talk_wave(0.0), 0.0));
         assert!(near(talk_yaw(0.0), 0.0));
         assert!(near(talk_wave(TALK_WAVE_PERIOD_S * 0.5), frame));
@@ -404,9 +413,9 @@ mod tests {
         assert!(near(talk_wave(TALK_WAVE_PERIOD_S), 0.0));
         assert!(near(talk_yaw(TALK_WAVE_PERIOD_S), 0.0));
         assert!(talk_wave(0.4) > 0.0);
-        assert!(talk_yaw(0.4) > 0.0);
+        assert!(talk_yaw(0.4) < 0.0);
         assert!(talk_wave(TALK_WAVE_PERIOD_S * 0.25) < frame);
-        assert!(talk_yaw(TALK_WAVE_PERIOD_S * 0.5) < talk_wave(TALK_WAVE_PERIOD_S * 0.5) * 0.2);
+        assert!(talk_yaw(TALK_WAVE_PERIOD_S * 0.5).abs() < talk_wave(TALK_WAVE_PERIOD_S * 0.5) * 0.2);
     }
 
     #[test]
