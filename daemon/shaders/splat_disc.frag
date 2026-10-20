@@ -164,21 +164,20 @@ void main() {
     float glint = exp(-dot(q, q));
     rgb += vec3(1.0) * glint * 0.045;
 
-    // Glass sparks, separate from the steady catchlight above. The old
-    // sin-hash never reached the body gate, so those points were off.
+    // Glass sparks on the body only. The nearest discs are the nose and the
+    // lips, so a denser face gate piled them into one blinking dot on the mouth.
     uint hn = v_id * 747796405u + 2891336453u;
     hn = (hn ^ (hn >> 16u)) * 2246822519u;
     hn = (hn ^ (hn >> 13u)) * 3266489917u;
     hn = hn ^ (hn >> 16u);
     float hash = float(hn & 0x00FFFFFFu) / 16777216.0;
     bool face = (regions[min(v_region, 15u)].flags & 1u) != 0u;
-    float gate = face ? 0.985 : 0.994;
     float star = 0.0;
-    if (hash > gate) {
-        float wave = sin(pc.time * (face ? 3.4 : 2.4) + hash * 6.2831853) * 0.5 + 0.5;
+    if (!face && hash > 0.994) {
+        float wave = sin(pc.time * 2.4 + hash * 6.2831853) * 0.5 + 0.5;
         star = smoothstep(0.38, 0.96, wave) * smoothstep(0.62, 0.08, r);
     }
-    rgb += vec3(1.0, 0.97, 0.90) * star * (face ? 1.45 : 1.15);
+    rgb += vec3(1.0, 0.97, 0.90) * star * 1.15;
 
     // Peak alpha is already 1. The gaussian only softens the rim, and without
     // a depth test a later splat paints over a nearer one. Discard that rim
