@@ -40,6 +40,30 @@ Shader history is [`docs/gpu-splat-pipeline.md`](docs/gpu-splat-pipeline.md).
 The process split is [`docs/architecture.md`](docs/architecture.md).
 The reason the contract looks like this is [`docs/vision.md`](docs/vision.md).
 
+## The control surface
+
+The pose stays where it can be read. The cloud is a picture of that
+pose, made on the device. Each visible tick the CPU samples `Breathe`,
+copies the aimed arm joints from `Point`, folds in the jaw, and builds
+one root matrix for yaw. It then uploads 181 skin matrices — world
+times inverse bind, 11,584 bytes — and the morph weights. On this
+export the weight list is empty. `avatar_expand.comp` skins the 14,517
+vertices, rebuilds each of the 50,000 samples on its triangle, and
+writes a rigid `AnimatedSplatGpu` into the existing cloud. The
+projection shader is unchanged. Its 64-slot palette is the path for an
+ordinary splat, and this skeleton does not use it.
+
+The seat is two integers, the layer origin, chosen from the heat grid.
+It does not enter the expand. The camera's half-turn about X is a
+projection uniform, applied when the finished splats are drawn.
+
+At startup the device cloud is compared with the CPU oracle on a
+breath, a side point, and an open jaw. The measured position error on
+this machine is `3.576e-7`, and the rotation dot product is 1. The
+layout of every buffer, the 40-byte push constant, and the 96-byte
+record the dispatch writes are in
+[`docs/control-surface.md`](docs/control-surface.md).
+
 ## Speaking and marking
 
 The daemon copies its environment once, at start. The shell that runs
