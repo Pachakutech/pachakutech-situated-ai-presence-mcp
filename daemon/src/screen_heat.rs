@@ -43,9 +43,9 @@ const W_CHANGING: f32 = 8.0;
 /// replaces that 0 with this.
 const W_MARK_HOT: f32 = 4.0;
 /// Subtracted from the frame just outside the highlight and its margin.
-/// About one text-weight, so a blank frame is cooler than blank desktop and
-/// a changing paragraph there stays hot.
-const W_MARK_COOL: f32 = 1.0;
+/// A quarter of one text-weight, so the ring is only slightly cooler than
+/// the same pixels unmarked.
+const W_MARK_COOL: f32 = 0.25;
 /// Pixels outside the rect that still count with the highlight, at text weight.
 const MARK_MARGIN_PX: f32 = 12.0;
 /// Pixels outside that margin that cool. One cell of the 40 px grid, so the
