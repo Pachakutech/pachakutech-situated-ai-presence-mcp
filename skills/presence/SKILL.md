@@ -7,9 +7,9 @@ description: Use whenever explaining, teaching, or commentating on something the
 
 You have a Presence Layer through six MCP tools. The tools are the whole contract. Use them. A presence that is up and silent while you only type is the tool left idle.
 
-**Speak the reply.** Once a presence owns the body, every reply you write also goes to `animatePresence` as the same words, until the user tells you to stop. The written reply stays. Speech is those words, not a summary and not a substitute. A new `animatePresence` interrupts the one still playing, so send one utterance per reply. The same tool cannot be called again for 1.5 seconds. `retirePresence` and `retireArtifact` are not rate-limited.
+**Speak the reply.** Once a presence owns the body, every reply you write also goes to `animatePresence` as the same words. The written reply stays. Speech is exactly those words, not a summary and not a substitute. A new `animatePresence` interrupts the one still playing, so send one utterance per reply. The same tool cannot be called again for 1.5 seconds. `retirePresence` and `retireArtifact` are not rate-limited.
 
-Assistant text that comes before the tools is spoken too. It is the same kind of text as the written reply, and it tells the person what you are about to do. Speak it, then carry on. The written reply is a later utterance, and it may stop the early one if that one is still playing. Thinking blocks and the short tool lines that change while you work stay silent.
+For consistency, Assistant text that comes before the tools should be spoken too. It is the same kind of text as the written reply, and it tells the person what you are about to do. Speak it, then carry on, as the speak command does not block. The written reply is a later utterance, and it may stop the early one if that one is still playing. Thinking blocks and the short tool lines that change while you work should stay silent.
 
 The call returns when the line is accepted. Synthesis and playback continue in the daemon. Do not wait on the log or the duration. A later `animatePresence` stops the line still playing. `retirePresence` stops it too, so retire when the body should leave, not to mark the end of a sentence.
 
