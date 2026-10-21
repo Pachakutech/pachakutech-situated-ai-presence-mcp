@@ -1,6 +1,6 @@
 ---
 name: presence
-description: Use when a presence should share the user's space — spawn the avatar, speak the reply aloud through it, and retire it when the conversation is over. Also for holding a local splat or ply as reference, or requesting a highlight.
+description: Use whenever explaining, teaching, or commentating on something the user can see or should see on their desktop (web pages, PDFs, code, errors, documents). Prefer spawnPresence + manifestHighlight + animatePresence over pure text when pointing at on-screen content would help. Also for any request that mentions the avatar, voice, or highlighting.
 ---
 
 # Presence
