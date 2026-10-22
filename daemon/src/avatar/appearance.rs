@@ -217,10 +217,33 @@ impl Appearance {
         let mut joint_bin: Vec<Option<usize>> = vec![None; njoints];
         let mut order: Vec<usize> = (0..njoints).filter(|&j| joint_area[j] > 0.0).collect();
         order.sort_by(|&a, &b| joint_area[b].total_cmp(&joint_area[a]).then(a.cmp(&b)));
+        // breast.L and breast.R hang on spine02. That spine is the surface
+        // between them, so the three share one tile instead of three pictures.
+        let mut breasts = Vec::new();
         for joint in order {
+            if is_breast(&rig.names[joint]) {
+                breasts.push(joint);
+                continue;
+            }
             let bin = (0..BODY_BINS)
                 .min_by(|&a, &b| bin_area[a].total_cmp(&bin_area[b]).then(a.cmp(&b)))
                 .unwrap();
+            bin_area[bin] += joint_area[joint];
+            joint_bin[joint] = Some(bin);
+        }
+        let chest_bin = (0..njoints).find_map(|j| {
+            if is_chest_span(&rig.names[j]) {
+                joint_bin[j]
+            } else {
+                None
+            }
+        });
+        for joint in breasts {
+            let bin = chest_bin.unwrap_or_else(|| {
+                (0..BODY_BINS)
+                    .min_by(|&a, &b| bin_area[a].total_cmp(&bin_area[b]).then(a.cmp(&b)))
+                    .unwrap()
+            });
             bin_area[bin] += joint_area[joint];
             joint_bin[joint] = Some(bin);
         }
@@ -541,6 +564,22 @@ fn face_name(name: &str) -> bool {
     name.to_ascii_lowercase()
         .split(|c: char| !c.is_ascii_alphanumeric())
         .any(|token| token == "head" || token == "jaw")
+}
+
+fn name_token(name: &str, want: &str) -> bool {
+    name.to_ascii_lowercase()
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|token| token == want)
+}
+
+/// `breast.L` / `breast.R`. They share the chest tile.
+fn is_breast(name: &str) -> bool {
+    name_token(name, "breast")
+}
+
+/// The spine the breasts parent to, and the surface between them.
+fn is_chest_span(name: &str) -> bool {
+    name_token(name, "spine02")
 }
 
 fn is_face_joint(names: &[String], parent: &[Option<usize>], joint: usize) -> bool {
@@ -906,5 +945,27 @@ mod tests {
         assert!(app.tick(0.016, &[IngressSource::desktop(1920, 1080)]).is_none());
         assert!(job.rect.w >= 32 && job.rect.h >= 32);
         assert!(job.rect.x + job.rect.w <= 1920 && job.rect.y + job.rect.h <= 1080);
+    }
+
+    #[test]
+    fn breasts_share_the_chest_patch() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../assets/avatar_manifest.json");
+        let actor = crate::avatar::AvatarActor::load(&path).expect("avatar");
+        let mut region_of = std::collections::HashMap::<String, u32>::new();
+        for (rec, patch) in actor.binding.records.iter().zip(actor.appearance.patches.iter()) {
+            let joint = dominant_joint(&actor.mesh, rec.tri as usize) as usize;
+            let name = actor.rig.names.get(joint).map(String::as_str).unwrap_or("");
+            if !is_breast(name) && !is_chest_span(name) {
+                continue;
+            }
+            if let Some(prev) = region_of.get(name).copied() {
+                assert_eq!(prev, patch.region, "{name} split across patches");
+            } else {
+                region_of.insert(name.to_string(), patch.region);
+            }
+        }
+        let chest = region_of["spine02"];
+        assert_eq!(region_of["breast.L"], chest);
+        assert_eq!(region_of["breast.R"], chest);
     }
 }
