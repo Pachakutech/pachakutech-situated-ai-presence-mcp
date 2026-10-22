@@ -47,7 +47,7 @@ impl Registry {
     }
 
     /// The presence must already be in the daemon map. It does not need the body.
-    /// `secs` is clamped to 1..=60. The returned box is the one that will be drawn.
+    /// `secs` is clamped to 1..=360. The returned box is the one that will be drawn.
     pub fn declare_interest(
         &mut self,
         presence_id: &str,

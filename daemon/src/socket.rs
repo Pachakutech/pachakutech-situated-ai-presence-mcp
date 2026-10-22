@@ -433,8 +433,8 @@ mod tests {
         let mut cmds = vec![];
         run(&mut reg, &mut cmds, &spawn("p-a"));
         assert!(!reg.has_avatar("p-a"));
-        let (got, secs) = reg.declare_interest("p-a", "banner", raw, 90, now).unwrap();
-        assert_eq!(secs, 60);
+        let (got, secs) = reg.declare_interest("p-a", "banner", raw, 400, now).unwrap();
+        assert_eq!(secs, 360);
         assert_eq!(got, raw);
         assert_eq!(reg.visible_interests(now).len(), 1);
         assert_eq!(reg.interest("p-a"), Some(raw));

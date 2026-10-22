@@ -4,7 +4,7 @@
 
 use std::time::{Duration, Instant};
 
-pub const MAX_SECS: u32 = 60;
+pub const MAX_SECS: u32 = 360;
 pub const MAX_MARKS: usize = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -30,7 +30,7 @@ impl InterestBook {
         Self { items: Vec::new() }
     }
 
-    /// Replace this presence's box. `secs` is clamped to 1..=60.
+    /// Replace this presence's box. `secs` is clamped to 1..=360.
     /// Origin is the top left of the whole screen. `v` grows downward.
     pub fn declare(&mut self, id: &str, raw: UvBox, secs: u32, now: Instant) -> Result<UvBox, String> {
         let box_ = sanitize(raw)?;
@@ -191,12 +191,12 @@ mod tests {
     }
 
     #[test]
-    fn duration_caps_at_sixty_and_a_new_call_replaces_the_box() {
+    fn duration_caps_at_six_minutes_and_a_new_call_replaces_the_box() {
         let mut book = InterestBook::new();
         let t0 = Instant::now();
         book.declare("p-a", box_at(0.0, 0.0, 0.2, 0.2), 600, t0).unwrap();
-        assert_eq!(book.visible(t0 + Duration::from_secs(60)).len(), 0);
-        assert_eq!(book.visible(t0 + Duration::from_secs(59)).len(), 1);
+        assert_eq!(book.visible(t0 + Duration::from_secs(360)).len(), 0);
+        assert_eq!(book.visible(t0 + Duration::from_secs(359)).len(), 1);
         book.declare("p-a", box_at(0.5, 0.5, 0.9, 0.9), 5, t0).unwrap();
         assert_eq!(book.get("p-a").unwrap().u, 0.5);
         assert!(book.get("p-a").unwrap().w <= 0.5);

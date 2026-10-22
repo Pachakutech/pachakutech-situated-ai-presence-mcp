@@ -40,7 +40,7 @@ server.registerTool(
     description:
       "Ephemeral. Tints a full-screen UV box for a live presence: origin top-left, " +
       "u and v from 0 to 1 across the whole output, v growing downward. The mark fades " +
-      "after durationSeconds (default 5, max 60); call again to replace the box and keep it up. " +
+      "after durationSeconds (default 5, max 360); call again to replace the box and keep it up. " +
       "The box remains that presence's area of interest after the pixels fade, until a new box or retire. " +
       "The figure does not gesture yet.",
     inputSchema: {
@@ -50,7 +50,7 @@ server.registerTool(
       v: z.number().min(0).max(1).describe("Top edge, 0..1, growing downward"),
       w: z.number().positive().describe("Width in that same 0..1 space"),
       h: z.number().positive().describe("Height in that same 0..1 space"),
-      durationSeconds: z.number().min(1).max(60).default(5),
+      durationSeconds: z.number().min(1).max(360).default(5),
     },
   },
   async ({ presenceId, description, u, v, w, h, durationSeconds }) => {

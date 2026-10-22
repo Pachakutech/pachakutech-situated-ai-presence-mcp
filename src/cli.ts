@@ -35,7 +35,7 @@ function usage(): never {
       "                       Spawn a presence (shows the avatar); prints its presenceId",
       "  speak <id> <text>    That presence speaks: local TTS, audio, synced mouth",
       "  highlight <id> <u> <v> <w> <h> [seconds]",
-      "                       Tint that UV box (top-left, v down, 0..1). Default 5s, max 60",
+      "                       Tint that UV box (top-left, v down, 0..1). Default 5s, max 360",
       "  stop <id>            Stop that presence's speech; face returns to neutral",
       "  retire <id>          End the presence, hide its avatar, free its slot",
       "                       The doubled form still works: presence presence speak <id> <text>",
