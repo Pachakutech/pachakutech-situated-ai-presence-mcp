@@ -109,8 +109,8 @@ yaw the body out to the side and back.
 
 With no mark, the arms go from frame 0 out to frame 20 and back over 15
 seconds. That is still her left hand. The body yaws about 2° on the same
-trip. Breath is a separate clip, played through in 4 seconds, and the
-spine stays on it while the arms are copied from `Point`.
+trip. Breath is a separate clip, 360 frames played through in 60
+seconds, and the spine stays on it while the arms are copied from `Point`.
 
 **The camera half-turn is about X.** `body_camera_dq` is Rx(π). Mesh +Z,
 the face, comes toward the viewer, and skeleton +X, her left, stays on

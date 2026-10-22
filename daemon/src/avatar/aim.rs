@@ -25,14 +25,14 @@
 /// root showed her back. Do not put π back here, and do not rotate about Z.
 pub const FACING_YAW: f32 = 0.0;
 
-/// One breath. The 15 s clip is played through in this many seconds.
-pub const BREATH_PERIOD_S: f32 = 4.0;
+/// One breath. The 15 s clip is 360 frames, played through in this many seconds.
+pub const BREATH_PERIOD_S: f32 = 60.0;
 
 ///Scales body yaw towards a highlight
 pub const YAW_SCALE: f32 = 1.0;
 
 /// Exponent on normalized yaw 1.0 = linear 2.0 = softer
-pub const YAW_POWER: f32 = 6.0;
+pub const YAW_POWER: f32 = 16.0;
 
 /// Natural frequency of the aim spring, in rad/s. Critically damped, so a
 /// side-to-side turn settles in about five seconds.
