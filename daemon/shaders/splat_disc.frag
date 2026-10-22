@@ -179,10 +179,16 @@ void main() {
     }
     rgb += vec3(1.0, 0.97, 0.90) * star * 1.15;
 
-    // Peak alpha is already 1. The gaussian only softens the rim, and without
-    // a depth test a later splat paints over a nearer one. Discard that rim
-    // and draw the core opaque, so the front of the body hides the back.
-    float gauss = exp(-r * r * 2.2);
-    if (v_color.a * gauss < 0.35) discard;
-    outColor = vec4(rgb, 1.0);
+    // Two coverages. `soft` is the gaussian that lets one patch run into the
+    // next. The flat 1 is the solid core. The rim stays the gaussian. The
+    // middle takes about a third of the step back toward solid.
+    float soft = v_color.a * exp(-r * r * 2.2);
+    float core = smoothstep(0.22, 0.88, soft);
+    float a = mix(soft, 1.0, core * 0.35);
+    if (a < 0.02) discard;
+    // Same slab, same surface: neighboring patches composite. A surface
+    // about eight centimetres behind still loses. 0.01 of window z is
+    // 0.01 * 7.9 m, from the vertex depth map.
+    gl_FragDepth = floor(gl_FragCoord.z / 0.01) * 0.01;
+    outColor = vec4(rgb * a, a);
 }

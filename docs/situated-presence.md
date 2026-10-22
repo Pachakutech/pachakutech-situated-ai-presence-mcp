@@ -61,10 +61,12 @@ palette instead (the jaw is the red of palette entry 0, and so on). The
 variable is read once, when the process starts. A later export does
 nothing until the next start.
 
-**Occlusion.** The splat pass tests depth and writes it. The fragment
-discards a sample whose coverage is below threshold and then writes
-alpha 1. A reduced global alpha had made the front and the back of the
-figure read as one surface. That reduction is not the current path.
+**Occlusion.** The splat pass tests depth. The fragment puts each sample
+in a slab about eight centimetres deep, and samples in one slab
+composite, so neighboring patches blend. A surface behind that slab
+still loses. Coverage is the gaussian falloff. The middle of a disc
+takes about a third of the step toward a flat opaque core, and the rim
+stays the gaussian.
 
 **Speech on the machine.** Piper synthesizes from
 `PRESENCE_PIPER_MODEL`. Rhubarb, at `PRESENCE_RHUBARB_BIN`, reads the
