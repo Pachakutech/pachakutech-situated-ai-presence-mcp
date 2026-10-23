@@ -14,6 +14,9 @@ export type SurfaceClient = {
 export const TERMINAL_CLASS =
   /^(foot|kitty|alacritty|org\.wezfurlong\.wezterm|com\.mitchellh\.ghostty|wezterm|gnome-terminal|org\.gnome\.console|kgx|xterm|konsole|org\.kde\.konsole)$/i;
 
+/** Editor windows. `code` is anchored so it does not swallow unrelated classes. */
+export const IDE_CLASS = /^(code|code-oss|cursor|zed|codium)$|jetbrains/i;
+
 export function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

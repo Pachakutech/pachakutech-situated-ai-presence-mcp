@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 // The MCP Binding for the Pachakutech Presence Layer.
-// Six Manifestations: one ephemeral, one instanced presence lifecycle
-// (spawn/animate/retire), one instanced artifact lifecycle (add/retire).
-// See README.md and skills/presence/SKILL.md.
+// Highlight, spawn / animate / retire, artifacts, locate, and the fused
+// find-tint-speak pair. See README.md and skills/presence/SKILL.md.
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -11,7 +10,7 @@ import { PolicyGate } from "./policyGate.js";
 import { PresenceDaemon } from "./daemon.js";
 import { daemonStub } from "./daemonStub.js";
 import { tryConnectDaemon } from "./daemonClient.js";
-import { locateRegion } from "./locate/run.js";
+import { fuseRegion, locateRegion } from "./locate/run.js";
 
 const policy = new PolicyGate();
 const server = new McpServer({ name: "pachakutech-presence", version: "0.1.0" });
@@ -178,7 +177,8 @@ server.registerTool(
       "Returns full-screen UV for a phrase on a web page, PDF, terminal, or document window. " +
       "One process screenshots and reads the words. It does not mark and it does not speak. " +
       "Web can open a URL and scroll. PDF opens Evince from a file path and can turn to `page`. " +
-      "Terminal and doc read a window already up; they do not type, and they do not ask a multiplexer. " +
+      "Terminal, doc, and ide read a window already up; they do not type, and they do not ask a multiplexer. " +
+      "ide is the editor window (code, code-oss, cursor, zed, jetbrains). " +
       "Prefer this over a hand-rolled grim and tesseract pipeline. A passage query is `start ... end`.",
     inputSchema: {
       source: z.enum(["web", "pdf", "terminal", "doc", "ide"]).describe("Which window to read"),
@@ -207,6 +207,97 @@ server.registerTool(
       windowClass,
       windowTitle,
     });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  },
+);
+
+const regionFields = {
+  source: z.enum(["web", "pdf", "terminal", "doc", "ide"]).describe("Which window to read"),
+  query: z.string().describe("Phrase, or `start ... end` for a passage"),
+  uri: z.string().optional().describe("Web URL, or a local path for pdf and doc"),
+  page: z.number().int().min(1).max(9999).optional().describe("PDF page, starting at 1"),
+  pad: z.number().int().min(0).max(64).optional().describe("Pixels around the matched lines. Default 12"),
+  timeoutS: z.number().min(1).max(120).optional().describe("Seconds to wait. Default 15"),
+  noOpen: z.boolean().optional().describe("Measure a window that is already up"),
+  windowClass: z.string().optional().describe("Case-insensitive regular expression on the window class"),
+  windowTitle: z.string().optional().describe("Case-insensitive regular expression on the window title"),
+  durationSeconds: z.number().min(1).max(360).default(90).describe("How long the tint stays up"),
+};
+
+server.registerTool(
+  "highlightAndSpeak",
+  {
+    title: "Find a phrase, tint it, and speak",
+    description:
+      "One call. Finds the phrase, checks the crop, tints it, then speaks text. " +
+      "The tint lasts durationSeconds (default 90, max 360). A locate miss does not tint and does not speak. " +
+      "One rate-limit tick. text is the spoken line, not a summary of the matched phrase. " +
+      "Web can scroll. PDF opens Evince and accepts page. Terminal, doc, and ide read a window already up. " +
+      "ide is the editor window (code, code-oss, cursor, zed, jetbrains). Reveal the line. It does not type.",
+    inputSchema: {
+      presenceId: z.string().describe("Live presence from spawnPresence"),
+      text: z.string().describe("The spoken line, the same words as the written reply"),
+      ...regionFields,
+    },
+  },
+  async ({ presenceId, text, source, query, uri, page, pad, timeoutS, noOpen, windowClass, windowTitle, durationSeconds }) => {
+    policy.assertAllowed("highlightAndSpeak");
+    policy.assertInstanceExists(presenceId);
+    const result = await fuseRegion(
+      {
+        source,
+        query,
+        uri,
+        page,
+        pad: pad ?? 12,
+        timeoutS: timeoutS ?? 15,
+        noOpen: Boolean(noOpen),
+        verify: true,
+        windowClass,
+        windowTitle,
+        seconds: durationSeconds,
+      },
+      presenceId,
+      text,
+    );
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  },
+);
+
+server.registerTool(
+  "manifestHighlightFromQuery",
+  {
+    title: "Find a phrase and tint it",
+    description:
+      "Finds the phrase, checks the crop, and tints it. No speech. " +
+      "The tint lasts durationSeconds (default 90, max 360). A locate miss does not tint. " +
+      "One rate-limit tick. Web can scroll. PDF opens Evince and accepts page. " +
+      "Terminal, doc, and ide read a window already up and do not type. " +
+      "ide is the editor window (code, code-oss, cursor, zed, jetbrains).",
+    inputSchema: {
+      presenceId: z.string().describe("Live presence from spawnPresence"),
+      ...regionFields,
+    },
+  },
+  async ({ presenceId, source, query, uri, page, pad, timeoutS, noOpen, windowClass, windowTitle, durationSeconds }) => {
+    policy.assertAllowed("manifestHighlightFromQuery");
+    policy.assertInstanceExists(presenceId);
+    const result = await fuseRegion(
+      {
+        source,
+        query,
+        uri,
+        page,
+        pad: pad ?? 12,
+        timeoutS: timeoutS ?? 15,
+        noOpen: Boolean(noOpen),
+        verify: true,
+        windowClass,
+        windowTitle,
+        seconds: durationSeconds,
+      },
+      presenceId,
+    );
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   },
 );

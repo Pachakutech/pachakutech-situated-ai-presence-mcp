@@ -36,7 +36,7 @@ export type Client = {
   focusHistoryID: number;
 };
 
-export type LocateSource = "web" | "pdf" | "terminal" | "doc";
+export type LocateSource = "web" | "pdf" | "terminal" | "doc" | "ide";
 
 export type LocateOk = {
   ok: true;

@@ -5,11 +5,11 @@ import { existsSync, mkdtemp, readFileSync, rm, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { sendProposal } from "../daemonControl.js";
-import { TERMINAL_CLASS, chooseSurface, escapeRegExp } from "./choose.js";
+import { IDE_CLASS, TERMINAL_CLASS, chooseSurface, escapeRegExp } from "./choose.js";
 import { parseTsv, type Box, type Word } from "./core.js";
 import { WINDOW_PATH, locatePdf } from "./pdf.js";
 import { locateStill, type StillDeps } from "./surface.js";
-import { locateWeb, type Client, type LocateErr, type LocateResult, type WebOpts } from "./web.js";
+import { locateWeb, type Client, type LocateErr, type LocateOk, type LocateResult, type WebOpts } from "./web.js";
 
 const MAX_SECONDS = 360;
 const MARK_DEFAULT_SECONDS = 90;
@@ -70,7 +70,12 @@ function parseFlags(args: string[]): Flags | { error: string } {
   };
 }
 
-function emit(result: LocateResult | { ok: false; source: string; error: string; hint: string }): number {
+type Fused = LocateOk & {
+  highlight: { status: "ok"; durationSeconds: number };
+  speak?: { status: "ok" };
+};
+
+function emit(result: LocateResult | Fused): number {
   process.stdout.write(`${JSON.stringify(result)}\n`);
   return result.ok ? 0 : 1;
 }
@@ -412,15 +417,7 @@ function openDocument(path: string): Promise<void> {
 
 export async function locateRegion(flags: Flags): Promise<LocateResult | LocateErr> {
   if (!flags.query.trim()) return { ok: false, source: flags.source, error: "bad_args", hint: "Pass --query." };
-  if (flags.source === "ide") {
-    return {
-      ok: false,
-      source: "ide",
-      error: "ide_backend_unavailable",
-      hint: "Reveal the diagnostic on screen, then retry with --source ide --no-open (OCR).",
-    };
-  }
-  if (flags.source !== "web" && flags.source !== "pdf" && flags.source !== "terminal" && flags.source !== "doc") {
+  if (flags.source !== "web" && flags.source !== "pdf" && flags.source !== "terminal" && flags.source !== "doc" && flags.source !== "ide") {
     return { ok: false, source: flags.source, error: "bad_args", hint: "--source must be web, pdf, terminal, doc, or ide." };
   }
   if (flags.source === "terminal" && flags.uri) {
@@ -429,6 +426,14 @@ export async function locateRegion(flags: Flags): Promise<LocateResult | LocateE
       source: "terminal",
       error: "bad_args",
       hint: "Terminal locate reads the window that is already up. It does not open a shell, and it does not ask a multiplexer for scrollback.",
+    };
+  }
+  if (flags.source === "ide" && flags.uri) {
+    return {
+      ok: false,
+      source: "ide",
+      error: "bad_args",
+      hint: "IDE locate reads the editor window already up. Reveal the line. It does not type into the editor.",
     };
   }
   if (flags.source === "doc" && flags.uri && /^https?:/i.test(flags.uri)) {
@@ -489,6 +494,27 @@ export async function locateRegion(flags: Flags): Promise<LocateResult | LocateE
       result = await locateDocument(flags, classRe, titleRe ?? new RegExp(escapeRegExp(basename(flags.uri)), "i"), verify);
     } else if (flags.source === "doc") {
       result = await locateDocument(flags, classRe, titleRe, verify);
+    } else if (flags.source === "ide") {
+      result = await locateStill(
+        {
+          source: "ide",
+          query: flags.query,
+          pad: flags.pad,
+          timeoutMs: flags.timeoutS * 1000,
+          verify,
+          missedHint: "The phrase is not in the visible editor. Reveal it yourself. This locator does not type into the editor.",
+          absentHint: "The editor never painted any text.",
+          choose: (clients, focusedAddress, workspace) =>
+            chooseSurface(clients, {
+              workspace,
+              focusedAddress,
+              classRe,
+              titleRe,
+              fallbackClass: classRe ? undefined : IDE_CLASS,
+            }),
+        },
+        stillDeps(),
+      );
     } else {
       result = await locateStill(
         {
@@ -538,6 +564,71 @@ async function locateDocument(
     },
     stillDeps(),
   );
+}
+
+/** Find, force a verify, tint, and optionally speak. A locate miss returns before either. */
+export async function fuseRegion(
+  flags: Flags,
+  presenceId: string,
+  speakText?: string,
+): Promise<LocateErr | Fused> {
+  if (speakText !== undefined && !speakText.trim()) {
+    return { ok: false, source: flags.source, error: "bad_args", hint: "Pass the words to speak." };
+  }
+  const seconds = flags.seconds ?? MARK_DEFAULT_SECONDS;
+  const located = await locateRegion({ ...flags, verify: true, presence: presenceId });
+  if (!located.ok) return located;
+  try {
+    await mark(presenceId, located, seconds);
+    log(`locate: marked ${presenceId} for ${seconds}s`);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return {
+      ok: false,
+      source: located.source,
+      error: "highlight_failed",
+      hint: `${detail} The box was ${located.evidence.screenBox.w}x${located.evidence.screenBox.h} at ${located.evidence.screenBox.x},${located.evidence.screenBox.y}.`,
+    };
+  }
+  if (speakText !== undefined) {
+    try {
+      await sendProposal({
+        kind: "animatePresence",
+        proposalId: "cli-highlight-and-speak",
+        presenceId,
+        text: speakText.trim(),
+      });
+      log(`locate: spoke ${presenceId}`);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      return {
+        ok: false,
+        source: located.source,
+        error: "speak_failed",
+        hint: `${detail} The tint is already up for ${seconds}s.`,
+      };
+    }
+  }
+  return {
+    ...located,
+    highlight: { status: "ok", durationSeconds: seconds },
+    ...(speakText !== undefined ? { speak: { status: "ok" as const } } : {}),
+  };
+}
+
+export async function fuseCommand(args: string[], speak: boolean): Promise<number> {
+  const id = args[0];
+  const usageHint = speak
+    ? 'presence highlight-and-speak <id> --source S --query Q --text "..."'
+    : "presence highlight-query <id> --source S --query Q";
+  if (!id || id.startsWith("-")) return emit({ ok: false, source: "web", error: "bad_args", hint: usageHint });
+  const flags = parseFlags(args.slice(1));
+  if ("error" in flags) return emit({ ok: false, source: "web", error: "bad_args", hint: flags.error });
+  const text = arg(args, "--text");
+  if (speak && (!text || !text.trim())) {
+    return emit({ ok: false, source: flags.source, error: "bad_args", hint: "Pass --text with the words to speak." });
+  }
+  return emit(await fuseRegion(flags, id, speak ? text : undefined));
 }
 
 export async function locateCommand(args: string[]): Promise<number> {

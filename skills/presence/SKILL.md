@@ -29,7 +29,7 @@ If the phrase cannot be found, the tool returns the locate error. It does not ti
 
 A presence spawned from the CLI is outside the MCP gate. For that id use `presence highlight-and-speak <id> --source S --query "..." --text "..."` or `presence highlight-query <id> --source S --query "..."`. A presence spawned with `spawnPresence` uses the two MCP tools. Stdout of either CLI command is one JSON object. Success carries the locate box, `highlight.status`, and, for highlight-and-speak, `speak.status`. The rectangle remains after the tint fades. Her arms come down with the tint. The rectangle is a place on the screen, so a later scroll moves the glass under it.
 
-Phase II wires those two commands and the `ide` reader. Until `presence highlight-and-speak` runs, find with `presence locate`, tint with `presence highlight` or `manifestHighlight`, then speak.
+`highlight-and-speak`, `highlight-query`, and the `ide` reader are wired. They are the teaching path. `presence locate` and `locateScreenRegion` remain the box-only path.
 
 **Ephemeral** — `manifestHighlight`. Pass a live `presenceId` and a box in full-screen UV: top-left origin, `u` and `v` from 0 to 1 across the whole output, `v` growing downward. `w` and `h` use that same space. A box that starts on screen and runs past the far edge is cropped. The mark is a low warm tint on its own layer under the figure, for `durationSeconds` (default 5, at most 360). Call again to replace the box and keep the mark up. After the mark fades, the box stays until you replace it or retire that presence. She points at the mark only while speech is playing and the tint is still visible. The leftover box does not hold the arms up. Talking with no highlight is a later clip. `description` is a short log line.
 

@@ -464,6 +464,55 @@ A two-page PDF, `/tmp/presence-locate-phase1.pdf`, opened with `--page 2` and th
 - New errors: `ambiguous_window`, `page_out_of_range`, `pdf_page_failed`, `pdf_open_failed`. IDE is still `ide_backend_unavailable`.
 - Tests: `test/locate.test.ts` and `test/locate-surface.test.ts`, 14 passing. `npx tsc` was clean and `dist` was rebuilt.
 
-### Left for phase 2
+### Insights before phase 2 was wired
 
-`highlightAndSpeak`, and the IDE OCR path. Dedicated-browser CDP scroll is still unexercised. A multiplexer scrollback, if it is ever wanted, stays optional and is not part of locating a terminal.
+The help text was written first, so a context compress would still have the argv. These are the decisions that text locked in.
+
+1. **Two names for one action.** The MCP tools are `highlightAndSpeak` and `manifestHighlightFromQuery`. The CLI is `presence highlight-and-speak` and `presence highlight-query`. There is still one `presence` binary. A second binary would not be on `PATH`.
+2. **One call, and a miss is silent.** Three MCP calls in a row would spend the 1.5 second gate between them, and an agent that kept going would speak over an empty crop. The fused tool locates, and only on `ok` does it tint and then speak. A locate error is the whole return. No tint, no speech.
+3. **The tint default follows the paragraph.** Fused commands default to 90 seconds. A bare `presence highlight` stays 5. The ceiling stays 360. The duration is the caller's number. Estimating it from the audio would wait on synthesis, and the call returns when speech is accepted.
+4. **`text` is the caller's sentence.** The tool does not summarize the phrase it found. `matchedText` is evidence. The spoken line is `--text` / `text`.
+5. **CLI ids and MCP ids stay apart.** A presence spawned from the CLI is not in the MCP policy gate. `highlight-and-speak` on that id talks to the socket the way `locate --presence` already does. The MCP tools require an id from `spawnPresence`, and the fused call takes one gate tick, not a tick for locate plus a tick for highlight plus a tick for speech.
+6. **`ide` is a window, like doc.** Classes: `code`, `code-oss`, `cursor`, `zed`, and anything whose class contains `jetbrains`. Reveal the line, then OCR. The locator does not type into the editor. A structured editor backend was the optional hook, and the screen rectangle still has to come from the glass, so OCR is the path that ships. The `ide_backend_unavailable` stub is retired by that OCR.
+7. **The remembered box is the one phase 0 already stores.** After the tint fades, `InterestBook` keeps the UV. Fusion does not add a second memory. The arms come down with the tint. The rectangle is a place on the screen.
+8. **Order.** Verify is forced. Tint next. Speech last. A throw from the highlight socket does not speak. Terminal, doc, and ide still do not send keys, and none of them asks tmux.
+
+### Left beside phase 2
+
+Dedicated-browser CDP scroll is still unexercised. A multiplexer scrollback, if it is ever wanted, stays optional and is not part of locating a terminal.
+
+---
+
+## Phase 2, as built
+
+`highlightAndSpeak` and `manifestHighlightFromQuery` are one locate, a forced verify, a tint, and, for the first of those, speech. The CLI names are `presence highlight-and-speak` and `presence highlight-query`. A locate miss is the locate JSON. The tint is not applied, and nothing is spoken. The fused default is 90 seconds. A bare `presence highlight` stays 5. The ceiling stays 360. `text` is the caller's sentence. The remembered box is the InterestBook entry phase 0 already writes. `mark()` still sends `proposalId` `cli-locate`. Speech sends `cli-highlight-and-speak`.
+
+`ide` is the still-window reader. The class is `code`, `code-oss`, `cursor`, `zed`, or `codium`, anchored, or any class containing `jetbrains`. A `--uri` on `ide` is `bad_args`. The locator does not type into the editor, and it does not open one. `ide_backend_unavailable` is gone. The running MCP process from before this build will list the two new tools the next time that process starts. `presence highlight-and-speak` is a new process and sees them now.
+
+### Live check
+
+Active workspace 1. Chromium with the poem at `19,0` `941×1080`. Foot beside it. JetBrains Studio fullscreen on workspace 2. Brave fullscreen on workspace 3.
+
+`presence locate --source ide --no-open --timeout-s 2 --query hello` returned `window_not_found`. The same arguments on `highlight-and-speak`, with a sentence that was not to be spoken, returned that same error. The daemon log gained no `[highlight]` line and no `[speech] playing` line from it. Workspace 2 was still JetBrains at `0,0` `1920×1080` afterward.
+
+`presence highlight-and-speak p-ohyvyk --source doc --no-open --window-title 'To a Mouse' --query fellow-mortal` then tinted and spoke. The box is `139×30` at `382,890`. UV `u=0.19895833333333332 v=0.8240740740740741 w=0.07239583333333334 h=0.027777777777777776`. `matchedText` is `And fellow-mortal!`. `nudgedPx` 0. Method `hypr-focused-ocr`. Duration 90. A grim of that rect read `And fellow-mortal!`. The log line is `[highlight] p-ohyvyk 139x30 at 382,890`. The poem, the terminal, Brave, and JetBrains were still at the same origins and sizes. Doc does not scroll, so the line stayed where the page had it.
+
+### Unexpected situations
+
+1. **`emit` could not take a wider object through `{ ok: boolean }`.** A fresh object literal is checked against that exact shape, so the fused fields failed to compile. The parameter is `LocateResult | Fused`. The JSON on stdout is unchanged: one object, `ok`, and on success `highlight` plus `speak` when the call speaks.
+
+2. **A phrase query is the line, which is what the pad rule already said.** `fellow-mortal` marked `And fellow-mortal!`, `139×30`, and stopped before the next row. The earlier stanza box was a passage query. Confidence on the line was about 0.48. The crop still read the words, and the verify passed before the tint.
+
+3. **An editor on another workspace is invisible here.** The class match does not cross `workspace.id`. The command waited out the timeout on workspace 1 and returned `window_not_found`. It did not focus JetBrains.
+
+### Product
+
+- `src/locate/choose.ts`. `IDE_CLASS`. `code` is anchored, so `encode`, `barcode`, and `code-server` do not match. `jetbrains-studio` matches.
+- `src/locate/run.ts`. The `ide` branch is `locateStill` with that class, unless `--window-class` is set. `fuseRegion` forces verify, tints, then speaks. A highlight throw returns `highlight_failed` and does not speak. A speak throw returns `speak_failed` and says the tint is already up. That second failure was not given a live socket fault.
+- `src/cli.ts` dispatches both commands. `src/index.ts` registers both tools. Each takes one `assertAllowed` tick and requires an id from `spawnPresence`.
+- The skill, in the repo and in `~/.grok/skills/presence/SKILL.md`, and the README, describe the commands as the teaching path. `locate` remains the box alone.
+- Tests: `test/locate.test.ts` and `test/locate-surface.test.ts`, 16 passing. `tsc` was clean and `dist` was rebuilt.
+
+### Left after phase 2
+
+Dedicated-browser CDP scroll is still unexercised. A multiplexer scrollback stays optional and is not part of locating a terminal.

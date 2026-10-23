@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { TERMINAL_CLASS, chooseSurface, occludes, pageAdvanceCount, type SurfaceClient } from "../src/locate/choose.ts";
+import { IDE_CLASS, TERMINAL_CLASS, chooseSurface, occludes, pageAdvanceCount, type SurfaceClient } from "../src/locate/choose.ts";
 
 function client(partial: Partial<SurfaceClient> & Pick<SurfaceClient, "address" | "className">): SurfaceClient {
   return {
@@ -82,6 +82,39 @@ test("a float covers a tile, and a tile does not cover the float", () => {
   const older = { floating: true, focusHistoryID: 1 };
   assert.equal(occludes(popover, older), false);
   assert.equal(occludes(older, popover), true);
+});
+
+test("editor classes match, and code does not swallow a longer name", () => {
+  for (const name of ["jetbrains-studio", "code", "Code", "code-oss", "cursor", "zed", "codium", "jetbrains-idea"]) {
+    assert.equal(IDE_CLASS.test(name), true, name);
+  }
+  for (const name of ["foot", "chromium", "encode", "barcode", "code-server"]) {
+    assert.equal(IDE_CLASS.test(name), false, name);
+  }
+});
+
+test("the focused editor wins, and two editors with the focus elsewhere are ambiguous", () => {
+  const studio = client({ address: "s", className: "jetbrains-studio", w: 1920, h: 1080 });
+  const code = client({ address: "c", className: "code", w: 800, h: 900 });
+  const foot = client({ address: "f", className: "foot" });
+  const focused = chooseSurface([foot, studio, code], {
+    workspace: 1,
+    focusedAddress: "c",
+    fallbackClass: IDE_CLASS,
+  });
+  assert.equal(focused && focused !== "ambiguous" && focused.address, "c");
+  const ambiguous = chooseSurface([studio, code], {
+    workspace: 1,
+    focusedAddress: "f",
+    fallbackClass: IDE_CLASS,
+  });
+  assert.equal(ambiguous, "ambiguous");
+  const elsewhere = chooseSurface([studio, foot], {
+    workspace: 1,
+    focusedAddress: "f",
+    fallbackClass: IDE_CLASS,
+  });
+  assert.equal(elsewhere && elsewhere !== "ambiguous" && elsewhere.address, "s");
 });
 
 test("page 1 is already home and page 2 is one step", () => {

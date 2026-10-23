@@ -66,18 +66,43 @@ presence speak "$id" "The sentence inside the mark."
 presence retire "$id"
 ```
 
+A phrase the user can already see is one command. It finds, checks the
+crop, tints, then speaks. If the phrase is missing it does neither.
+
+```bash
+presence highlight-and-speak "$id" --source web --query "fellow-mortal" \
+  --text "The sentence inside the mark."
+presence highlight-query "$id" --source pdf --uri ./notes.pdf --page 2 \
+  --query "the clause in question"
+```
+
+`highlight-and-speak` defaults the tint to 90 seconds. Pass `--seconds`
+to override. The ceiling is 360. `highlight-query` is the same find and
+tint with no speech. Stdout is one JSON object: the locate box,
+`highlight.status`, and, when it speaks, `speak.status`. `--source` is
+`web`, `pdf`, `terminal`, `doc`, or `ide`. Web can scroll. PDF takes a
+path and `--page`. Terminal, doc, and ide read a window already up and
+do not type into it. `ide` is the editor window (`code`, `code-oss`,
+`cursor`, `zed`, `jetbrains`); reveal the line first.
+
 `u`, `v`, `w`, and `h` are fractions of the whole composited output,
-origin at the top left, `v` downward. The default tint lasts 5 seconds.
-The daemon clamps a duration to between 1 and 60. The arms move only
-while audio is playing and the tint is still up. After the tint fades,
+origin at the top left, `v` downward. A bare `highlight` lasts 5 seconds
+unless a duration is passed. The daemon clamps a duration to between 1
+and 360. The arms move only while audio is playing and the tint is
+still up. After the tint fades, the presence keeps the rectangle and
 the stored rectangle does not hold the pose. `speak` returns when the
 line is accepted. A second `speak` replaces the line still playing. A
-daemon restart drops every live id.
+daemon restart drops every live id. `highlight-and-speak` and
+`highlight-query` are the fused path. `locate` still returns the box
+alone.
 
 The same proposals exist as MCP tools: `spawnPresence`,
 `animatePresence`, `manifestHighlight`, `retirePresence`, `addArtifact`,
-`retireArtifact`, and `locateScreenRegion` (find a phrase, return UV,
-do not mark). Full schemas are in [`src/index.ts`](src/index.ts).
+`retireArtifact`, `locateScreenRegion` (find a phrase, return UV, do not
+mark), `highlightAndSpeak` (find, tint, speak, one rate-limit tick), and
+`manifestHighlightFromQuery` (find and tint, no speech). A locate failure
+inside either fused tool does not tint and does not speak. Full schemas
+are in [`src/index.ts`](src/index.ts).
 Expected motion, the corner rule, and the camera are written out in
 [`docs/situated-presence.md`](docs/situated-presence.md). A one-page
 printing of the contract is
@@ -87,6 +112,8 @@ printing of the contract is
 |---|---|---|
 | `manifestHighlight` | ephemeral | Tints a full-screen UV box. The tint fades. The box remains until replace or retire |
 | `locateScreenRegion` | read | Finds a phrase on screen and returns UV JSON. It does not mark or speak |
+| `highlightAndSpeak` | fused | Finds the phrase, tints it (default 90s, max 360), then speaks `text`. One gate tick. A miss does not tint or speak |
+| `manifestHighlightFromQuery` | fused | Finds the phrase and tints it. No speech |
 | `spawnPresence` | instanced | Returns a `presenceId`. The first live presence receives the body |
 | `animatePresence` | instanced | Speaks `text` through that presence |
 | `retirePresence` | instanced | Ends it and frees the slot |
