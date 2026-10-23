@@ -76,7 +76,8 @@ daemon restart drops every live id.
 
 The same proposals exist as MCP tools: `spawnPresence`,
 `animatePresence`, `manifestHighlight`, `retirePresence`, `addArtifact`,
-`retireArtifact`. Full schemas are in [`src/index.ts`](src/index.ts).
+`retireArtifact`, and `locateScreenRegion` (find a phrase, return UV,
+do not mark). Full schemas are in [`src/index.ts`](src/index.ts).
 Expected motion, the corner rule, and the camera are written out in
 [`docs/situated-presence.md`](docs/situated-presence.md). A one-page
 printing of the contract is
@@ -85,6 +86,7 @@ printing of the contract is
 | Tool | Pattern | Does |
 |---|---|---|
 | `manifestHighlight` | ephemeral | Tints a full-screen UV box. The tint fades. The box remains until replace or retire |
+| `locateScreenRegion` | read | Finds a phrase on screen and returns UV JSON. It does not mark or speak |
 | `spawnPresence` | instanced | Returns a `presenceId`. The first live presence receives the body |
 | `animatePresence` | instanced | Speaks `text` through that presence |
 | `retirePresence` | instanced | Ends it and frees the slot |

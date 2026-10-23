@@ -13,6 +13,7 @@ import { dirname, join } from "node:path";
 import { getBundledDaemonPath } from "./daemonBinary.js";
 import { socketPath } from "./daemonClient.js";
 import { sendProposal, socketReachable, startDaemon, statusDaemon, stopDaemon } from "./daemonControl.js";
+import { locateCommand } from "./locate/run.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SERVER_ENTRY = join(__dirname, "index.js");
@@ -36,6 +37,14 @@ function usage(): never {
       "  speak <id> <text>    That presence speaks: local TTS, audio, synced mouth",
       "  highlight <id> <u> <v> <w> <h> [seconds]",
       "                       Tint that UV box (top-left, v down, 0..1). Default 5s, max 360",
+      "  locate --source web|pdf|terminal|doc|ide --query <phrase>",
+      "                       [--uri URL_or_path] [--page N] [--pad 12] [--timeout-s 15]",
+      "                       [--no-open] [--window-class RE] [--window-title RE] [--verify]",
+      "                       [--presence <id> [--seconds N]]",
+      "                       Find a phrase and print its UV as JSON. A query may be",
+      "                       `start ... end`. Web scrolls. PDF opens Evince. Terminal and",
+      "                       doc read the window already up and do not type into it.",
+      "                       With --presence, verify the crop and mark it (default 90s).",
       "  stop <id>            Stop that presence's speech; face returns to neutral",
       "  retire <id>          End the presence, hide its avatar, free its slot",
       "                       The doubled form still works: presence presence speak <id> <text>",
@@ -333,6 +342,9 @@ switch (command) {
     break;
   case "avatar":
     process.exit(await avatarCommand(process.argv.slice(3)));
+    break;
+  case "locate":
+    process.exit(await locateCommand(process.argv.slice(3)));
     break;
   default:
     usage();
