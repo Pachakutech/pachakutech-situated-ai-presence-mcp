@@ -23,13 +23,17 @@ Acceptance is not hearing. The daemon copies its environment once, at start. The
 
 **Show the phrase while you speak.** `highlightAndSpeak` is the teaching call. Pass the live `presenceId`, `source` (`web`, `pdf`, `terminal`, `doc`, or `ide`), `query`, and `text`. `text` is the spoken line, the same words as the written reply. The tool finds the phrase, checks the crop, tints it, then speaks. One call, one rate-limit tick. The tint defaults to 90 seconds so a paragraph fits under it. Pass `durationSeconds` to override. The ceiling is 360. `manifestHighlight` with no duration stays 5 seconds.
 
-When one reply walks through more than one passage, pass `cues`. A cue is the sentence that opens that beat, and the passage to tint while the sentence plays. The runtime splits the reply, finds the first passage before any audio, and moves the mark when that clip is ready. The tint comes down while the page jumps to the next passage, and the new box goes up when the crop passes. The tint stays for the utterance and drops when the voice ends.
+When one reply walks through more than one passage, annotate that reply. Pass `text` as the words to speak, and pass `cues` beside it. Each cue is `{at, query}`. `at` is the opening of one sentence of `text`. `query` is the passage on the page to tint while that sentence plays, a phrase or `start ... end`, using the words on the glass. Omit `query` on the call when cues are set.
+
+The runtime splits `text` on `.?!` and binds each cue to one sentence. `at` is at least 16 characters, or the whole sentence, and it matches exactly one unused sentence: the sentence starts with `at`, or `at` starts with the sentence. An unknown or ambiguous `at` is reported and skipped. If none of the cues bind, the call does not speak.
+
+The first passage is found and tinted before any audio. Later passages move on the sentence clock. The call returns when the utterance is accepted. Nothing is sent back to ask for the next mark. On the web the open tab jumps to the phrase. The tint comes down while the page moves, and the new box goes up when the crop passes. A later miss leaves the tint down and the voice continues. The tint stays for the utterance and drops when the voice ends.
 
 If the phrase cannot be found, the tool returns the locate error. It does not tint, and it does not speak. Speak with no mark only by calling `animatePresence` yourself after that error.
 
 `manifestHighlightFromQuery` is the same find and tint with no speech, for a caller that speaks on its own.
 
-A presence spawned from the CLI is outside the MCP gate. For that id use `presence highlight-and-speak <id> --source S --query "..." --text "..."` or `presence highlight-query <id> --source S --query "..."`. A presence spawned with `spawnPresence` uses the two MCP tools. Stdout of either CLI command is one JSON object. Success carries the locate box, `highlight.status`, and, for highlight-and-speak, `speak.status`. The rectangle remains after the tint fades. Her arms come down with the tint. The rectangle is a place on the screen, so a later scroll moves the glass under it.
+A presence spawned from the CLI is outside the MCP gate. For that id use `presence highlight-and-speak <id> --source S --query "..." --text "..."` or `presence highlight-query <id> --source S --query "..."`. When the reply names several passages, pass `--cues` and omit `--query`. A presence spawned with `spawnPresence` uses the two MCP tools. Stdout of either CLI command is one JSON object. Success carries the locate box, `highlight.status`, and, for highlight-and-speak, `speak.status`. The rectangle remains after the tint fades. Her arms come down with the tint. The rectangle is a place on the screen, so a later scroll moves the glass under it.
 
 `highlight-and-speak`, `highlight-query`, and the `ide` reader are wired. They are the teaching path. `presence locate` and `locateScreenRegion` remain the box-only path.
 

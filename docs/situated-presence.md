@@ -203,6 +203,48 @@ continues with the screenshot of the window. `presence screen-text`
 prints the message. The words stay in the process for about eight
 seconds, and the book is cleared when the session is hidden.
 
+### Annotating the reply
+
+A reply that walks through more than one passage is handed over once.
+`text` is the utterance. `cues` are notes on that same utterance. Each
+note is a pair, `at` and `query`. `at` names one sentence of `text`.
+`query` is the passage to find on the page while that sentence plays.
+Those words are the words on the glass, a phrase or `start ... end`.
+The annotation is the whole instruction. The call returns when the
+utterance is accepted, and the sentence clock inside the daemon moves
+the mark.
+
+The voice and the notes share one splitter. The reply is cut on
+`.?!`. Abbreviations, initials, decimals, and an ellipsis stay inside
+the sentence. Each `at` is then bound to one unused sentence. A note
+shorter than 16 characters has to be the whole sentence. A longer note
+matches when the sentence starts with it, or it starts with the
+sentence, and exactly one unused sentence does. Two matches are
+ambiguous, and an unmatched note is skipped. If none of the notes
+bind, the call returns the split sentences and does not speak.
+
+The earliest bound passage is located and tinted before any audio. If
+that locate fails, nothing is spoken. Later passages are looked up
+while the sentence before them plays, one search at a time. On the web
+the open tab is sent to the phrase. If that jump does not land, the
+page is read again in a short step. The tint comes down while the page
+moves, and the new box goes up when the crop passes. A miss leaves the
+tint down. The voice continues. A passage whose sentence has already
+finished is left. The tint stays for the utterance and drops when the
+voice ends. A single `query`, with no cues, remains the one-passage
+call, and that tint defaults to 90 seconds.
+
+```bash
+presence highlight-and-speak "$id" --source web --uri "$url" \
+  --text "Touch here is a gesture without motion. The hand then prays to the stone." \
+  --cues '[{"at":"Touch here is a gesture","query":"Shape without form ... gesture without motion"},{"at":"The hand then prays","query":"stone images ... fading star"}]'
+```
+
+PDF, a terminal, and the editor have no text fragment. They drop the
+tint before the search and raise it only after the crop passes. A
+terminal and the editor accept a passage when the words are already in
+the window.
+
 `spawn` accepts `--context`, `--style`, and `--artifact`. Context and
 style are recorded. They do not restyle the mesh. An artifact id does
 not replace the body with that cloud. `addArtifact` holds a local

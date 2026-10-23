@@ -229,10 +229,12 @@ server.registerTool(
   {
     title: "Find a phrase, tint it, and speak",
     description:
-      "One call. Finds the phrase, checks the crop, tints it, then speaks text. " +
-      "The tint lasts durationSeconds (default 90, max 360). A locate miss does not tint and does not speak. " +
-      "cues move the mark as the sentences play. Each cue names the sentence that opens a beat and the passage to tint. " +
-      "The first passage is found before any audio. The tint stays up for the utterance. " +
+      "One call. Pass text, the spoken reply, and either one query or cues. " +
+      "cues annotate that reply: each at is one sentence of text, and each query is the passage to find on the page. " +
+      "The runtime splits text, binds the cues, finds the first passage before any audio, then speaks. " +
+      "Later passages move with the sentence clips. The tint comes down while the page moves and goes up when the crop passes. " +
+      "It stays for the utterance. A miss on the first passage does not tint and does not speak. " +
+      "With no cues, the tint lasts durationSeconds (default 90, max 360). " +
       "One rate-limit tick. text is the spoken line, not a summary of the matched phrase. " +
       "Web can scroll. PDF opens Evince and accepts page. Terminal, doc, and ide read a window already up. " +
       "ide is the editor window (code, code-oss, cursor, zed, jetbrains). Reveal the line. It does not type.",
@@ -244,12 +246,12 @@ server.registerTool(
       cues: z
         .array(
           z.object({
-            at: z.string().describe("The sentence that opens this beat, as it appears in text"),
-            query: z.string().describe("Passage to tint while that sentence plays"),
+            at: z.string().describe("Opening of one sentence of text. At least 16 characters, or the whole sentence"),
+            query: z.string().describe("Words on the page to tint while that sentence plays. A phrase, or start ... end"),
           }),
         )
         .optional()
-        .describe("Move the mark with the sentences. The first passage is found before any audio. The tint stays for the utterance"),
+        .describe("Notes on text. Each names a sentence and the words to find on the page. The first passage is found before any audio. The tint stays for the utterance"),
     },
   },
   async ({ presenceId, text, source, query, uri, page, pad, timeoutS, noOpen, windowClass, windowTitle, durationSeconds, cues }) => {

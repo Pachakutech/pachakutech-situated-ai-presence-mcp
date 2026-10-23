@@ -105,12 +105,17 @@ presence highlight-query "$id" --source pdf --uri ./notes.pdf --page 2 \
 
 `highlight-and-speak` defaults the tint to 90 seconds. Pass `--seconds`
 to override. The ceiling is 360. A reply that walks through more than
-one passage passes `--cues`, a JSON list of `{at, query}`. `at` is the
-sentence that opens that beat. The first passage is found before any
-audio. Later passages jump to the phrase in the open tab. The tint
-comes down for that jump and the new box goes up when the crop passes.
-The tint stays up until the voice ends. `highlight-query` is the same find and
-tint with no speech. Stdout is one JSON object: the locate box,
+one passage is annotated once. `text` is the spoken reply. `--cues` is
+a JSON list of `{at, query}` beside it. `at` names one sentence of that
+reply. `query` is the passage to find on the page, a phrase or
+`start ... end`. The runtime splits the reply, binds each cue to a
+sentence, and finds the first passage before any audio. Later passages
+move with the sentence clips. On the web the open tab jumps to the
+phrase. The tint comes down for that jump and the new box goes up when
+the crop passes. A miss leaves the tint down. The voice continues, and
+the tint stays up until the voice ends. The binding rules are in
+[Annotating the reply](docs/situated-presence.md#annotating-the-reply).
+`highlight-query` is the same find and tint with no speech. Stdout is one JSON object: the locate box,
 `highlight.status`, and, when it speaks, `speak.status`. `--source` is
 `web`, `pdf`, `terminal`, `doc`, or `ide`. Web can scroll. PDF takes a
 path and `--page`. Terminal, doc, and ide read a window already up and
@@ -153,7 +158,7 @@ printing of the contract is
 |---|---|---|
 | `manifestHighlight` | ephemeral | Tints a full-screen UV box. The tint fades. The box remains until replace or retire |
 | `locateScreenRegion` | read | Finds a phrase and returns UV JSON. A single hit in the screen-text memory can supply the words. It does not mark or speak |
-| `highlightAndSpeak` | fused | Finds the phrase, tints it (default 90s, max 360), then speaks `text`. `cues` move the mark with the sentences and hold the tint for the utterance. One gate tick. A miss does not tint or speak |
+| `highlightAndSpeak` | fused | Speaks `text`. One passage passes `query`. Several passages pass `cues`, each naming a sentence of `text` and the words to find on the page. The first passage is tinted before any audio. Later ones move with the sentence clips and hold the tint for the utterance. One gate tick. A miss on the first passage does not tint or speak |
 | `manifestHighlightFromQuery` | fused | Finds the phrase and tints it. No speech |
 | `spawnPresence` | instanced | Returns a `presenceId`. The first live presence receives the body |
 | `animatePresence` | instanced | Speaks `text` through that presence |
