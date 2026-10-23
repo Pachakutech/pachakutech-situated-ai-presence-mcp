@@ -13,7 +13,7 @@ import { dirname, join } from "node:path";
 import { getBundledDaemonPath } from "./daemonBinary.js";
 import { socketPath } from "./daemonClient.js";
 import { sendProposal, socketReachable, startDaemon, statusDaemon, stopDaemon } from "./daemonControl.js";
-import { fuseCommand, locateCommand } from "./locate/run.js";
+import { fuseCommand, locateCommand, screenTextCommand } from "./locate/run.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SERVER_ENTRY = join(__dirname, "index.js");
@@ -57,6 +57,8 @@ function usage(): never {
       "                       [the same flags as highlight-and-speak, without --text]",
       "                       Find, verify, and tint. No speech. Default 90s, max 360.",
       "                       MCP name: manifestHighlightFromQuery.",
+      "  screen-text          Print the daemon's latest screen-text message as JSON.",
+      "                       Columns from one capture. Fresh is false when it is quiet.",
       "  stop <id>            Stop that presence's speech; face returns to neutral",
       "  retire <id>          End the presence, hide its avatar, free its slot",
       "                       The doubled form still works: presence presence speak <id> <text>",
@@ -363,6 +365,9 @@ switch (command) {
     break;
   case "highlight-query":
     process.exit(await fuseCommand(process.argv.slice(3), false));
+    break;
+  case "screen-text":
+    process.exit(await screenTextCommand());
     break;
   default:
     usage();

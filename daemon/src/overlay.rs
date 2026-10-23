@@ -2875,7 +2875,10 @@ pub fn run(
     avatar: &mut Option<AvatarActor>,
     mut expand: Option<&mut AvatarExpand>,
 ) -> Result<(), String> {
-    let mut server = SocketServer::bind(socket_path).map_err(|e| format!("socket bind: {e}"))?;
+    let text_memory = std::sync::Arc::new(crate::screen_text::TextMemory::new(std::sync::Arc::new(
+        crate::screen_text::GlassStamp::new(),
+    )));
+    let mut server = SocketServer::bind(socket_path, text_memory.clone()).map_err(|e| format!("socket bind: {e}"))?;
     let _pid = crate::socket::PidFile::create(socket_path).map_err(|e| format!("pid file: {e}"))?;
     println!("[socket] listening on {}", socket_path.display());
     server.set_avatar_available(avatar.is_some());
@@ -2909,6 +2912,7 @@ pub fn run(
     let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel::<CaptureMsg>(1);
 
     let use_dmabuf = vk.supports_zero_copy_capture();
+    crate::screen_text::spawn(text_memory.clone(), capture_enabled.clone());
 
     // --- Unified capture thread (dmabuf preferred, SHM fallback) ---
     // L1: pauses when `capture_enabled` is false (session inactive).
@@ -3102,6 +3106,7 @@ pub fn run(
         was_hide = hide;
 
         if hide {
+            text_memory.glass().disc_side.store(0, Ordering::Relaxed);
             // The capture thread blocks on the yield ack. Drain it here too:
             // this branch does not tick, and a Yielded left in the channel
             // would keep the camera open for the whole time we are hidden.
@@ -3201,10 +3206,14 @@ pub fn run(
                 let (bx, by) = overlay.bubble_pos();
                 let (ow, oh) = overlay.output_size();
                 gpu.set_heat_disc(bx, by, overlay.side() as i32);
+                text_memory.glass().disc_x.store(bx, Ordering::Relaxed);
+                text_memory.glass().disc_y.store(by, Ordering::Relaxed);
+                text_memory.glass().disc_side.store(overlay.side() as i32, Ordering::Relaxed);
                 gpu.set_lens_place(bx, by, ow, oh);
                 gpu.draw(vk)?;
                 if got || last_capture.elapsed() >= CAPTURE_INTERVAL {
                     last_capture = Instant::now();
+                    text_memory.glass().frame.fetch_add(1, Ordering::Relaxed);
                 }
             }
             let dt = place_clock.elapsed().as_secs_f32();

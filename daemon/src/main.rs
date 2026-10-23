@@ -5,6 +5,7 @@ mod overlay;
 mod placement;
 mod screen_heat;
 mod screen_patch;
+mod screen_text;
 mod pipeline;
 mod avatar_expand;
 mod protocol;

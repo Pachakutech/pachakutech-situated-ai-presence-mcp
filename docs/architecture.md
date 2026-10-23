@@ -60,9 +60,9 @@ Or, on failure:
 ```
 
 Every tool in `src/index.ts` has a matching `Proposal` variant in
-`daemon/src/protocol.rs` — six tools, six variants, kept in lockstep by hand
-for now. If this grows much further, generating one from the other becomes
-worth it; at six, it isn't yet.
+`daemon/src/protocol.rs`, kept in lockstep by hand. `queryScreenText` is
+the other direction: a socket kind with no MCP tool. It returns the
+latest screen-text message.
 
 ## Ingress
 
@@ -75,6 +75,17 @@ Screen and webcam are ticked.
   10 frames per second.
 - **Webcam.** V4L2, YUYV, buffers exported as dma-bufs and imported the
   same way. The steady path does not map those buffers for a CPU read.
+- **Screen text.** A worker beside that loop takes one reused
+  shared-memory screencopy when it is free, runs Tesseract, and posts
+  one message: the columns `text`, `x`, `y`, `w`, `h`, and `conf`, every
+  word from that single capture. The present thread does not wait, and
+  it does not read the imported dma-buf. The message is offered for
+  eight seconds after it is posted. The disc is painted flat grey in
+  the copy, so the body is not indexed. The book is cleared when the
+  session is hidden. Locate reads the latest complete message, keeps
+  the words in the chosen window, and still checks the crop before a
+  tint. The record of that cut is
+  [`plans/screen_text_memory.md`](plans/screen_text_memory.md).
 
 `vulkan.rs` still probes `VK_KHR_external_memory_fd` and
 `VK_EXT_external_memory_dma_buf` at startup and reports the result. On
@@ -175,8 +186,10 @@ like.
 - A learned map from `animatePresence`'s text to a pose code. The running
   body samples `Breathe` and `Point`. A log line that still calls the
   pose-code apply unbuilt refers to that older design.
-- Resolving a phrase such as "the red banner" to a rectangle. The daemon
-  receives `u`, `v`, `w`, and `h`. The measurement belongs to the caller.
+- A description that is not the words on the glass, such as "the red
+  banner". The daemon receives `u`, `v`, `w`, and `h` for that box. A
+  phrase of visible text is measured by locate, which reads the
+  screen-text message and checks the crop.
 - Viseme morph targets on the current GLB. The jaw moves. The shape keys
   do not, because they are not in the file.
 - A microphone ingress actor. Speech playback is not that actor.

@@ -11,6 +11,7 @@ import {
   parseTsv,
   prepareLines,
   seek,
+  toWindowWords,
   unionBox,
   type SeekState,
   type Word,
@@ -137,4 +138,20 @@ test("a bottom-parked passage is nudged up, and a missing one is given up", () =
   missing = { walkedFromTop: true, nudgePx: 0, scrolled: true, walked: true };
   action = seek(null, false, missing, windowH).action;
   assert.deepEqual(action, { type: "fail", error: "quote_not_found" });
+});
+
+test("a word stays in the chosen window, shifts to its origin, and drops under an occluder", () => {
+  const window = { x: 100, y: 200, w: 400, h: 300 };
+  const words: Word[] = [
+    { x: 120, y: 220, w: 40, h: 16, text: "inside", conf: 90 },
+    { x: 10, y: 10, w: 40, h: 16, text: "outside", conf: 90 },
+    { x: 360, y: 400, w: 30, h: 12, text: "covered", conf: 90 },
+  ];
+  const kept = toWindowWords(words, window, [{ x: 350, y: 390, w: 80, h: 40 }]);
+  assert.deepEqual(
+    kept.map((word) => word.text),
+    ["inside"],
+  );
+  assert.equal(kept[0].x, 20);
+  assert.equal(kept[0].y, 20);
 });

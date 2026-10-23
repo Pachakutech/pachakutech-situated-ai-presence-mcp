@@ -155,24 +155,20 @@ plain (non-billboard) splats instead of one billboard.
   fully unit tested in this sandbox.
 - **`screen_wlr.rs`** — real `wlr-screencopy-unstable-v1` client:
   binds `wl_output`/`wl_shm`/`zwlr_screencopy_manager_v1`, requests a
-  capture, allocates a matching shm buffer, copies out the pixels. Built
-  against `wayland-client`/`wayland-protocols-wlr` with the `dlopen`
-  feature — same "compiles everywhere, only fails at runtime if the
-  library/compositor is actually missing" posture as `ash`'s Vulkan
-  loading.
+  capture, and copies into one reused shm memfd. The screen-text worker
+  owns that connection on its own thread. The present path's sample is
+  the dma-buf import, and that image is not read back for the words.
 - **`webcam_v4l2.rs`** — real V4L2 capture via raw `ioctl(2)`, no client
   library at all (V4L2 needs none). Struct layouts and ioctl request
   codes were taken from this sandbox's own `/usr/include/linux/
   videodev2.h`, not memory, specifically because a subtly wrong FFI
   struct here means silent memory corruption, not a compile error.
 
-**Honest limits, stated plainly:** this sandbox has no Wayland compositor
-and no `/dev/video0`. Both backends have been verified to *compile*
-against the real crates/headers, and `webcam_v4l2.rs`'s struct layouts
-were independently cross-checked against `sizeof()` output from a tiny C
-program compiled with the actual kernel header — but neither has ever
-opened a real display connection or camera. That check is what it's
-worth: it caught one real bug before this ever reached hardware.
+The screen client runs on a live session. The worker posts a column
+message when Tesseract finishes, and the present loop does not call it.
+The webcam struct check below is from the first compile of that backend,
+and it is still why `V4l2Format` is aligned to 8 bytes.
+
 `V4l2Format`'s C union has 8-byte alignment (a variant we don't use,
 `v4l2_window`, contains a pointer), which hand-computed Rust layout math
 initially missed — producing 204 bytes instead of the real 208. If this
@@ -181,12 +177,6 @@ wrong struct size, and the kernel would have written past the end of a
 too-small buffer. Fixed with `#[repr(C, align(8))]` on the union; both
 the size *and* all eight ioctl request codes now assert against real
 `gcc`-derived values in `webcam_v4l2.rs`'s tests, not just re-derived Rust
-arithmetic checking itself.
-
-Neither backend is called from `main.rs` yet. The compute pipeline exists
-and smokes; it is not kept alive, and there is no ingress tick feeding
-`SplatPipeline::write_splat`. That's the natural next layer: own the
-pipeline for the process, call `next_frame()` on whichever backend(s) are
-configured, run it through `IngressActor::update_slot`, and upload into
-the live `DynamicSplatBuffer` — at which point "the screen becomes a
-splat" stops being a design claim and starts being an observable one.
+arithmetic checking itself. The pipeline stays up after the smoke tick.
+The screen sample the body colours from is the dma-buf import, described
+in [`architecture.md`](architecture.md).

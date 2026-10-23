@@ -153,6 +153,51 @@ async function focused(): Promise<{ address?: string; workspace: number }> {
   return { address: row.address, workspace: id };
 }
 
+let memoryWarned = false;
+
+/** Latest screen-text columns, zipped into words. Quiet, stale, or an old daemon is a miss. */
+async function recallWords(): Promise<Word[]> {
+  try {
+    const reply = await sendProposal({ kind: "queryScreenText", proposalId: "cli-screen-text" });
+    return columnsToWords(reply.detail);
+  } catch (error) {
+    if (!memoryWarned) {
+      memoryWarned = true;
+      const detail = error instanceof Error ? error.message : String(error);
+      log(`locate: screen text is quiet (${detail})`);
+    }
+    return [];
+  }
+}
+
+function columnsToWords(detail: Record<string, unknown> | undefined): Word[] {
+  if (!detail || detail.fresh !== true) return [];
+  const text = detail.text;
+  const x = detail.x;
+  const y = detail.y;
+  const w = detail.w;
+  const h = detail.h;
+  const conf = detail.conf;
+  if (!Array.isArray(text) || !Array.isArray(x) || !Array.isArray(y) || !Array.isArray(w) || !Array.isArray(h) || !Array.isArray(conf)) {
+    return [];
+  }
+  const n = text.length;
+  if (x.length !== n || y.length !== n || w.length !== n || h.length !== n || conf.length !== n) return [];
+  const words: Word[] = [];
+  for (let i = 0; i < n; i++) {
+    const token = text[i];
+    if (typeof token !== "string" || !token) continue;
+    const xi = Number(x[i]);
+    const yi = Number(y[i]);
+    const wi = Number(w[i]);
+    const hi = Number(h[i]);
+    const ci = Number(conf[i]);
+    if (![xi, yi, wi, hi].every((value) => Number.isFinite(value)) || wi <= 0 || hi <= 0) continue;
+    words.push({ x: xi, y: yi, w: wi, h: hi, text: token, conf: Number.isFinite(ci) ? ci : -1 });
+  }
+  return words;
+}
+
 function stillDeps(): StillDeps {
   return {
     clients: async () => asClients(await hyprJson(["clients", "-j"])),
@@ -162,6 +207,7 @@ function stillDeps(): StillDeps {
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     now: () => Date.now(),
     log,
+    recall: recallWords,
   };
 }
 
@@ -473,6 +519,7 @@ export async function locateRegion(flags: Flags): Promise<LocateResult | LocateE
         sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
         now: () => Date.now(),
         log,
+        recall: recallWords,
       });
     } else if (flags.source === "pdf") {
       result = await locatePdf(
@@ -651,4 +698,17 @@ export async function locateCommand(args: string[]): Promise<number> {
     }
   }
   return emit(result);
+}
+
+/** Print the daemon's latest screen-text message. One JSON object on stdout. */
+export async function screenTextCommand(): Promise<number> {
+  try {
+    const reply = await sendProposal({ kind: "queryScreenText", proposalId: "cli-screen-text" });
+    process.stdout.write(`${JSON.stringify(reply.detail ?? { fresh: false })}\n`);
+    return 0;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    process.stdout.write(`${JSON.stringify({ fresh: false, error: detail })}\n`);
+    return 1;
+  }
 }

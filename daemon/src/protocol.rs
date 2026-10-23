@@ -123,6 +123,12 @@ pub enum Proposal {
         x: f32,
         z: f32,
     },
+    /// Latest coherent screen-text message. Does not tint and does not speak.
+    #[serde(rename = "queryScreenText")]
+    QueryScreenText {
+        #[serde(rename = "proposalId")]
+        proposal_id: String,
+    },
 }
 
 /// Applied on the overlay thread after the socket pump. Not a GPU command.
@@ -155,7 +161,8 @@ impl Proposal {
             | Proposal::AvatarSpeak { proposal_id, .. }
             | Proposal::StopPresence { proposal_id, .. }
             | Proposal::AvatarStop { proposal_id }
-            | Proposal::AvatarWalk { proposal_id, .. } => proposal_id,
+            | Proposal::AvatarWalk { proposal_id, .. }
+            | Proposal::QueryScreenText { proposal_id } => proposal_id,
         }
     }
 }

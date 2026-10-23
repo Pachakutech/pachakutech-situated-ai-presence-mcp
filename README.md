@@ -40,11 +40,38 @@ Shader history is [`docs/gpu-splat-pipeline.md`](docs/gpu-splat-pipeline.md).
 The process split is [`docs/architecture.md`](docs/architecture.md).
 The reason the contract looks like this is [`docs/vision.md`](docs/vision.md).
 
+## The blackboard
+
+Each actor posts a frame-coherent message on its own channel when its
+work finishes. Inside a message, every value comes from that one pass.
+Where the message is a table, the columns are a structure of arrays and
+they share one length. A newer message replaces the previous one whole.
+A reader takes the latest complete message. The tick carries on while a
+writer is still working.
+
+The split is the G-buffer idea, applied to compute state. A G-buffer
+keeps albedo, normal, and depth for one frame. Here a channel keeps the
+columns of one pass: the words on the glass, the heat cells, or the
+pose. The channels keep their own clocks. On this panel the screen-text
+pass takes about two and a half seconds, the capture clock is 100 ms,
+and the pose tick is 33 ms.
+
+The CPU writes the buffer the next reader samples. For the body, that
+reader is the expand pass. One dispatch binds this tick's skin matrices
+and morph weights, with the mesh channels beside them, and writes one
+finished splat per sample. Locate reads the screen-text channel.
+Placement reads the heat. The voice posts when the line is ready, and
+the tick polls that message.
+
+That is the blackboard, and the writers are asynchronous. The snapshot
+a reader binds is the latest coherent message on the channel it asked
+for.
+
 ## The control surface
 
-The pose is the record: breath, gesture, jaw, yaw, and the seat. Each
-tick the CPU sends that pose as 181 skin matrices and the morph
-weights. The device rebuilds the 50,000 samples on the deformed mesh
+The pose is one channel of that blackboard. It is the record: breath,
+gesture, jaw, yaw, and the seat. Each tick the CPU sends that pose as
+181 skin matrices and the morph weights. The device rebuilds the 50,000 samples on the deformed mesh
 and stores finished splats for the projection shader to draw. The
 buffers, the push constant, and the 96-byte record are in
 [`docs/control-surface.md`](docs/control-surface.md).
@@ -85,6 +112,15 @@ path and `--page`. Terminal, doc, and ide read a window already up and
 do not type into it. `ide` is the editor window (`code`, `code-oss`,
 `cursor`, `zed`, `jetbrains`); reveal the line first.
 
+Locate reads the daemon's latest screen-text message before it
+screenshots a window. The message is the columns of one capture
+(`text`, `x`, `y`, `w`, `h`, `conf`), kept for about eight seconds
+after it is posted. One hit in the chosen window is the measure, and
+the method is `screen-text-memory`. The crop is still read before a
+tint. A quiet message, two hits, or a failed crop uses the screenshot
+path. `presence screen-text` prints the message. It does not tint and
+it does not speak.
+
 `u`, `v`, `w`, and `h` are fractions of the whole composited output,
 origin at the top left, `v` downward. A bare `highlight` lasts 5 seconds
 unless a duration is passed. The daemon clamps a duration to between 1
@@ -111,7 +147,7 @@ printing of the contract is
 | Tool | Pattern | Does |
 |---|---|---|
 | `manifestHighlight` | ephemeral | Tints a full-screen UV box. The tint fades. The box remains until replace or retire |
-| `locateScreenRegion` | read | Finds a phrase on screen and returns UV JSON. It does not mark or speak |
+| `locateScreenRegion` | read | Finds a phrase and returns UV JSON. A single hit in the screen-text memory can supply the words. It does not mark or speak |
 | `highlightAndSpeak` | fused | Finds the phrase, tints it (default 90s, max 360), then speaks `text`. One gate tick. A miss does not tint or speak |
 | `manifestHighlightFromQuery` | fused | Finds the phrase and tints it. No speech |
 | `spawnPresence` | instanced | Returns a `presenceId`. The first live presence receives the body |

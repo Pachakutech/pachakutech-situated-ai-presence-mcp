@@ -375,6 +375,22 @@ export function fingerprint(lines: Line[]): string {
     .join("|");
 }
 
+/**
+ * Screen-space words whose center sits in `window`, shifted into that window's
+ * coordinates. A word an occluder covers is dropped.
+ */
+export function toWindowWords(words: Word[], window: Box, occluders: Box[]): Word[] {
+  const origin = { x: window.x, y: window.y };
+  const local: Word[] = [];
+  for (const word of words) {
+    const cx = word.x + word.w / 2;
+    const cy = word.y + word.h / 2;
+    if (cx < window.x || cy < window.y || cx >= window.x + window.w || cy >= window.y + window.h) continue;
+    local.push({ ...word, x: word.x - window.x, y: word.y - window.y });
+  }
+  return local.filter((word) => !coveredBy(word, origin, occluders));
+}
+
 /** Words whose screen rect is mostly inside another client's window. */
 export function coveredBy(word: Word, origin: { x: number; y: number }, others: Box[]): boolean {
   const sx = origin.x + word.x;

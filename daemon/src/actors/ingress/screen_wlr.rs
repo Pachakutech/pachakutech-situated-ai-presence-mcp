@@ -1,13 +1,8 @@
-#![allow(dead_code)] // real code, compile-verified only — not yet called from main.rs (no ingress-tick loop exists to wire it into). See module doc comment for the honest real-vs-tested boundary.
-//! Screen capture via the `wlr-screencopy-unstable-v1` Wayland protocol —
-
-//! the Omarchy-relevant path (Hyprland, and wlroots compositors generally,
-//! implement this). Real protocol code, compiled against
-//! `wayland-client`/`wayland-protocols-wlr` in this sandbox — but this
-//! sandbox has no compositor to connect to, so `WlrScreenSource::connect`
-//! has only ever been exercised as far as "does it type-check and link",
-//! never "does it actually get a frame". That needs a real Omarchy
-//! session.
+//! Screen capture via the `wlr-screencopy-unstable-v1` Wayland protocol.
+//!
+//! The screen-text worker owns one connection on its own thread, beside the
+//! daemon's dma-buf capture. One memfd is reused. The present thread never
+//! calls in here.
 //!
 //! Flow: bind the registry -> find one `wl_output` and the
 //! `zwlr_screencopy_manager_v1` global -> `capture_output` -> wait for the
@@ -18,6 +13,8 @@
 
 use super::{FrameSource, IngressFrame};
 use std::os::fd::AsFd;
+use std::thread;
+use std::time::{Duration, Instant};
 use wayland_client::protocol::{wl_buffer, wl_output, wl_registry, wl_shm, wl_shm_pool};
 use wayland_client::{delegate_noop, Connection, Dispatch, EventQueue, QueueHandle, WEnum};
 use wayland_protocols_wlr::screencopy::v1::client::{
@@ -127,9 +124,15 @@ delegate_noop!(CaptureState: ignore zwlr_screencopy_manager_v1::ZwlrScreencopyMa
 /// `Err` from `next_frame`, and the caller (the Presence daemon's ingress
 /// loop) decides whether/when to retry `connect()`.
 pub struct WlrScreenSource {
+    /// Held so the connection is not dropped while the queue is in use.
+    #[allow(dead_code)]
     conn: Connection,
     event_queue: EventQueue<CaptureState>,
     state: CaptureState,
+    /// One memfd for every copy. A new allocation per frame was the leak the
+    /// overlay comment already ruled out.
+    shm_fd: Option<std::os::fd::OwnedFd>,
+    shm_size: usize,
 }
 
 impl WlrScreenSource {
@@ -167,7 +170,7 @@ impl WlrScreenSource {
             );
         }
 
-        Ok(Self { conn, event_queue, state })
+        Ok(Self { conn, event_queue, state, shm_fd: None, shm_size: 0 })
     }
 }
 
@@ -208,8 +211,14 @@ impl FrameSource for WlrScreenSource {
         };
 
         let size = (spec.stride as usize) * (spec.height as usize);
-        let shm_fd = create_anonymous_shm(size)?;
-        let pool = self.state.shm.as_ref().unwrap().create_pool(shm_fd.as_fd(), size as i32, &qh, ());
+        if self.shm_size < size {
+            self.shm_fd = Some(create_anonymous_shm(size)?);
+            self.shm_size = size;
+        }
+        let pool = {
+            let shm_fd = self.shm_fd.as_ref().unwrap();
+            self.state.shm.as_ref().unwrap().create_pool(shm_fd.as_fd(), size as i32, &qh, ())
+        };
         let buffer = pool.create_buffer(
             0,
             spec.width as i32,
@@ -222,27 +231,34 @@ impl FrameSource for WlrScreenSource {
 
         frame.copy(&buffer);
 
-        for _ in 0..32 {
+        // The daemon's own dma-buf capture is also a screencopy client. This
+        // copy can sit behind that one. Waiting on the worker is fine; the
+        // present thread is not in this call. A miss keeps the connection.
+        let ready_by = Instant::now() + Duration::from_millis(1000);
+        while Instant::now() < ready_by {
             self.event_queue
                 .roundtrip(&mut self.state)
                 .map_err(|e| format!("roundtrip while awaiting ready/failed failed: {e}"))?;
             if self.state.ready || self.state.failed {
                 break;
             }
+            thread::sleep(Duration::from_millis(5));
         }
 
-        if self.state.failed {
+        if self.state.failed || !self.state.ready {
             return Ok(None);
-        }
-        if !self.state.ready {
-            return Err("frame neither ready nor failed after copy".to_string());
         }
 
         // Read the shm-backed pixels back out. `Argb8888` on the wire is
-        // little-endian, so byte order in memory is B, G, R, A.
-        let mmap = map_shm_readonly(&shm_fd, size)?;
-        let mut rgba = vec![0u8; (spec.width * spec.height * 4) as usize];
+        // little-endian, so byte order in memory is B, G, R, A. The pool
+        // borrow ended above; this is a second look at the same memfd.
         let y_invert = self.state.y_invert;
+        let shm_fd = self
+            .shm_fd
+            .as_ref()
+            .ok_or_else(|| "screen copy has no shared buffer".to_string())?;
+        let mmap = map_shm_readonly(shm_fd, size)?;
+        let mut rgba = vec![0u8; (spec.width * spec.height * 4) as usize];
         for y in 0..spec.height as usize {
             let src_y = if y_invert { spec.height as usize - 1 - y } else { y };
             let row_start = src_y * spec.stride as usize;

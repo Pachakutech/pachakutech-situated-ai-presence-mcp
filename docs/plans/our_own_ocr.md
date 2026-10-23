@@ -516,3 +516,5 @@ Active workspace 1. Chromium with the poem at `19,0` `941×1080`. Foot beside it
 ### Left after phase 2
 
 Dedicated-browser CDP scroll is still unexercised. A multiplexer scrollback stays optional and is not part of locating a terminal.
+
+Screen text memory has shipped. The record is [screen_text_memory.md](screen_text_memory.md).

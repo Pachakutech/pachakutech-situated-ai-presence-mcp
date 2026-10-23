@@ -4,13 +4,14 @@
 use crate::pipeline::SplatPipeline;
 use crate::protocol::{AvatarCommand, Proposal, ProposalResult};
 use crate::registry::Registry;
+use crate::screen_text::TextMemory;
 use serde_json::json;
 use std::io::{self, Read, Write};
 use std::time::Instant;
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 struct Client {
     stream: UnixStream,
@@ -24,6 +25,7 @@ pub struct SocketServer {
     clients: Vec<Client>,
     registry: Mutex<Registry>,
     avatar_commands: Vec<AvatarCommand>,
+    text: Arc<TextMemory>,
 }
 
 enum ClientRead {
@@ -33,7 +35,7 @@ enum ClientRead {
 }
 
 impl SocketServer {
-    pub fn bind(socket_path: &Path) -> io::Result<Self> {
+    pub fn bind(socket_path: &Path, text: Arc<TextMemory>) -> io::Result<Self> {
         if socket_path.exists() {
             std::fs::remove_file(socket_path)?;
         }
@@ -48,6 +50,7 @@ impl SocketServer {
             clients: Vec::new(),
             registry: Mutex::new(Registry::new()),
             avatar_commands: Vec::new(),
+            text,
         })
     }
 
@@ -93,7 +96,7 @@ impl SocketServer {
 
         let mut i = 0;
         while i < self.clients.len() {
-            match read_client(&mut self.clients[i], pipeline, &self.registry, &mut self.avatar_commands) {
+            match read_client(&mut self.clients[i], pipeline, &self.registry, &mut self.avatar_commands, &self.text) {
                 Ok(ClientRead::Keep) => i += 1,
                 Ok(ClientRead::Closed) | Err(_) => {
                     self.clients.remove(i);
@@ -147,6 +150,7 @@ fn read_client(
     pipeline: &SplatPipeline,
     registry: &Mutex<Registry>,
     avatar_commands: &mut Vec<AvatarCommand>,
+    text: &TextMemory,
 ) -> io::Result<ClientRead> {
     let mut tmp = [0u8; 4096];
     loop {
@@ -166,7 +170,7 @@ fn read_client(
             continue;
         }
         let (result, stop) = match serde_json::from_str::<Proposal>(line) {
-            Ok(proposal) => dispatch(proposal, pipeline, registry, avatar_commands),
+            Ok(proposal) => dispatch(proposal, pipeline, registry, avatar_commands, text),
             Err(e) => {
                 eprintln!("[socket] malformed proposal: {e}");
                 (ProposalResult::err("unknown", format!("malformed proposal: {e}")), false)
@@ -196,6 +200,7 @@ fn dispatch(
     pipeline: &SplatPipeline,
     registry: &Mutex<Registry>,
     avatar_commands: &mut Vec<AvatarCommand>,
+    text: &TextMemory,
 ) -> (ProposalResult, bool) {
     let proposal_id = proposal.proposal_id().to_string();
     if matches!(proposal, Proposal::Shutdown { .. }) {
@@ -229,6 +234,9 @@ fn dispatch(
         Proposal::AvatarStop { .. } => {
             avatar_commands.push(AvatarCommand::StopSpeech { presence_id: None });
             return (ProposalResult::ok(&proposal_id, None), false);
+        }
+        Proposal::QueryScreenText { .. } => {
+            return (ProposalResult::ok(&proposal_id, Some(text.snapshot_json(Instant::now()))), false);
         }
         _ => {}
     }
@@ -275,7 +283,8 @@ fn dispatch(
         | Proposal::StopPresence { .. }
         | Proposal::AvatarSpeak { .. }
         | Proposal::AvatarStop { .. }
-        | Proposal::AvatarWalk { .. } => ProposalResult::ok(&proposal_id, None),
+        | Proposal::AvatarWalk { .. }
+        | Proposal::QueryScreenText { .. } => ProposalResult::ok(&proposal_id, None),
     };
     (result, false)
 }

@@ -64,10 +64,13 @@ Presence Daemon (Rust) — Vulkan device + live registry, ONE persistent process
 GPU: dma_buf-imported webcam/screen frames, wlr-layer-shell output</div>
 <p>Node has no mature way to hold a <code>VkDevice</code>, so the daemon is a separate Rust process. That separation is also what makes multi-agent sharing real rather than asserted: MCP servers are spawned per agent session; one persistent daemon, reachable by however many agents connect, is what lets two agents (or two instances of one) act on the <em>same</em> live presences — no privileged "agent in the middle" owns the substrate.</p>
 
-<h2>The six tools</h2>
+<h2>The tools</h2>
 <table>
 <tr><th>Tool</th><th>Pattern</th><th>Contract</th></tr>
-<tr><td><code>manifestHighlight</code></td><td>ephemeral</td><td>UV box, durationSeconds clamped to 1–60 (default 5). The tint fades. The box remains until replace or retire. She aims only while speech plays and the tint is up</td></tr>
+<tr><td><code>manifestHighlight</code></td><td>ephemeral</td><td>UV box, durationSeconds clamped to 1–360 (default 5). The tint fades. The box remains until replace or retire. She aims only while speech plays and the tint is up</td></tr>
+<tr><td><code>locateScreenRegion</code></td><td>read</td><td>Finds a phrase and returns UV JSON. A single hit in the screen-text memory can supply the words. It does not mark or speak</td></tr>
+<tr><td><code>highlightAndSpeak</code></td><td>fused</td><td>Finds the phrase, checks the crop, tints (default 90s, max 360), then speaks <code>text</code>. A miss does not tint or speak</td></tr>
+<tr><td><code>manifestHighlightFromQuery</code></td><td>fused</td><td>Finds the phrase, checks the crop, and tints. No speech</td></tr>
 <tr><td><code>spawnPresence</code></td><td>instanced 1/3</td><td>sourceContext, styleHint?, artifactId? → presenceId</td></tr>
 <tr><td><code>animatePresence</code></td><td>instanced 2/3</td><td>presenceId, text → feeds new content to a live presence</td></tr>
 <tr><td><code>retirePresence</code></td><td>instanced 3/3</td><td>presenceId → ends it, frees the slot (max 3 concurrent)</td></tr>
@@ -106,10 +109,10 @@ GPU: dma_buf-imported webcam/screen frames, wlr-layer-shell output</div>
 <p>On failure: <code>{"status":"error","error":"..."}</code> — e.g. capacity refusal, unknown id.</p>
 </div>
 </div>
-<p>One JSON line per message, nothing dense crosses this boundary — no buffers, no pixels. Every MCP tool has a matching Rust <code>Proposal</code> variant, kept in lockstep by hand at six tools; regenerating one from the other becomes worth it past that.</p>
+<p>One JSON line per message, nothing dense crosses this boundary — no buffers, no pixels. Every MCP tool has a matching Rust <code>Proposal</code> variant. <code>queryScreenText</code> is a socket kind with no MCP tool. It returns the latest screen-text columns, one capture, and <code>presence screen-text</code> prints them.</p>
 
 <div class="status">
-<b>Status, October 2026:</b> <span class="real">Running</span> — the six tools, the policy gate, the socket (more than one client), a process-lifetime pipeline, dma-buf screen and webcam, a layer-shell disc, GPU skinning of the proxy, local speech, and the Point clip. <span class="stub">Open</span> — a learned pose model, viseme shape keys on this GLB, a shared cap across MCP processes, a microphone actor. The behaviour is <code>docs/situated-presence.md</code>.
+<b>Status, October 2026:</b> <span class="real">Running</span> — the tools above, the policy gate, the socket (more than one client), a process-lifetime pipeline, dma-buf screen and webcam, a layer-shell disc, GPU skinning of the proxy, local speech, the Point clip, and a screen-text memory the locator can read. <span class="stub">Open</span> — a learned pose model, viseme shape keys on this GLB, a shared cap across MCP processes, a microphone actor, and a box for a description that is not the words on the glass. The behaviour is <code>docs/situated-presence.md</code>.
 </div>
 
 <div class="footer">pachakutech-presence · MIT licensed · github.com/Pachakutech/pachakutech-situated-ai-presence-mcp</div>

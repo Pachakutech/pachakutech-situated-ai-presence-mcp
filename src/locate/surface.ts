@@ -12,6 +12,7 @@ import {
   queryInBlob,
   shiftBox,
   toUv,
+  toWindowWords,
   unionBox,
   type Box,
   type Word,
@@ -31,6 +32,8 @@ export type StillDeps = {
   sleep(ms: number): Promise<void>;
   now(): number;
   log(line: string): void;
+  /** Screen-space words from the daemon's latest message. Empty when it is quiet. */
+  recall?(): Promise<Word[]>;
 };
 
 export type StillOpts = {
@@ -85,7 +88,7 @@ export async function locateStill(opts: StillOpts, deps: StillDeps): Promise<Loc
   let sawWindow = false;
   let settleUntil = 0;
 
-  while (deps.now() < deadline) {
+  frame: while (deps.now() < deadline) {
     const where = await deps.focused();
     if (where.workspace < 0) {
       return fail(opts.source, "window_not_found", "Hyprland did not report the active workspace.");
@@ -119,91 +122,135 @@ export async function locateStill(opts: StillOpts, deps: StillDeps): Promise<Loc
     const others = clients
       .filter((client) => client.address !== picked.address && client.workspace === picked.workspace && occludes(picked, client))
       .map((client) => ({ x: client.x, y: client.y, w: client.w, h: client.h }));
-    let words: Word[];
-    try {
-      words = (await deps.ocr({ x: picked.x, y: picked.y, w: picked.w, h: picked.h })).filter(
-        (word) => !coveredBy(word, { x: picked.x, y: picked.y }, others),
-      );
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      return fail(opts.source, "ocr_failed", detail);
-    }
-    let lines = prepareLines(words);
-    const painted = lines.reduce((sum, line) => sum + line.words.length, 0) >= PAINT_WORDS;
-    if (!paintStarted) paintStarted = deps.now();
-    if (!painted && deps.now() - paintStarted < PAINT_WAIT_MS) {
-      deps.log("locate: window is up, text is not painted yet");
-      await deps.sleep(300);
-      continue;
-    }
-
-    let found = findRun(lines, opts.query);
-    if (found === "ambiguous") {
-      return fail(opts.source, "ambiguous_query", "That phrase is on screen more than once. Pass a longer query.");
-    }
-    if (!found && painted) {
-      // A dense-block read misses a one-line PDF. Try the sparse pass once per frame.
-      const sparseWords = (await deps.ocr({ x: picked.x, y: picked.y, w: picked.w, h: picked.h }, "3")).filter(
-        (word) => !coveredBy(word, { x: picked.x, y: picked.y }, others),
-      );
-      const sparseLines = prepareLines(sparseWords);
-      const sparseFound = findRun(sparseLines, opts.query);
-      if (sparseFound && sparseFound !== "ambiguous") {
-        lines = sparseLines;
-        found = sparseFound;
+    let fromMemory = false;
+    let words: Word[] | undefined;
+    if (deps.recall) {
+      const local = toWindowWords(await deps.recall(), picked, others);
+      const hit = findRun(prepareLines(local), opts.query);
+      if (hit && hit !== "ambiguous") {
+        words = local;
+        fromMemory = true;
+        deps.log("locate: memory");
       }
     }
-    if (!found) {
-      if (deps.now() < settleUntil) {
-        deps.log("locate: page is settling");
+
+    for (;;) {
+      if (!words) {
+        try {
+          words = (await deps.ocr({ x: picked.x, y: picked.y, w: picked.w, h: picked.h })).filter(
+            (word) => !coveredBy(word, { x: picked.x, y: picked.y }, others),
+          );
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          return fail(opts.source, "ocr_failed", detail);
+        }
+        fromMemory = false;
+      }
+      let lines = prepareLines(words);
+      const painted = lines.reduce((sum, line) => sum + line.words.length, 0) >= PAINT_WORDS;
+      if (!paintStarted) paintStarted = deps.now();
+      if (!fromMemory && !painted && deps.now() - paintStarted < PAINT_WAIT_MS) {
+        deps.log("locate: window is up, text is not painted yet");
         await deps.sleep(300);
-        continue;
+        continue frame;
       }
-      return fail(opts.source, "quote_not_found", painted ? opts.missedHint : opts.absentHint);
-    }
-    const box = unionBox(lines, found, opts.pad, { w: picked.w, h: picked.h });
-    if (!box) return fail(opts.source, "quote_not_found", opts.missedHint);
 
-    const again = opts.choose(await deps.clients(), (await deps.focused()).address, where.workspace);
-    if (!again || again === "ambiguous" || !sameWindow(again, picked)) {
-      if (geomRetries++ < 1) {
-        deps.log("locate: window moved between the measure and the check; measuring again");
-        continue;
+      let found = findRun(lines, opts.query);
+      if (found === "ambiguous") {
+        if (fromMemory) {
+          deps.log("locate: memory is ambiguous in this window; reading the window");
+          words = undefined;
+          continue;
+        }
+        return fail(opts.source, "ambiguous_query", "That phrase is on screen more than once. Pass a longer query.");
       }
-      return fail(opts.source, "window_moved", "The window moved twice during the measure. Locate again.");
-    }
-
-    let screenBox = shiftBox(box, picked);
-    const neighbors = neighborTexts(lines, found);
-    let used = box;
-    if (opts.verify) {
-      const checked = await verifyBox(screenBox, opts.query, neighbors, deps, opts.source);
-      if (!checked.ok) {
-        const tight = unionBox(lines, found, 0, { w: picked.w, h: picked.h });
-        if (!tight) return checked;
-        const tightScreen = shiftBox(tight, picked);
-        const retry = await verifyBox(tightScreen, opts.query, neighbors, deps, opts.source);
-        if (!retry.ok) return retry;
-        used = tight;
-        screenBox = tightScreen;
+      if (!found && !fromMemory && painted) {
+        // A dense-block read misses a one-line PDF. Try the sparse pass once per frame.
+        const sparseWords = (await deps.ocr({ x: picked.x, y: picked.y, w: picked.w, h: picked.h }, "3")).filter(
+          (word) => !coveredBy(word, { x: picked.x, y: picked.y }, others),
+        );
+        const sparseLines = prepareLines(sparseWords);
+        const sparseFound = findRun(sparseLines, opts.query);
+        if (sparseFound && sparseFound !== "ambiguous") {
+          lines = sparseLines;
+          found = sparseFound;
+        }
       }
-    }
+      if (!found) {
+        if (fromMemory) {
+          deps.log("locate: memory missed on the line pass; reading the window");
+          words = undefined;
+          continue;
+        }
+        if (deps.now() < settleUntil) {
+          deps.log("locate: page is settling");
+          await deps.sleep(300);
+          continue frame;
+        }
+        return fail(opts.source, "quote_not_found", painted ? opts.missedHint : opts.absentHint);
+      }
+      const box = unionBox(lines, found, opts.pad, { w: picked.w, h: picked.h });
+      if (!box) {
+        if (fromMemory) {
+          words = undefined;
+          continue;
+        }
+        return fail(opts.source, "quote_not_found", opts.missedHint);
+      }
 
-    const screen = await deps.screen();
-    const uv = toUv(screenBox, screen);
-    const text = matchedText(lines, found);
-    deps.log(`locate: ${screenBox.w}x${screenBox.h} at ${screenBox.x},${screenBox.y}`);
-    return {
-      ok: true,
-      source: opts.source,
-      ...uv,
-      matchedText: text,
-      screen,
-      window: { class: picked.className, title: picked.title, x: picked.x, y: picked.y, w: picked.w, h: picked.h },
-      confidence: meanConfidence(lines, found),
-      method: "hypr-focused-ocr",
-      evidence: { lineHint: text.slice(0, 180), nudgedPx: 0, screenBox, ...(page !== undefined ? { page } : {}) },
-    };
+      const again = opts.choose(await deps.clients(), (await deps.focused()).address, where.workspace);
+      if (!again || again === "ambiguous" || !sameWindow(again, picked)) {
+        if (geomRetries++ < 1) {
+          deps.log("locate: window moved between the measure and the check; measuring again");
+          continue frame;
+        }
+        return fail(opts.source, "window_moved", "The window moved twice during the measure. Locate again.");
+      }
+
+      let screenBox = shiftBox(box, picked);
+      const neighbors = neighborTexts(lines, found);
+      if (opts.verify) {
+        const checked = await verifyBox(screenBox, opts.query, neighbors, deps, opts.source);
+        if (!checked.ok) {
+          const tight = unionBox(lines, found, 0, { w: picked.w, h: picked.h });
+          let failed: LocateErr | { ok: true } = checked;
+          if (tight) {
+            const tightScreen = shiftBox(tight, picked);
+            const retry = await verifyBox(tightScreen, opts.query, neighbors, deps, opts.source);
+            if (retry.ok) {
+              screenBox = tightScreen;
+              failed = { ok: true };
+            } else {
+              failed = retry;
+            }
+          }
+          if (!failed.ok) {
+            if (fromMemory) {
+              deps.log("locate: memory crop failed; reading the window");
+              words = undefined;
+              continue;
+            }
+            return failed;
+          }
+        }
+      }
+
+      const screen = await deps.screen();
+      const uv = toUv(screenBox, screen);
+      const text = matchedText(lines, found);
+      deps.log(`locate: ${screenBox.w}x${screenBox.h} at ${screenBox.x},${screenBox.y}`);
+      return {
+        ok: true,
+        source: opts.source,
+        ...uv,
+        matchedText: text,
+        screen,
+        window: { class: picked.className, title: picked.title, x: picked.x, y: picked.y, w: picked.w, h: picked.h },
+        confidence: meanConfidence(lines, found),
+        method: fromMemory ? "screen-text-memory" : "hypr-focused-ocr",
+        evidence: { lineHint: text.slice(0, 180), nudgedPx: 0, screenBox, ...(page !== undefined ? { page } : {}) },
+      };
+    }
   }
 
   if (!sawWindow) {

@@ -86,5 +86,9 @@ not yet share one budget. They do share the body: the daemon has one,
 and the first live presence is given it. The pipeline stays up after
 the smoke tick. The disc is on the compositor, the screen and the
 webcam are imported, and speech plus the `Point` clip are the motion.
+Screen text is a perceptual-memory actor beside that ingress. A worker
+posts one frame-coherent message of the words on the glass when the
+recognizer finishes, and locate reads the latest complete message. The
+present tick does not wait for it.
 That behaviour is written in
 [`situated-presence.md`](situated-presence.md), not in this essay.

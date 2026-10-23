@@ -15,6 +15,7 @@ import {
   seek,
   shiftBox,
   toUv,
+  toWindowWords,
   unionBox,
   type Box,
   type SeekState,
@@ -49,7 +50,7 @@ export type LocateOk = {
   screen: { w: number; h: number };
   window: { class: string; title: string; x: number; y: number; w: number; h: number };
   confidence: number;
-  method: "tesseract" | "text-fragment+ocr" | "hypr-focused-ocr";
+  method: "tesseract" | "text-fragment+ocr" | "hypr-focused-ocr" | "screen-text-memory";
   evidence: {
     lineHint: string;
     nudgedPx: number;
@@ -93,6 +94,8 @@ export type Deps = {
   sleep(ms: number): Promise<void>;
   now(): number;
   log(line: string): void;
+  /** Screen-space words from the daemon's latest message. Empty when it is quiet. */
+  recall?(): Promise<Word[]>;
 };
 
 const PAINT_WAIT_MS = 4000;
@@ -143,7 +146,7 @@ export async function locateWeb(opts: WebOpts, deps: Deps): Promise<LocateResult
   const started = deps.now();
   let geomRetries = 0;
 
-  while (deps.now() < deadline) {
+  frame: while (deps.now() < deadline) {
     const clients = await deps.clients();
     const win = chooseWindow(clients, opts);
     if (!win) {
@@ -156,103 +159,152 @@ export async function locateWeb(opts: WebOpts, deps: Deps): Promise<LocateResult
     const others = clients
       .filter((client) => client.address !== win.address && client.workspace === win.workspace && occludes(win, client))
       .map((client) => ({ x: client.x, y: client.y, w: client.w, h: client.h }));
-    let words: Word[];
-    try {
-      words = (await deps.ocr({ x: win.x, y: win.y, w: win.w, h: win.h })).filter(
-        (word) => !coveredBy(word, { x: win.x, y: win.y }, others),
-      );
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      return fail("ocr_failed", detail);
-    }
-    const lines = prepareLines(words);
-    const painted = lines.reduce((sum, line) => sum + line.words.length, 0) >= PAINT_WORDS;
-    if (!painted && deps.now() - started < PAINT_WAIT_MS) {
-      deps.log("locate: window is up, page text is not painted yet");
-      await deps.sleep(300);
-      continue;
-    }
-    seenPaint = seenPaint || painted;
-
-    const fp = fingerprint(lines);
-    const pictureMoved = lastFp === null || fp !== lastFp;
-    lastFp = fp;
-    const found = findRun(lines, opts.query);
-    if (found === "ambiguous") {
-      return fail("ambiguous_query", "That phrase is on screen more than once. Pass a longer query.");
+    let fromMemory = false;
+    let words: Word[] | undefined;
+    if (deps.recall) {
+      const local = toWindowWords(await deps.recall(), win, others);
+      const hit = findRun(prepareLines(local), opts.query);
+      if (hit && hit !== "ambiguous") {
+        words = local;
+        fromMemory = true;
+        deps.log("locate: memory");
+      }
     }
 
-    let placement: { band: "ok" | "low" | "high" } | null = null;
-    let box: Box | null = null;
-    if (found) {
-      box = unionBox(lines, found, opts.pad, { w: win.w, h: win.h });
-      if (box) placement = { band: bandOf(box, win.h, opts.pad) };
-    }
+    for (;;) {
+      if (!words) {
+        try {
+          words = (await deps.ocr({ x: win.x, y: win.y, w: win.w, h: win.h })).filter(
+            (word) => !coveredBy(word, { x: win.x, y: win.y }, others),
+          );
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          return fail("ocr_failed", detail);
+        }
+        fromMemory = false;
+      }
+      const lines = prepareLines(words);
+      const painted = lines.reduce((sum, line) => sum + line.words.length, 0) >= PAINT_WORDS;
+      if (!fromMemory && !painted && deps.now() - started < PAINT_WAIT_MS) {
+        deps.log("locate: window is up, page text is not painted yet");
+        await deps.sleep(300);
+        continue frame;
+      }
+      seenPaint = seenPaint || painted;
 
-    const decision = seek(placement, pictureMoved, state, win.h);
-    state = decision.state;
-
-    if (decision.action.type === "accept") {
-      if (!found || !box) return fail("quote_not_found", "The phrase left the screen before the box was settled.");
-      const again = chooseWindow(await deps.clients(), opts);
-      if (!again || !sameWindow(again, win)) {
-        if (geomRetries++ < 1) {
-          deps.log("locate: window moved between the measure and the check; measuring again");
-          lastFp = null;
-          state = { walkedFromTop: false, nudgePx: 0, scrolled: false, walked: false };
+      const fp = fingerprint(lines);
+      const pictureMoved = lastFp === null || fp !== lastFp;
+      const found = findRun(lines, opts.query);
+      if (found === "ambiguous") {
+        if (fromMemory) {
+          deps.log("locate: memory is ambiguous in this window; reading the window");
+          words = undefined;
           continue;
         }
-        return fail("window_moved", "The browser moved twice during the measure. Locate again.");
+        return fail("ambiguous_query", "That phrase is on screen more than once. Pass a longer query.");
       }
-      let screenBox = shiftBox(box, win);
-      const neighbors = neighborTexts(lines, found);
-      if (opts.verify) {
-        const checked = await verifyBox(screenBox, opts, neighbors, deps);
-        if (!checked.ok) {
-          const tight = unionBox(lines, found, 0, { w: win.w, h: win.h });
-          if (!tight) return checked;
-          const tightScreen = shiftBox(tight, win);
-          const retry = await verifyBox(tightScreen, opts, neighbors, deps);
-          if (!retry.ok) return retry;
-          box = tight;
-          screenBox = tightScreen;
+
+      let placement: { band: "ok" | "low" | "high" } | null = null;
+      let box: Box | null = null;
+      if (found) {
+        box = unionBox(lines, found, opts.pad, { w: win.w, h: win.h });
+        if (box) placement = { band: bandOf(box, win.h, opts.pad) };
+      }
+
+      const decision = seek(placement, pictureMoved, state, win.h);
+      if (fromMemory && decision.action.type === "fail") {
+        deps.log("locate: memory gave up the page; reading the window");
+        words = undefined;
+        continue;
+      }
+
+      if (decision.action.type === "accept") {
+        if (!found || !box) {
+          if (fromMemory) {
+            words = undefined;
+            continue;
+          }
+          return fail("quote_not_found", "The phrase left the screen before the box was settled.");
         }
+        const again = chooseWindow(await deps.clients(), opts);
+        if (!again || !sameWindow(again, win)) {
+          if (geomRetries++ < 1) {
+            deps.log("locate: window moved between the measure and the check; measuring again");
+            lastFp = null;
+            state = { walkedFromTop: false, nudgePx: 0, scrolled: false, walked: false };
+            continue frame;
+          }
+          return fail("window_moved", "The browser moved twice during the measure. Locate again.");
+        }
+        let screenBox = shiftBox(box, win);
+        const neighbors = neighborTexts(lines, found);
+        if (opts.verify) {
+          const checked = await verifyBox(screenBox, opts, neighbors, deps);
+          if (!checked.ok) {
+            const tight = unionBox(lines, found, 0, { w: win.w, h: win.h });
+            let failed: LocateErr | { ok: true } = checked;
+            if (tight) {
+              const tightScreen = shiftBox(tight, win);
+              const retry = await verifyBox(tightScreen, opts, neighbors, deps);
+              if (retry.ok) {
+                box = tight;
+                screenBox = tightScreen;
+                failed = { ok: true };
+              } else {
+                failed = retry;
+              }
+            }
+            if (!failed.ok) {
+              if (fromMemory) {
+                deps.log("locate: memory crop failed; reading the window");
+                words = undefined;
+                continue;
+              }
+              return failed;
+            }
+          }
+        }
+        lastFp = fp;
+        state = decision.state;
+        const screen = await deps.screen();
+        const uv = toUv(screenBox, screen);
+        const text = matchedText(lines, found);
+        deps.log(`locate: ${screenBox.w}x${screenBox.h} at ${screenBox.x},${screenBox.y}`);
+        return {
+          ok: true,
+          source: "web",
+          ...uv,
+          matchedText: text,
+          screen,
+          window: { class: win.className, title: win.title, x: win.x, y: win.y, w: win.w, h: win.h },
+          confidence: meanConfidence(lines, found),
+          method: fromMemory ? "screen-text-memory" : opts.opened ? "text-fragment+ocr" : "tesseract",
+          evidence: { lineHint: text.slice(0, 180), nudgedPx: state.nudgePx, screenBox },
+        };
       }
-      const screen = await deps.screen();
-      const uv = toUv(screenBox, screen);
-      const text = matchedText(lines, found);
-      deps.log(`locate: ${screenBox.w}x${screenBox.h} at ${screenBox.x},${screenBox.y}`);
-      return {
-        ok: true,
-        source: "web",
-        ...uv,
-        matchedText: text,
-        screen,
-        window: { class: win.className, title: win.title, x: win.x, y: win.y, w: win.w, h: win.h },
-        confidence: meanConfidence(lines, found),
-        method: opts.opened ? "text-fragment+ocr" : "tesseract",
-        evidence: { lineHint: text.slice(0, 180), nudgedPx: state.nudgePx, screenBox },
-      };
-    }
 
-    if (decision.action.type === "fail") {
-      return fail(
-        "quote_not_found",
-        seenPaint
-          ? "The phrase was not on screen after one walk from the top of the page."
-          : "The page never painted any text.",
-      );
-    }
+      if (decision.action.type === "fail") {
+        return fail(
+          "quote_not_found",
+          seenPaint
+            ? "The phrase was not on screen after one walk from the top of the page."
+            : "The page never painted any text.",
+        );
+      }
 
-    const moved =
-      decision.action.type === "top"
-        ? await deps.scrollTop(win.address)
-        : await deps.scrollBy(win.address, decision.action.dy);
+      lastFp = fp;
+      state = decision.state;
+      const moved =
+        decision.action.type === "top"
+          ? await deps.scrollTop(win.address)
+          : await deps.scrollBy(win.address, decision.action.dy);
     if (!moved) {
       return fail("focus_failed", "Could not focus the browser, so the page was not scrolled.");
     }
     deps.log(decision.action.type === "top" ? "locate: scroll to top" : `locate: scroll ${decision.action.dy}`);
     await deps.sleep(280);
+    continue frame;
+    }
   }
 
   return fail("timeout", `No settled box within ${Math.round(opts.timeoutMs / 1000)}s.`);

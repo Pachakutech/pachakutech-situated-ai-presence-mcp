@@ -161,7 +161,7 @@ A restart of the daemon drops every live id. The log is
 output. The origin is the top left. `v` grows downward. `u`, `v`, `w`,
 and `h` are fractions of that output. A box that begins on screen and
 runs past the far edge is cropped. The default duration is 5 seconds.
-The daemon clamps the value to the closed range from 1 to 60. A second
+The daemon clamps the value to the closed range from 1 to 360. A second
 call replaces the box and restarts the tint. The tint is a low warm
 layer drawn under the figure. After it fades, the rectangle is
 remembered and does not, by itself, hold the arms up. The log line
@@ -192,6 +192,17 @@ height. On the reference session that output is the Wayland screen,
 1920×1080. `hyprctl monitors` reports the size. `grim` photographs it,
 and `grim -g "x,y wxh"` crops.
 
+`presence locate` does that measurement for a phrase of words already
+on the glass. It asks the daemon for the latest screen-text message
+first. The message is one capture, stored as columns, and a query reads
+the latest complete one. The present thread does not wait for the
+recognizer. One hit inside the chosen window supplies the words. The
+method on that success is `screen-text-memory`. The crop is photographed
+again before a tint, and a quiet message, two hits, or a failed crop
+continues with the screenshot of the window. `presence screen-text`
+prints the message. The words stay in the process for about eight
+seconds, and the book is cleared when the session is hidden.
+
 `spawn` accepts `--context`, `--style`, and `--artifact`. Context and
 style are recorded. They do not restyle the mesh. An artifact id does
 not replace the body with that cloud. `addArtifact` holds a local
@@ -210,8 +221,10 @@ running gesture is the clip described above. The comment in the speech
 log about applying a pose code through linear-blend or dual-quaternion
 skinning records that older design. It is not a failure of the clip path.
 
-Resolving a phrase such as "the red banner" to a rectangle is the
-caller's measurement. The daemon receives `u`, `v`, `w`, and `h`.
+A description that is not the words on the glass, such as "the red
+banner", is still the caller's measurement. The daemon receives `u`,
+`v`, `w`, and `h` for that box. A phrase of visible text is the locate
+path above.
 
 This export of the mesh has no viseme morph targets. A later export that
 contains `viseme_aa` and the rest of that set will drive them. Until

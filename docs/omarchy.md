@@ -34,7 +34,9 @@ them, per the Model Context Protocol.
 
 ## What is on the session
 
-The six tools are callable. With the daemon up, the binding uses
+The tools in the README table are callable. Locate can read the
+daemon's latest screen-text message; `presence screen-text` prints it.
+With the daemon up, the binding uses
 `$XDG_RUNTIME_DIR/pachakutech/presence.sock`. With it down, the binding
 falls back to `notify-send` and
 `~/.local/state/pachakutech-presence/log.jsonl`. The daemon names the

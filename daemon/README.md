@@ -37,6 +37,11 @@ The compute shaders are
   build running. That build exhausted Hyprland's memory.
 - `src/screen_heat.rs`, `src/placement.rs` — the seat. The disc seeks a
   cold cell. A visible mark is stamped hot.
+- `src/screen_text.rs` — perceptual memory of the words on the glass.
+  Its own thread takes one reused shared-memory screencopy, runs
+  Tesseract, and posts one column message. The present thread does not
+  wait. `queryScreenText` returns the latest message. The book is
+  cleared when the session is hidden.
 - `src/speech/` — Piper and Rhubarb. The model path and the rhubarb
   binary are environment variables copied at start. See the situated
   presence note for the names and for what the mouth does when the GLB
