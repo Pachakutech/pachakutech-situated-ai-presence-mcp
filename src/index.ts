@@ -231,6 +231,8 @@ server.registerTool(
     description:
       "One call. Finds the phrase, checks the crop, tints it, then speaks text. " +
       "The tint lasts durationSeconds (default 90, max 360). A locate miss does not tint and does not speak. " +
+      "cues move the mark as the sentences play. Each cue names the sentence that opens a beat and the passage to tint. " +
+      "The first passage is found before any audio. The tint stays up for the utterance. " +
       "One rate-limit tick. text is the spoken line, not a summary of the matched phrase. " +
       "Web can scroll. PDF opens Evince and accepts page. Terminal, doc, and ide read a window already up. " +
       "ide is the editor window (code, code-oss, cursor, zed, jetbrains). Reveal the line. It does not type.",
@@ -238,15 +240,30 @@ server.registerTool(
       presenceId: z.string().describe("Live presence from spawnPresence"),
       text: z.string().describe("The spoken line, the same words as the written reply"),
       ...regionFields,
+      query: z.string().optional().describe("Phrase, or `start ... end` for a passage. Omit when cues are set"),
+      cues: z
+        .array(
+          z.object({
+            at: z.string().describe("The sentence that opens this beat, as it appears in text"),
+            query: z.string().describe("Passage to tint while that sentence plays"),
+          }),
+        )
+        .optional()
+        .describe("Move the mark with the sentences. The first passage is found before any audio. The tint stays for the utterance"),
     },
   },
-  async ({ presenceId, text, source, query, uri, page, pad, timeoutS, noOpen, windowClass, windowTitle, durationSeconds }) => {
+  async ({ presenceId, text, source, query, uri, page, pad, timeoutS, noOpen, windowClass, windowTitle, durationSeconds, cues }) => {
     policy.assertAllowed("highlightAndSpeak");
     policy.assertInstanceExists(presenceId);
+    if (!cues?.length && !query?.trim()) {
+      return {
+        content: [{ type: "text", text: JSON.stringify({ ok: false, error: "bad_args", hint: "Pass query or cues." }) }],
+      };
+    }
     const result = await fuseRegion(
       {
         source,
-        query,
+        query: query ?? "",
         uri,
         page,
         pad: pad ?? 12,
@@ -256,6 +273,7 @@ server.registerTool(
         windowClass,
         windowTitle,
         seconds: durationSeconds,
+        cues,
       },
       presenceId,
       text,

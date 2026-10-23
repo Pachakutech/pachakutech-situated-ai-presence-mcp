@@ -79,6 +79,28 @@ impl Registry {
         self.interests.visible(now)
     }
 
+    pub fn hold_interest_for_speech(&mut self, presence_id: &str) {
+        self.interests.hold_for_speech(presence_id);
+    }
+
+    /// Hide a mark that was held for the utterance. The box stays.
+    pub fn conceal_speech_interest(&mut self, presence_id: &str, now: Instant) -> bool {
+        let hid = self.interests.conceal_if_speech_held(presence_id, now);
+        if hid {
+            println!("[highlight] {presence_id} speech ended");
+        }
+        hid
+    }
+
+    /// Hide a speech-held tint while a page jumps. The utterance keeps playing.
+    pub fn conceal_for_jump(&mut self, presence_id: &str, now: Instant) -> bool {
+        let hid = self.interests.conceal_if_speech_held(presence_id, now);
+        if hid {
+            println!("[highlight] {presence_id} down for the jump");
+        }
+        hid
+    }
+
     pub fn set_avatar_available(&mut self, available: bool) {
         self.avatar_available = available;
     }

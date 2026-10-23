@@ -90,6 +90,69 @@ fn bad_rhubarb_json_is_rejected() {
 }
 
 #[test]
+fn sentences_split_on_stops_and_keep_abbreviations() {
+    assert_eq!(split_sentences("Hello. Next sentence."), vec!["Hello.", "Next sentence."]);
+    assert_eq!(split_sentences("Mr. Smith left. He waved."), vec!["Mr. Smith left.", "He waved."]);
+    assert_eq!(split_sentences("See e.g. cats. Dogs too."), vec!["See e.g. cats.", "Dogs too."]);
+    assert_eq!(split_sentences("Pi is 3.14 today. Yes."), vec!["Pi is 3.14 today.", "Yes."]);
+    assert_eq!(split_sentences("Wait... Then go."), vec!["Wait...", "Then go."]);
+    assert_eq!(split_sentences("No stop here"), vec!["No stop here"]);
+    assert_eq!(split_sentences("Hello!"), vec!["Hello!"]);
+    assert_eq!(split_sentences("Really? Yes."), vec!["Really?", "Yes."]);
+    assert_eq!(split_sentences("She said \"Go.\" Then she sat."), vec!["She said \"Go.\"", "Then she sat."]);
+    let long = format!("{}, and the rest of the thought keeps going.", "word ".repeat(80));
+    let parts = split_sentences(&long);
+    assert!(parts.len() >= 2, "{parts:?}");
+    assert!(parts.iter().all(|p| p.chars().count() <= MAX_SENTENCE_CHARS), "{parts:?}");
+}
+
+#[test]
+fn two_sentences_play_in_order_and_the_second_is_prepared_during_the_first() {
+    let f = fake("sentences", true);
+    let names = morph_names();
+    let mut sp = Speaker::new(f.cfg.clone());
+    sp.speak("Alpha one. Beta two.").unwrap();
+    poll_until(&mut sp, &names, Duration::from_secs(5), |p| matches!(p, SpeechPoll::Active(_))).expect("first clip");
+    let t = Instant::now();
+    while calls(&f, "piper") < 2 && t.elapsed() < Duration::from_secs(2) { let _ = sp.poll(&names); std::thread::sleep(Duration::from_millis(20)); }
+    assert_eq!(calls(&f, "piper"), 2, "the next sentence is prepared while the first plays");
+    assert_eq!(calls(&f, "player"), 1, "the second clip waits for the first to finish");
+    let t = Instant::now();
+    while calls(&f, "player") < 2 && t.elapsed() < Duration::from_secs(6) { let _ = sp.poll(&names); std::thread::sleep(Duration::from_millis(30)); }
+    assert_eq!(calls(&f, "player"), 2, "the second sentence plays");
+    let view = sp.board().json();
+    assert_eq!(view["count"], 2);
+    assert_eq!(view["phase"], "play");
+    assert_eq!(view["index"], 1);
+}
+
+#[test]
+fn a_failed_sentence_is_skipped_and_the_utterance_continues() {
+    let f = fake("skipfail", true);
+    let log = f.dir.join("calls.log");
+    let wav = f.dir.join("fixture.wav");
+    script(
+        &f.dir.join("piper"),
+        &format!(
+            "echo piper >> {log:?}\ntext=$(cat)\ncase \"$text\" in *Boom*) exit 1;; esac\nwhile [ $# -gt 0 ]; do [ \"$1\" = -f ] && out=$2; shift; done\ncp {wav:?} \"$out\""
+        ),
+    );
+    let names = morph_names();
+    let mut sp = Speaker::new(f.cfg.clone());
+    sp.speak("Boom. Then the next sentence.").unwrap();
+    let t = Instant::now();
+    while calls(&f, "player") < 1 && t.elapsed() < Duration::from_secs(5) {
+        let _ = sp.poll(&names);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(calls(&f, "player"), 1, "the sentence after a failure still plays");
+    assert!(calls(&f, "piper") >= 2, "both sentences were attempted");
+    let view = sp.board().json();
+    assert_eq!(view["index"], 1);
+    assert_eq!(view["phase"], "play");
+}
+
+#[test]
 fn text_normalization_and_cache_key() {
     assert_eq!(normalize_text("  Hello \n  world ").unwrap(), "Hello world");
     assert!(normalize_text("   ").is_err());

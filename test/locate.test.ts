@@ -138,6 +138,10 @@ test("a bottom-parked passage is nudged up, and a missing one is given up", () =
   missing = { walkedFromTop: true, nudgePx: 0, scrolled: true, walked: true };
   action = seek(null, false, missing, windowH).action;
   assert.deepEqual(action, { type: "fail", error: "quote_not_found" });
+
+  const fine = seek(null, true, { walkedFromTop: false, nudgePx: 0, scrolled: false, walked: false }, windowH, 0.25);
+  assert.equal(fine.action.type, "scroll");
+  if (fine.action.type === "scroll") assert.equal(fine.action.dy, Math.max(200, Math.round(windowH * 0.25)));
 });
 
 test("a word stays in the chosen window, shifts to its origin, and drops under an occluder", () => {

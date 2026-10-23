@@ -23,6 +23,8 @@ Acceptance is not hearing. The daemon copies its environment once, at start. The
 
 **Show the phrase while you speak.** `highlightAndSpeak` is the teaching call. Pass the live `presenceId`, `source` (`web`, `pdf`, `terminal`, `doc`, or `ide`), `query`, and `text`. `text` is the spoken line, the same words as the written reply. The tool finds the phrase, checks the crop, tints it, then speaks. One call, one rate-limit tick. The tint defaults to 90 seconds so a paragraph fits under it. Pass `durationSeconds` to override. The ceiling is 360. `manifestHighlight` with no duration stays 5 seconds.
 
+When one reply walks through more than one passage, pass `cues`. A cue is the sentence that opens that beat, and the passage to tint while the sentence plays. The runtime splits the reply, finds the first passage before any audio, and moves the mark when that clip is ready. The tint comes down while the page jumps to the next passage, and the new box goes up when the crop passes. The tint stays for the utterance and drops when the voice ends.
+
 If the phrase cannot be found, the tool returns the locate error. It does not tint, and it does not speak. Speak with no mark only by calling `animatePresence` yourself after that error.
 
 `manifestHighlightFromQuery` is the same find and tint with no speech, for a caller that speaks on its own.

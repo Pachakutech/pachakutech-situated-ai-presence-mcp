@@ -171,3 +171,9 @@ Together these usually matter more than a Rust rewrite of Piper.
 ---
 
 **Verdict:** The approach is sound. Implement it as a **small speech-orchestrator state machine** with sentence split, depth-1 prefetch, per-sentence Rhubarb, and generation-based cancel—optionally add a **warm external Piper worker** later for the remaining cold-start cost, without folding Piper into the daemon binary.
+
+## As built
+
+The daemon splits an utterance on `.?!` (abbreviations, initials, decimals, and an ellipsis stay put) and plays one clip at a time. The next sentence is prepared while the current one plays. One ready bundle is the cap. A new speak cancels the generation. Each clip keeps its own audio clock, so viseme cues are not offset onto a single timeline. `querySpeech` returns the generation, the phase (`synth`, `play`, `gap`, `idle`), and the sentences. Phase C, the warm Piper worker, is not in this build.
+
+A teaching reply can pass cues. Each cue names a sentence and a passage. The locator finds the first passage before any audio. A follower polls `querySpeech` and looks up the next passage while the previous sentence plays, then moves the mark when the crop passes. One search at a time. On the web the open tab jumps to the phrase, the tint comes down for that jump, and a miss leaves it down. A mark placed this way stays up until the utterance ends. See `docs/plans/cue_jump.md`.

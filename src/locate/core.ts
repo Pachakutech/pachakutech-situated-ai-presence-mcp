@@ -343,6 +343,7 @@ export function seek(
   pictureMoved: boolean,
   state: SeekState,
   windowH: number,
+  stepRatio = 0.7,
 ): { action: SeekAction; state: SeekState } {
   if (placement) {
     // Already on screen: only a short nudge, the fragment case. Found by walking:
@@ -364,7 +365,7 @@ export function seek(
     }
     return { action: { type: "fail", error: "quote_not_found" }, state };
   }
-  const dy = Math.max(200, Math.round(windowH * 0.7));
+  const dy = Math.max(200, Math.round(windowH * stepRatio));
   return { action: { type: "scroll", dy }, state: { ...state, scrolled: true, walked: true } };
 }
 

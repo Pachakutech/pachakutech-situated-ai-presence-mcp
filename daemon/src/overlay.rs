@@ -2763,6 +2763,11 @@ fn tick_avatar(
     }
     let started = Instant::now();
     avatar.advance(dt);
+    if avatar.take_speech_ended() {
+        if let Some(id) = avatar.bound_presence.clone() {
+            server.conceal_speech_interest(&id);
+        }
+    }
     if !avatar.demo_motion {
         let highlight = avatar
             .bound_presence
@@ -2878,7 +2883,8 @@ pub fn run(
     let text_memory = std::sync::Arc::new(crate::screen_text::TextMemory::new(std::sync::Arc::new(
         crate::screen_text::GlassStamp::new(),
     )));
-    let mut server = SocketServer::bind(socket_path, text_memory.clone()).map_err(|e| format!("socket bind: {e}"))?;
+    let speech_board = avatar.as_ref().map(|a| a.speech.board()).unwrap_or_else(crate::speech::SpeechBoard::new);
+    let mut server = SocketServer::bind(socket_path, text_memory.clone(), speech_board).map_err(|e| format!("socket bind: {e}"))?;
     let _pid = crate::socket::PidFile::create(socket_path).map_err(|e| format!("pid file: {e}"))?;
     println!("[socket] listening on {}", socket_path.display());
     server.set_avatar_available(avatar.is_some());

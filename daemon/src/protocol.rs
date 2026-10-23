@@ -22,6 +22,10 @@ pub enum Proposal {
         h: f32,
         #[serde(rename = "durationSeconds")]
         duration_seconds: u32,
+        /// The tint stays up for this presence's utterance, then drops.
+        /// `durationSeconds` remains the safety cap if speech never finishes.
+        #[serde(rename = "untilSpeech", default)]
+        until_speech: bool,
     },
     #[serde(rename = "spawnPresence")]
     SpawnPresence {
@@ -129,6 +133,21 @@ pub enum Proposal {
         #[serde(rename = "proposalId")]
         proposal_id: String,
     },
+    /// Which sentence of the current utterance is playing. Does not tint or speak.
+    #[serde(rename = "querySpeech")]
+    QuerySpeech {
+        #[serde(rename = "proposalId")]
+        proposal_id: String,
+    },
+    /// Drop a speech-held tint for the moment a page jumps. The box stays.
+    /// The voice is not stopped. The next mark raises the tint again.
+    #[serde(rename = "concealHighlight")]
+    ConcealHighlight {
+        #[serde(rename = "proposalId")]
+        proposal_id: String,
+        #[serde(rename = "presenceId")]
+        presence_id: String,
+    },
 }
 
 /// Applied on the overlay thread after the socket pump. Not a GPU command.
@@ -162,7 +181,9 @@ impl Proposal {
             | Proposal::StopPresence { proposal_id, .. }
             | Proposal::AvatarStop { proposal_id }
             | Proposal::AvatarWalk { proposal_id, .. }
-            | Proposal::QueryScreenText { proposal_id } => proposal_id,
+            | Proposal::QueryScreenText { proposal_id }
+            | Proposal::QuerySpeech { proposal_id }
+            | Proposal::ConcealHighlight { proposal_id, .. } => proposal_id,
         }
     }
 }

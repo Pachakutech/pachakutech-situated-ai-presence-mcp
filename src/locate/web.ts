@@ -79,6 +79,10 @@ export type WebOpts = {
   verify: boolean;
   /** Set when this process launched the page, so a text fragment may have scrolled it. */
   opened: boolean;
+  /** Ask the open tab to scroll to the phrase before any walk. */
+  fragmentJump?: boolean;
+  /** Fraction of the window for an off-screen step. Default 0.7. */
+  stepRatio?: number;
 };
 
 export type Deps = {
@@ -91,6 +95,8 @@ export type Deps = {
   scrollBy(address: string, dy: number): Promise<boolean>;
   scrollTop(address: string): Promise<boolean>;
   open(uri: string): Promise<void>;
+  /** Move the already-open tab to the phrase. False when no debugger is listening. */
+  jump?(uri: string, query: string): Promise<boolean>;
   sleep(ms: number): Promise<void>;
   now(): number;
   log(line: string): void;
@@ -138,6 +144,14 @@ export async function locateWeb(opts: WebOpts, deps: Deps): Promise<LocateResult
       const detail = error instanceof Error ? error.message : String(error);
       return fail("browser_open_failed", detail);
     }
+  }
+
+  let fragmentLanded = opts.opened;
+  if (opts.fragmentJump && opts.noOpen && opts.uri && deps.jump) {
+    const jumped = await deps.jump(opts.uri, opts.query);
+    fragmentLanded = fragmentLanded || jumped;
+    deps.log(jumped ? "locate: fragment jump" : "locate: fragment jump unavailable");
+    if (jumped) await deps.sleep(800);
   }
 
   let state: SeekState = { walkedFromTop: false, nudgePx: 0, scrolled: false, walked: false };
@@ -211,7 +225,7 @@ export async function locateWeb(opts: WebOpts, deps: Deps): Promise<LocateResult
         if (box) placement = { band: bandOf(box, win.h, opts.pad) };
       }
 
-      const decision = seek(placement, pictureMoved, state, win.h);
+      const decision = seek(placement, pictureMoved, state, win.h, opts.stepRatio ?? 0.7);
       if (fromMemory && decision.action.type === "fail") {
         deps.log("locate: memory gave up the page; reading the window");
         words = undefined;
@@ -278,7 +292,7 @@ export async function locateWeb(opts: WebOpts, deps: Deps): Promise<LocateResult
           screen,
           window: { class: win.className, title: win.title, x: win.x, y: win.y, w: win.w, h: win.h },
           confidence: meanConfidence(lines, found),
-          method: fromMemory ? "screen-text-memory" : opts.opened ? "text-fragment+ocr" : "tesseract",
+          method: fromMemory ? "screen-text-memory" : fragmentLanded ? "text-fragment+ocr" : "tesseract",
           evidence: { lineHint: text.slice(0, 180), nudgedPx: state.nudgePx, screenBox },
         };
       }

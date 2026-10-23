@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug)]
@@ -73,15 +73,84 @@ impl SpeechConfig {
 }
 
 enum Msg {
-    Ready { id: u64, bundle: Bundle },
-    Failed { id: u64, error: String },
+    Ready { id: u64, index: usize, bundle: Bundle },
+    Failed { id: u64, index: usize, error: String },
 }
-struct Job { id: u64, text: String }
+struct Job { id: u64, index: usize, text: String }
 
 struct Playing {
+    index: usize,
     face: faceanim::FaceAnim,
     start: Instant,
     child: Option<Child>,
+}
+
+/// One utterance broken into sentence clips. At most one bundle is ready
+/// ahead of the clip that is playing.
+struct Course {
+    id: u64,
+    sentences: Vec<String>,
+    /// Next sentence index to send to the worker.
+    next_index: usize,
+    inflight: Option<usize>,
+    ready: Option<(usize, Bundle)>,
+    /// A clip has started. Gaps after that keep the mouth in the utterance.
+    started: bool,
+    /// The clip that most recently started. A gap keeps reporting this index,
+    /// so a follower does not look two sentences ahead while the next one cooks.
+    last_index: Option<usize>,
+    done: bool,
+}
+
+/// What `querySpeech` returns. The render thread publishes it; the socket reads it.
+#[derive(Clone, Debug)]
+pub struct SpeechView {
+    pub generation: u64,
+    pub phase: &'static str,
+    pub index: Option<usize>,
+    pub count: usize,
+    pub sentence: String,
+    pub sentences: Vec<String>,
+}
+
+impl SpeechView {
+    fn idle() -> Self {
+        Self { generation: 0, phase: "idle", index: None, count: 0, sentence: String::new(), sentences: Vec::new() }
+    }
+
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "generation": self.generation,
+            "phase": self.phase,
+            "index": self.index,
+            "count": self.count,
+            "sentence": self.sentence,
+            "sentences": self.sentences,
+        })
+    }
+}
+
+#[derive(Clone)]
+pub struct SpeechBoard {
+    inner: Arc<Mutex<SpeechView>>,
+}
+
+impl SpeechBoard {
+    pub fn new() -> Self {
+        Self { inner: Arc::new(Mutex::new(SpeechView::idle())) }
+    }
+
+    fn publish(&self, view: SpeechView) {
+        *self.inner.lock().expect("speech board") = view;
+    }
+
+    pub fn json(&self) -> serde_json::Value {
+        self.inner.lock().expect("speech board").json()
+    }
+}
+
+impl Default for SpeechBoard {
+    fn default() -> Self { Self::new() }
 }
 
 pub enum SpeechPoll {
@@ -98,6 +167,8 @@ pub struct Speaker {
     latest: Arc<AtomicU64>,
     next_id: u64,
     playing: Option<Playing>,
+    course: Option<Course>,
+    board: SpeechBoard,
     finished_pending: bool,
     warned_no_visemes: bool,
     pub last_error: Option<String>,
@@ -117,7 +188,15 @@ fn player_argv(cfg: &SpeechConfig) -> Option<Vec<String>> {
 
 impl Speaker {
     pub fn new(cfg: SpeechConfig) -> Speaker {
-        Speaker { cfg: Arc::new(cfg), tx: None, rx: None, latest: Arc::new(AtomicU64::new(0)), next_id: 1, playing: None, finished_pending: false, warned_no_visemes: false, last_error: None }
+        Speaker {
+            cfg: Arc::new(cfg), tx: None, rx: None, latest: Arc::new(AtomicU64::new(0)), next_id: 1,
+            playing: None, course: None, board: SpeechBoard::new(), finished_pending: false,
+            warned_no_visemes: false, last_error: None,
+        }
+    }
+
+    pub fn board(&self) -> SpeechBoard {
+        self.board.clone()
     }
 
     fn ensure_worker(&mut self) {
@@ -131,8 +210,8 @@ impl Speaker {
                 if latest.load(Ordering::SeqCst) != job.id { continue; } // superseded while queued
                 let cancelled = || latest.load(Ordering::SeqCst) != job.id;
                 let msg = match pipeline::prepare(&cfg, &job.text, &cancelled) {
-                    Ok(bundle) => Msg::Ready { id: job.id, bundle },
-                    Err(error) => Msg::Failed { id: job.id, error },
+                    Ok(bundle) => Msg::Ready { id: job.id, index: job.index, bundle },
+                    Err(error) => Msg::Failed { id: job.id, index: job.index, error },
                 };
                 if mtx.send(msg).is_err() { break; }
             }
@@ -141,23 +220,80 @@ impl Speaker {
         self.rx = Some(mrx);
     }
 
-    fn stop_playback(&mut self) {
+    /// End the clip that is playing. `utterance_done` asks the next poll to
+    /// return the face to neutral. A sentence boundary does not.
+    fn end_clip(&mut self, utterance_done: bool) {
         if let Some(mut p) = self.playing.take() {
             if let Some(c) = p.child.as_mut() { let _ = c.kill(); let _ = c.wait(); }
-            self.finished_pending = true;
+        }
+        if utterance_done { self.finished_pending = true; }
+    }
+
+    fn publish(&mut self) {
+        let view = match &self.course {
+            Some(c) => {
+                let phase = if c.done {
+                    "idle"
+                } else if self.playing.is_some() {
+                    "play"
+                } else if c.started {
+                    "gap"
+                } else {
+                    "synth"
+                };
+                let index = self.playing.as_ref().map(|p| p.index).or(if c.started { c.last_index } else { c.inflight });
+                let sentence = index.and_then(|i| c.sentences.get(i)).cloned().unwrap_or_default();
+                SpeechView {
+                    generation: c.id, phase, index, count: c.sentences.len(), sentence,
+                    sentences: c.sentences.clone(),
+                }
+            }
+            None => SpeechView { generation: self.latest.load(Ordering::SeqCst), ..SpeechView::idle() },
+        };
+        self.board.publish(view);
+    }
+
+    fn kick(&mut self) {
+        let Some(course) = self.course.as_mut() else { return };
+        if course.done || course.inflight.is_some() || course.ready.is_some() { return; }
+        if course.next_index >= course.sentences.len() { return; }
+        let index = course.next_index;
+        let text = course.sentences[index].clone();
+        let id = course.id;
+        course.next_index += 1;
+        course.inflight = Some(index);
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(Job { id, index, text });
         }
     }
 
+    fn finish_course(&mut self) {
+        if let Some(course) = self.course.as_mut() {
+            course.done = true;
+            course.inflight = None;
+            course.ready = None;
+        }
+        self.finished_pending = true;
+    }
+
     /// Queue an utterance. Any current audio, face motion, or pending job is cancelled first.
+    /// The text is split into sentences. The first clip plays while the next one is prepared.
     pub fn speak(&mut self, text: &str) -> Result<(), String> {
         let normalized = pipeline::normalize_text(text)?;
-        self.stop_playback();
+        let sentences = pipeline::split_sentences(&normalized);
+        if sentences.is_empty() { return Err("empty speech text".into()); }
+        self.end_clip(self.playing.is_some());
         let id = self.next_id;
         self.next_id += 1;
         self.latest.store(id, Ordering::SeqCst);
         self.ensure_worker();
         self.last_error = None;
-        self.tx.as_ref().expect("worker").send(Job { id, text: normalized }).map_err(|_| "speech worker is gone".to_string())
+        self.course = Some(Course {
+            id, sentences, next_index: 0, inflight: None, ready: None, started: false, last_index: None, done: false,
+        });
+        self.kick();
+        self.publish();
+        Ok(())
     }
 
     /// Interrupt: stops audio and face together and cancels any in-flight synthesis.
@@ -165,14 +301,18 @@ impl Speaker {
         let id = self.next_id;
         self.next_id += 1;
         self.latest.store(id, Ordering::SeqCst); // no job carries this id: cancels pending work
-        self.stop_playback();
+        self.end_clip(self.playing.is_some());
+        self.course = None;
+        // Even a stop during synthesis ends the utterance, so a speech-held tint can drop.
+        self.finished_pending = true;
+        self.publish();
     }
 
     pub fn audio_running(&mut self) -> bool {
         self.playing.as_mut().and_then(|p| p.child.as_mut()).map(|c| matches!(c.try_wait(), Ok(None))).unwrap_or(false)
     }
 
-    fn start_playback(&mut self, bundle: Bundle) {
+    fn start_playback(&mut self, index: usize, bundle: Bundle) {
         let child = match player_argv(&self.cfg) {
             Some(argv) => match Command::new(&argv[0]).args(&argv[1..]).arg(&bundle.wav).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
                 Ok(c) => Some(c),
@@ -180,8 +320,16 @@ impl Speaker {
             },
             None => { self.report("no audio player found (pw-play, paplay, aplay, ffplay); set PRESENCE_AUDIO_PLAYER; animating silently".into()); None }
         };
-        println!("[speech] playing {} ({:.2}s, cache {})", bundle.dir.display(), bundle.face.duration, if bundle.cache_hit { "hit" } else { "miss" });
-        self.playing = Some(Playing { face: bundle.face, start: Instant::now(), child });
+        let count = self.course.as_ref().map(|c| c.sentences.len()).unwrap_or(1);
+        println!(
+            "[speech] sentence {}/{} playing {} ({:.2}s, cache {})",
+            index + 1, count, bundle.dir.display(), bundle.face.duration, if bundle.cache_hit { "hit" } else { "miss" }
+        );
+        if let Some(course) = self.course.as_mut() {
+            course.started = true;
+            course.last_index = Some(index);
+        }
+        self.playing = Some(Playing { index, face: bundle.face, start: Instant::now(), child });
     }
 
     fn report(&mut self, e: String) {
@@ -189,43 +337,100 @@ impl Speaker {
         self.last_error = Some(e);
     }
 
-    /// Called once per avatar tick on the render thread. Never blocks.
-    pub fn poll(&mut self, morph_names: &[String]) -> SpeechPoll {
+    fn accept_messages(&mut self) {
         let mut incoming = vec![];
         if let Some(rx) = &self.rx { while let Ok(m) = rx.try_recv() { incoming.push(m); } }
+        let current = self.latest.load(Ordering::SeqCst);
         for m in incoming {
             match m {
-                Msg::Ready { id, bundle } if id == self.latest.load(Ordering::SeqCst) => self.start_playback(bundle),
-                Msg::Failed { id, error } if id == self.latest.load(Ordering::SeqCst) => self.report(error),
-                _ => {} // stale
+                Msg::Ready { id, index, bundle } if id == current => {
+                    if let Some(course) = self.course.as_mut() {
+                        if course.inflight == Some(index) { course.inflight = None; }
+                        if !course.done && course.ready.is_none() { course.ready = Some((index, bundle)); }
+                    }
+                }
+                Msg::Failed { id, index, error } if id == current => {
+                    let mut skipped = false;
+                    if let Some(course) = self.course.as_mut() {
+                        if course.inflight == Some(index) {
+                            course.inflight = None;
+                            skipped = true;
+                        }
+                    }
+                    let count = self.course.as_ref().map(|c| c.sentences.len()).unwrap_or(0);
+                    self.report(format!("sentence {}/{} failed: {error}", index + 1, count));
+                    if skipped { self.kick(); }
+                }
+                _ => {}
             }
         }
-        if let Some(p) = self.playing.as_mut() {
+    }
+
+    fn clip_finished(&mut self) -> bool {
+        let Some(p) = self.playing.as_mut() else { return false };
+        let elapsed = (p.start.elapsed().as_secs_f32() - self.cfg.latency.as_secs_f32()).max(0.0);
+        let audio_alive = p.child.as_mut().map(|c| matches!(c.try_wait(), Ok(None)));
+        let ended_early = audio_alive == Some(false) && elapsed + 0.15 < p.face.duration;
+        let done = elapsed >= p.face.duration + 0.05 && (audio_alive != Some(true) || elapsed > p.face.duration + 1.5);
+        ended_early || done
+    }
+
+    /// Advance the sentence course. A finished clip does not end the utterance
+    /// while another sentence is queued or still being prepared.
+    fn drive(&mut self) {
+        if self.clip_finished() { self.end_clip(false); }
+        let ready = self.course.as_mut().and_then(|c| if c.done { None } else { c.ready.take() });
+        if self.playing.is_none() {
+            if let Some((index, bundle)) = ready {
+                self.start_playback(index, bundle);
+                self.kick();
+            }
+        } else if let Some(course) = self.course.as_mut() {
+            // Put an unused bundle back. Playback of the current clip is still going.
+            if course.ready.is_none() { course.ready = ready; }
+        }
+        let finished = match &self.course {
+            Some(c) if !c.done && self.playing.is_none() && c.inflight.is_none() && c.ready.is_none() && c.next_index >= c.sentences.len() => true,
+            _ => false,
+        };
+        if finished { self.finish_course(); }
+    }
+
+    fn active_frame(&mut self, morph_names: &[String], elapsed: f32) -> SpeechPoll {
+        let sample = self.playing.as_ref().map(|p| p.face.sample(elapsed)).unwrap_or_default();
+        let mut morphs = vec![0.0; morph_names.len()];
+        let mut hit = sample.visemes.is_empty();
+        for (name, w) in &sample.visemes {
+            if let Some(i) = morph_names.iter().position(|n| n == name) { morphs[i] = w.clamp(0.0, 1.0); hit = true; }
+        }
+        if !hit && !self.warned_no_visemes && self.playing.is_some() {
+            self.warned_no_visemes = true;
+            eprintln!("[speech] GLB has no viseme_* morph targets; driving the jaw only");
+        }
+        SpeechPoll::Active(FaceFrame { jaw_open: sample.jaw.clamp(0.0, 1.0), morphs })
+    }
+
+    /// Called once per avatar tick on the render thread. Never blocks.
+    pub fn poll(&mut self, morph_names: &[String]) -> SpeechPoll {
+        self.accept_messages();
+        self.drive();
+        self.publish();
+        if let Some(p) = &self.playing {
             let elapsed = (p.start.elapsed().as_secs_f32() - self.cfg.latency.as_secs_f32()).max(0.0);
-            let audio_alive = p.child.as_mut().map(|c| matches!(c.try_wait(), Ok(None)));
-            let ended_early = audio_alive == Some(false) && elapsed + 0.15 < p.face.duration;
-            let done = elapsed >= p.face.duration + 0.05 && (audio_alive != Some(true) || elapsed > p.face.duration + 1.5);
-            if ended_early || done {
-                self.stop_playback();
-            } else {
-                let s = p.face.sample(elapsed);
-                let mut morphs = vec![0.0; morph_names.len()];
-                let mut hit = s.visemes.is_empty();
-                for (name, w) in &s.visemes {
-                    if let Some(i) = morph_names.iter().position(|n| n == name) { morphs[i] = w.clamp(0.0, 1.0); hit = true; }
-                }
-                if !hit && !self.warned_no_visemes {
-                    self.warned_no_visemes = true;
-                    eprintln!("[speech] GLB has no viseme_* morph targets; driving the jaw only");
-                }
-                return SpeechPoll::Active(FaceFrame { jaw_open: s.jaw.clamp(0.0, 1.0), morphs });
-            }
+            return self.active_frame(morph_names, elapsed);
         }
-        if self.finished_pending { self.finished_pending = false; return SpeechPoll::Finished; }
+        let in_gap = self.course.as_ref().map(|c| c.started && !c.done).unwrap_or(false);
+        if in_gap {
+            return self.active_frame(morph_names, f32::MAX);
+        }
+        if self.finished_pending {
+            self.finished_pending = false;
+            return SpeechPoll::Finished;
+        }
         SpeechPoll::Idle
     }
 }
 
 impl Drop for Speaker {
-    fn drop(&mut self) { self.stop_playback(); }
+    fn drop(&mut self) { self.stop(); }
 }

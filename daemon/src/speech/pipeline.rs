@@ -27,6 +27,111 @@ pub fn normalize_text(text: &str) -> Result<String, String> {
     Ok(n)
 }
 
+/// A sentence longer than this is cut at a comma, semicolon, or space so one
+/// Piper job cannot stall the utterance. The Node splitter uses the same cut.
+pub const MAX_SENTENCE_CHARS: usize = 400;
+
+/// Split on `.?!`, keeping the punctuation. Abbreviations (`Mr.`, `e.g.`),
+/// initials, decimals, and an ellipsis are not boundaries. The Node copy in
+/// `src/locate/sentences.ts` must agree; both sides are tested on the same lines.
+pub fn split_sentences(text: &str) -> Vec<String> {
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let chars: Vec<char> = normalized.chars().collect();
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '.' || c == '!' || c == '?' {
+            if c == '.' && chars.get(i + 1) == Some(&'.') {
+                let mut j = i;
+                while j < chars.len() && chars[j] == '.' { j += 1; }
+                if j >= chars.len() || chars[j] == ' ' {
+                    let end = take_closers(&chars, j);
+                    push_chunk(&chars, start, end, &mut out);
+                    let end = skip_spaces(&chars, end);
+                    start = end;
+                    i = end;
+                    continue;
+                }
+                i = j;
+                continue;
+            }
+            if c == '.' && i > 0 && chars[i - 1].is_ascii_digit() && chars.get(i + 1).map(|d| d.is_ascii_digit()).unwrap_or(false) {
+                i += 1;
+                continue;
+            }
+            if c == '.' && abbrev_or_initial(&chars, i) {
+                i += 1;
+                continue;
+            }
+            let after = i + 1;
+            if after >= chars.len() || chars[after] == ' ' || is_closer(chars[after]) {
+                let end = take_closers(&chars, after);
+                if end >= chars.len() || chars[end] == ' ' {
+                    push_chunk(&chars, start, end, &mut out);
+                    let end = skip_spaces(&chars, end);
+                    start = end;
+                    i = end;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    push_chunk(&chars, start, chars.len(), &mut out);
+    out
+}
+
+fn is_closer(c: char) -> bool {
+    matches!(c, '"' | '\'' | '\u{201D}' | '\u{2019}')
+}
+
+fn take_closers(chars: &[char], mut end: usize) -> usize {
+    while end < chars.len() && is_closer(chars[end]) { end += 1; }
+    end
+}
+
+fn skip_spaces(chars: &[char], mut end: usize) -> usize {
+    while end < chars.len() && chars[end] == ' ' { end += 1; }
+    end
+}
+
+fn abbrev_or_initial(chars: &[char], period_at: usize) -> bool {
+    let mut start = period_at;
+    while start > 0 && chars[start - 1] != ' ' { start -= 1; }
+    let token: String = chars[start..period_at].iter().collect::<String>().to_lowercase().replace('.', "");
+    if token.chars().count() == 1 { return true; }
+    matches!(token.as_str(), "mr" | "mrs" | "ms" | "dr" | "st" | "sr" | "jr" | "prof" | "sgt" | "lt" | "gen" | "eg" | "ie" | "etc" | "vs")
+}
+
+fn push_chunk(chars: &[char], start: usize, end: usize, out: &mut Vec<String>) {
+    if end <= start { return; }
+    let chunk: String = chars[start..end].iter().collect::<String>().trim().to_string();
+    if chunk.is_empty() { return; }
+    wrap_chunk(&chunk, out);
+}
+
+fn wrap_chunk(chunk: &str, out: &mut Vec<String>) {
+    let chars: Vec<char> = chunk.chars().collect();
+    if chars.len() <= MAX_SENTENCE_CHARS {
+        out.push(chars.iter().collect());
+        return;
+    }
+    let mut cut = None;
+    for i in (0..MAX_SENTENCE_CHARS).rev() {
+        if chars[i] == ',' || chars[i] == ';' || chars[i] == ' ' {
+            cut = Some(i + 1);
+            break;
+        }
+    }
+    let cut = cut.unwrap_or(MAX_SENTENCE_CHARS);
+    let left: String = chars[..cut].iter().collect::<String>().trim().to_string();
+    let right: String = chars[cut..].iter().collect::<String>().trim().to_string();
+    if !left.is_empty() { out.push(left); }
+    if !right.is_empty() { wrap_chunk(&right, out); }
+}
+
 /// Cache key: normalized text, voice id, rate, engine id, viseme-map version.
 pub fn cache_key(cfg: &SpeechConfig, normalized: &str) -> String {
     let mut h = Sha256::new();

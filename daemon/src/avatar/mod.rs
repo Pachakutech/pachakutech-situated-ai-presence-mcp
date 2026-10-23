@@ -73,6 +73,8 @@ pub struct AvatarActor {
     pub bound_presence: Option<String>,
     /// True while an utterance is actually playing. The point reads this.
     talking: bool,
+    /// Set for one tick when an utterance finishes, so the overlay can drop a speech-held mark.
+    speech_ended: bool,
     /// Pose clock. Theta 0 is the arms-down frame of `Point`.
     aim: aim::AimSpring,
     /// Body yaw. Tracks `aim_yaw` of the commanded angle, not of `aim.theta`,
@@ -147,6 +149,7 @@ impl AvatarActor {
             speech: crate::speech::Speaker::new(crate::speech::SpeechConfig::from_env()),
             visible: true, autoload: true, bound_presence: None,
             talking: false,
+            speech_ended: false,
             aim: aim::AimSpring::default(),
             yaw_aim: aim::AimSpring::default(),
             gesture: aim::GestureClock::default(),
@@ -284,6 +287,11 @@ impl AvatarActor {
             crate::speech::SpeechPoll::Finished => {
                 self.face = FaceFrame::default();
                 self.talking = false;
+                // A replacement utterance is already on the board. Only a real
+                // ending (phase idle) drops a mark that lives with the voice.
+                let view = self.speech.board().json();
+                let phase = view.get("phase").and_then(|p| p.as_str()).unwrap_or("idle");
+                self.speech_ended = phase == "idle";
             }
             crate::speech::SpeechPoll::Idle => self.talking = false,
         }
@@ -308,6 +316,13 @@ impl AvatarActor {
             0,
             frame,
         )
+    }
+
+    /// True once, on the tick an utterance ends.
+    pub fn take_speech_ended(&mut self) -> bool {
+        let ended = self.speech_ended;
+        self.speech_ended = false;
+        ended
     }
 
     /// Aim the two springs. `highlight` is the mark still on screen for the

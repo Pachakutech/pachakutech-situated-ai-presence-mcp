@@ -5,6 +5,7 @@ use crate::pipeline::SplatPipeline;
 use crate::protocol::{AvatarCommand, Proposal, ProposalResult};
 use crate::registry::Registry;
 use crate::screen_text::TextMemory;
+use crate::speech::SpeechBoard;
 use serde_json::json;
 use std::io::{self, Read, Write};
 use std::time::Instant;
@@ -26,6 +27,7 @@ pub struct SocketServer {
     registry: Mutex<Registry>,
     avatar_commands: Vec<AvatarCommand>,
     text: Arc<TextMemory>,
+    speech: SpeechBoard,
 }
 
 enum ClientRead {
@@ -35,7 +37,7 @@ enum ClientRead {
 }
 
 impl SocketServer {
-    pub fn bind(socket_path: &Path, text: Arc<TextMemory>) -> io::Result<Self> {
+    pub fn bind(socket_path: &Path, text: Arc<TextMemory>, speech: SpeechBoard) -> io::Result<Self> {
         if socket_path.exists() {
             std::fs::remove_file(socket_path)?;
         }
@@ -51,6 +53,7 @@ impl SocketServer {
             registry: Mutex::new(Registry::new()),
             avatar_commands: Vec::new(),
             text,
+            speech,
         })
     }
 
@@ -71,6 +74,11 @@ impl SocketServer {
     /// and is not returned here; the point follows the mark, not that leftover.
     pub fn visible_interest(&self, id: &str) -> Option<crate::highlight::UvBox> {
         self.visible_interests().into_iter().find(|(i, _)| i == id).map(|(_, b)| b)
+    }
+
+    /// Drop a mark that was held for the utterance. The box stays for the next aim.
+    pub fn conceal_speech_interest(&self, id: &str) {
+        self.registry.lock().expect("registry mutex poisoned").conceal_speech_interest(id, Instant::now());
     }
 
     pub fn listener_fd(&self) -> RawFd {
@@ -96,7 +104,7 @@ impl SocketServer {
 
         let mut i = 0;
         while i < self.clients.len() {
-            match read_client(&mut self.clients[i], pipeline, &self.registry, &mut self.avatar_commands, &self.text) {
+            match read_client(&mut self.clients[i], pipeline, &self.registry, &mut self.avatar_commands, &self.text, &self.speech) {
                 Ok(ClientRead::Keep) => i += 1,
                 Ok(ClientRead::Closed) | Err(_) => {
                     self.clients.remove(i);
@@ -151,6 +159,7 @@ fn read_client(
     registry: &Mutex<Registry>,
     avatar_commands: &mut Vec<AvatarCommand>,
     text: &TextMemory,
+    speech: &SpeechBoard,
 ) -> io::Result<ClientRead> {
     let mut tmp = [0u8; 4096];
     loop {
@@ -170,7 +179,7 @@ fn read_client(
             continue;
         }
         let (result, stop) = match serde_json::from_str::<Proposal>(line) {
-            Ok(proposal) => dispatch(proposal, pipeline, registry, avatar_commands, text),
+            Ok(proposal) => dispatch(proposal, pipeline, registry, avatar_commands, text, speech),
             Err(e) => {
                 eprintln!("[socket] malformed proposal: {e}");
                 (ProposalResult::err("unknown", format!("malformed proposal: {e}")), false)
@@ -201,6 +210,7 @@ fn dispatch(
     registry: &Mutex<Registry>,
     avatar_commands: &mut Vec<AvatarCommand>,
     text: &TextMemory,
+    speech: &SpeechBoard,
 ) -> (ProposalResult, bool) {
     let proposal_id = proposal.proposal_id().to_string();
     if matches!(proposal, Proposal::Shutdown { .. }) {
@@ -238,6 +248,9 @@ fn dispatch(
         Proposal::QueryScreenText { .. } => {
             return (ProposalResult::ok(&proposal_id, Some(text.snapshot_json(Instant::now()))), false);
         }
+        Proposal::QuerySpeech { .. } => {
+            return (ProposalResult::ok(&proposal_id, Some(speech.json())), false);
+        }
         _ => {}
     }
     let mut reg = registry.lock().expect("registry mutex poisoned");
@@ -247,7 +260,11 @@ fn dispatch(
     }
 
     let result = match proposal {
-        Proposal::HighlightRegion { presence_id, description, u, v, w, h, duration_seconds, .. } => {
+        Proposal::ConcealHighlight { presence_id, .. } => {
+            let concealed = reg.conceal_for_jump(&presence_id, Instant::now());
+            ProposalResult::ok(&proposal_id, Some(json!({ "concealed": concealed })))
+        }
+        Proposal::HighlightRegion { presence_id, description, u, v, w, h, duration_seconds, until_speech, .. } => {
             match reg.declare_interest(
                 &presence_id,
                 &description,
@@ -255,14 +272,18 @@ fn dispatch(
                 duration_seconds,
                 Instant::now(),
             ) {
-                Ok((box_, secs)) => ProposalResult::ok(
-                    &proposal_id,
-                    Some(json!({
-                        "regionId": format!("r-{proposal_id}"),
-                        "resolvedBounds": [box_.u, box_.v, box_.w, box_.h],
-                        "durationSeconds": secs,
-                    })),
-                ),
+                Ok((box_, secs)) => {
+                    if until_speech { reg.hold_interest_for_speech(&presence_id); }
+                    ProposalResult::ok(
+                        &proposal_id,
+                        Some(json!({
+                            "regionId": format!("r-{proposal_id}"),
+                            "resolvedBounds": [box_.u, box_.v, box_.w, box_.h],
+                            "durationSeconds": secs,
+                            "untilSpeech": until_speech,
+                        })),
+                    )
+                }
                 Err(e) => ProposalResult::err(&proposal_id, e),
             }
         }
@@ -284,7 +305,8 @@ fn dispatch(
         | Proposal::AvatarSpeak { .. }
         | Proposal::AvatarStop { .. }
         | Proposal::AvatarWalk { .. }
-        | Proposal::QueryScreenText { .. } => ProposalResult::ok(&proposal_id, None),
+        | Proposal::QueryScreenText { .. }
+        | Proposal::QuerySpeech { .. } => ProposalResult::ok(&proposal_id, None),
     };
     (result, false)
 }

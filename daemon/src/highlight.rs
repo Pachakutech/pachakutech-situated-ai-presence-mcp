@@ -19,6 +19,8 @@ struct Interest {
     id: String,
     box_: UvBox,
     shown_until: Instant,
+    /// The mark stays up for the utterance, then the speech-finished path conceals it.
+    until_speech: bool,
 }
 
 pub struct InterestBook {
@@ -39,10 +41,29 @@ impl InterestBook {
         if let Some(existing) = self.items.iter_mut().find(|it| it.id == id) {
             existing.box_ = box_;
             existing.shown_until = shown_until;
+            existing.until_speech = false;
         } else {
-            self.items.push(Interest { id: id.to_string(), box_, shown_until });
+            self.items.push(Interest { id: id.to_string(), box_, shown_until, until_speech: false });
         }
         Ok(box_)
+    }
+
+    /// This presence's mark fades when its utterance ends, not on the countdown.
+    /// The safety cap from `declare` still applies if speech never finishes.
+    pub fn hold_for_speech(&mut self, id: &str) {
+        if let Some(existing) = self.items.iter_mut().find(|it| it.id == id) {
+            existing.until_speech = true;
+        }
+    }
+
+    /// Hide the mark and keep the box. A timed mark is left alone.
+    pub fn conceal_if_speech_held(&mut self, id: &str, now: Instant) -> bool {
+        if let Some(existing) = self.items.iter_mut().find(|it| it.id == id && it.until_speech) {
+            existing.shown_until = now;
+            existing.until_speech = false;
+            return true;
+        }
+        false
     }
 
     pub fn retire(&mut self, id: &str) {
@@ -200,6 +221,22 @@ mod tests {
         book.declare("p-a", box_at(0.5, 0.5, 0.9, 0.9), 5, t0).unwrap();
         assert_eq!(book.get("p-a").unwrap().u, 0.5);
         assert!(book.get("p-a").unwrap().w <= 0.5);
+    }
+
+    #[test]
+    fn a_speech_hold_fades_when_the_utterance_ends_and_a_timed_mark_does_not() {
+        let mut book = InterestBook::new();
+        let t0 = Instant::now();
+        book.declare("p-a", box_at(0.1, 0.2, 0.3, 0.4), 360, t0).unwrap();
+        book.hold_for_speech("p-a");
+        book.declare("p-b", box_at(0.2, 0.2, 0.2, 0.2), 30, t0).unwrap();
+        assert!(!book.conceal_if_speech_held("p-b", t0));
+        assert_eq!(book.visible(t0).len(), 2, "a timed mark is not a speech hold");
+        assert!(book.conceal_if_speech_held("p-a", t0));
+        let visible = book.visible(t0);
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].0, "p-b");
+        assert_eq!(book.get("p-a").unwrap().u, 0.1, "the box remains after the tint drops");
     }
 
     #[test]

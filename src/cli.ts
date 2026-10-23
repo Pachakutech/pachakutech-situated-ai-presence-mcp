@@ -13,6 +13,7 @@ import { dirname, join } from "node:path";
 import { getBundledDaemonPath } from "./daemonBinary.js";
 import { socketPath } from "./daemonClient.js";
 import { sendProposal, socketReachable, startDaemon, statusDaemon, stopDaemon } from "./daemonControl.js";
+import { cueFollowMain } from "./locate/cues.js";
 import { fuseCommand, locateCommand, screenTextCommand } from "./locate/run.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -49,7 +50,11 @@ function usage(): never {
       "  highlight-and-speak <id> --source S --query <phrase> --text <words>",
       "                       [--uri URL_or_path] [--page N] [--pad 12] [--timeout-s 15]",
       "                       [--no-open] [--window-class RE] [--window-title RE] [--seconds N]",
+      "                       [--cues '[{\"at\":\"sentence\",\"query\":\"passage\"}]']",
       "                       Find, verify, tint, then speak --text. Default 90s, max 360.",
+      "                       --cues names a sentence and the passage to tint while it plays.",
+      "                       The first passage is found before any audio. Later ones move",
+      "                       with the sentence clips. The tint stays for the utterance.",
       "                       If the phrase is missing, do not tint and do not speak.",
       "                       Stdout is one JSON object: the locate box, highlight.status,",
       "                       and speak.status. MCP name: highlightAndSpeak.",
@@ -362,6 +367,9 @@ switch (command) {
     break;
   case "highlight-and-speak":
     process.exit(await fuseCommand(process.argv.slice(3), true));
+    break;
+  case "cue-follow":
+    process.exit(await cueFollowMain(process.argv[3]));
     break;
   case "highlight-query":
     process.exit(await fuseCommand(process.argv.slice(3), false));
