@@ -9,6 +9,7 @@ import { z } from "zod";
 import { PolicyGate } from "./policyGate.js";
 import { daemonStub } from "./daemonStub.js";
 import { tryConnectDaemon } from "./daemonClient.js";
+import { locateRegion } from "./locate/run.js";
 const policy = new PolicyGate();
 const server = new McpServer({ name: "pachakutech-presence", version: "0.1.0" });
 let daemon = daemonStub;
@@ -31,7 +32,7 @@ server.registerTool("manifestHighlight", {
     title: "Highlight a box on screen",
     description: "Ephemeral. Tints a full-screen UV box for a live presence: origin top-left, " +
         "u and v from 0 to 1 across the whole output, v growing downward. The mark fades " +
-        "after durationSeconds (default 5, max 60); call again to replace the box and keep it up. " +
+        "after durationSeconds (default 5, max 360); call again to replace the box and keep it up. " +
         "The box remains that presence's area of interest after the pixels fade, until a new box or retire. " +
         "The figure does not gesture yet.",
     inputSchema: {
@@ -41,7 +42,7 @@ server.registerTool("manifestHighlight", {
         v: z.number().min(0).max(1).describe("Top edge, 0..1, growing downward"),
         w: z.number().positive().describe("Width in that same 0..1 space"),
         h: z.number().positive().describe("Height in that same 0..1 space"),
-        durationSeconds: z.number().min(1).max(60).default(5),
+        durationSeconds: z.number().min(1).max(360).default(5),
     },
 }, async ({ presenceId, description, u, v, w, h, durationSeconds }) => {
     policy.assertAllowed("manifestHighlight");
@@ -123,6 +124,41 @@ server.registerTool("animatePresence", {
     policy.assertInstanceExists(presenceId);
     await (await getDaemon()).animatePresence(presenceId, text);
     return { content: [{ type: "text", text: JSON.stringify({ status: "ok" }) }] };
+});
+server.registerTool("locateScreenRegion", {
+    title: "Find a phrase on screen",
+    description: "Returns full-screen UV for a phrase on a web page, PDF, terminal, or document window. " +
+        "One process screenshots and reads the words. It does not mark and it does not speak. " +
+        "Web can open a URL and scroll. PDF opens Evince from a file path and can turn to `page`. " +
+        "Terminal and doc read a window already up; they do not type, and they do not ask a multiplexer. " +
+        "Prefer this over a hand-rolled grim and tesseract pipeline. A passage query is `start ... end`.",
+    inputSchema: {
+        source: z.enum(["web", "pdf", "terminal", "doc", "ide"]).describe("Which window to read"),
+        query: z.string().describe("Phrase, or `start ... end` for a passage"),
+        uri: z.string().optional().describe("Web URL, or a local path for pdf and doc"),
+        page: z.number().int().min(1).max(9999).optional().describe("PDF page, starting at 1"),
+        pad: z.number().int().min(0).max(64).optional().describe("Pixels around the matched lines. Default 12"),
+        timeoutS: z.number().min(1).max(120).optional().describe("Seconds to wait. Default 15"),
+        noOpen: z.boolean().optional().describe("Measure a window that is already up"),
+        windowClass: z.string().optional().describe("Case-insensitive regular expression on the window class"),
+        windowTitle: z.string().optional().describe("Case-insensitive regular expression on the window title"),
+        verify: z.boolean().optional().describe("Crop-check the box before returning it"),
+    },
+}, async ({ source, query, uri, page, pad, timeoutS, noOpen, windowClass, windowTitle, verify }) => {
+    policy.assertAllowed("locateScreenRegion");
+    const result = await locateRegion({
+        source,
+        query,
+        uri,
+        page,
+        pad: pad ?? 12,
+        timeoutS: timeoutS ?? 15,
+        noOpen: Boolean(noOpen),
+        verify: Boolean(verify),
+        windowClass,
+        windowTitle,
+    });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
 });
 server.registerTool("retirePresence", {
     title: "End a presence",
