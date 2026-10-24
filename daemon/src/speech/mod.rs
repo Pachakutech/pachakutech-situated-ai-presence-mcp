@@ -1,10 +1,10 @@
 //! Speech: text -> local TTS (Piper CLI) -> Rhubarb CLI -> faceanim, played
 //! against the audio clock. See docs/plans/speech_epic.md.
 //!
-//! Threading: all slow work (TTS, Rhubarb, cache IO) runs on one worker thread
-//! that exchanges only owned data over channels, so the Vulkan/render thread
-//! (SplatPipeline is !Send) never blocks. The render thread only calls
-//! `Speaker::poll` once per avatar tick.
+//! Threading: Piper and Rhubarb each have a worker thread and exchange owned
+//! data over channels, so the Vulkan/render thread (SplatPipeline is !Send)
+//! never blocks. The render thread only calls `Speaker::poll` once per avatar
+//! tick. Piper for the next sentence starts while Rhubarb is still on this one.
 //!
 //! Audio clock: the player is an out-of-process CLI (pw-play/paplay/aplay/
 //! ffplay). The face clock starts when the player process is spawned, minus a
@@ -29,7 +29,7 @@ pub struct SpeechConfig {
     pub piper_bin: PathBuf,
     pub piper_model: Option<PathBuf>,
     pub rhubarb_bin: PathBuf,
-    /// `pocketSphinx` (English, default) or `phonetic` (language-independent).
+    /// `phonetic` (default; finishes inside a clip) or `pocketSphinx`.
     pub rhubarb_recognizer: String,
     pub cache_dir: PathBuf,
     /// Free-form engine/version label folded into the cache key.
@@ -52,7 +52,7 @@ impl SpeechConfig {
             piper_bin: env("PRESENCE_PIPER_BIN").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("piper")),
             piper_model: env("PRESENCE_PIPER_MODEL").map(PathBuf::from),
             rhubarb_bin: env("PRESENCE_RHUBARB_BIN").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("rhubarb")),
-            rhubarb_recognizer: env("PRESENCE_RHUBARB_RECOGNIZER").unwrap_or_else(|| "pocketSphinx".into()),
+            rhubarb_recognizer: env("PRESENCE_RHUBARB_RECOGNIZER").unwrap_or_else(|| "phonetic".into()),
             cache_dir,
             engine_id: env("PRESENCE_TTS_ENGINE_ID").unwrap_or_else(|| "piper".into()),
             player: env("PRESENCE_AUDIO_PLAYER").map(|s| s.split_whitespace().map(String::from).collect()),
@@ -72,11 +72,17 @@ impl SpeechConfig {
     }
 }
 
-enum Msg {
+enum PiperOut {
+    Cached { id: u64, index: usize, bundle: Bundle },
+    Wav { id: u64, index: usize, draft: pipeline::WavDraft },
+    Failed { id: u64, index: usize, error: String },
+}
+enum MouthOut {
     Ready { id: u64, index: usize, bundle: Bundle },
     Failed { id: u64, index: usize, error: String },
 }
-struct Job { id: u64, index: usize, text: String }
+struct PiperJob { id: u64, index: usize, text: String }
+struct MouthJob { id: u64, index: usize, draft: pipeline::WavDraft }
 
 struct Playing {
     index: usize,
@@ -85,14 +91,20 @@ struct Playing {
     child: Option<Child>,
 }
 
-/// One utterance broken into sentence clips. At most one bundle is ready
-/// ahead of the clip that is playing.
+/// One utterance broken into sentence clips.
+/// One Piper, one wav, one Rhubarb, and one ready bundle. A cache hit that
+/// arrives while an earlier sentence is still being mouthed sits in `cached`.
 struct Course {
     id: u64,
     sentences: Vec<String>,
-    /// Next sentence index to send to the worker.
+    /// Next sentence index to send to Piper.
     next_index: usize,
-    inflight: Option<usize>,
+    piper_inflight: Option<usize>,
+    /// A wav whose mouth has not started. At most one.
+    wav_held: Option<MouthJob>,
+    rhubarb_inflight: Option<usize>,
+    /// A finished bundle that is later than the sentence still in Rhubarb.
+    cached: Option<(usize, Bundle)>,
     ready: Option<(usize, Bundle)>,
     /// A clip has started. Gaps after that keep the mouth in the utterance.
     started: bool,
@@ -162,8 +174,10 @@ pub enum SpeechPoll {
 
 pub struct Speaker {
     cfg: Arc<SpeechConfig>,
-    tx: Option<Sender<Job>>,
-    rx: Option<Receiver<Msg>>,
+    piper_tx: Option<Sender<PiperJob>>,
+    piper_rx: Option<Receiver<PiperOut>>,
+    mouth_tx: Option<Sender<MouthJob>>,
+    mouth_rx: Option<Receiver<MouthOut>>,
     latest: Arc<AtomicU64>,
     next_id: u64,
     playing: Option<Playing>,
@@ -189,7 +203,9 @@ fn player_argv(cfg: &SpeechConfig) -> Option<Vec<String>> {
 impl Speaker {
     pub fn new(cfg: SpeechConfig) -> Speaker {
         Speaker {
-            cfg: Arc::new(cfg), tx: None, rx: None, latest: Arc::new(AtomicU64::new(0)), next_id: 1,
+            cfg: Arc::new(cfg),
+            piper_tx: None, piper_rx: None, mouth_tx: None, mouth_rx: None,
+            latest: Arc::new(AtomicU64::new(0)), next_id: 1,
             playing: None, course: None, board: SpeechBoard::new(), finished_pending: false,
             warned_no_visemes: false, last_error: None,
         }
@@ -199,25 +215,43 @@ impl Speaker {
         self.board.clone()
     }
 
-    fn ensure_worker(&mut self) {
-        if self.tx.is_some() { return; }
-        let (jtx, jrx) = channel::<Job>();
-        let (mtx, mrx) = channel::<Msg>();
+    fn ensure_workers(&mut self) {
+        if self.piper_tx.is_some() { return; }
+        let (ptx, prx) = channel::<PiperJob>();
+        let (potx, porx) = channel::<PiperOut>();
+        let (mtx, mrx) = channel::<MouthJob>();
+        let (motx, morx) = channel::<MouthOut>();
         let cfg = self.cfg.clone();
         let latest = self.latest.clone();
-        std::thread::Builder::new().name("speech-worker".into()).spawn(move || {
-            while let Ok(job) = jrx.recv() {
-                if latest.load(Ordering::SeqCst) != job.id { continue; } // superseded while queued
-                let cancelled = || latest.load(Ordering::SeqCst) != job.id;
-                let msg = match pipeline::prepare(&cfg, &job.text, &cancelled) {
-                    Ok(bundle) => Msg::Ready { id: job.id, index: job.index, bundle },
-                    Err(error) => Msg::Failed { id: job.id, index: job.index, error },
+        let piper_cfg = cfg.clone();
+        let piper_latest = latest.clone();
+        std::thread::Builder::new().name("speech-piper".into()).spawn(move || {
+            while let Ok(job) = prx.recv() {
+                if piper_latest.load(Ordering::SeqCst) != job.id { continue; }
+                let cancelled = || piper_latest.load(Ordering::SeqCst) != job.id;
+                let msg = match pipeline::synthesize(&piper_cfg, &job.text, &cancelled) {
+                    Ok(pipeline::Synth::Cached(bundle)) => PiperOut::Cached { id: job.id, index: job.index, bundle },
+                    Ok(pipeline::Synth::Wav(draft)) => PiperOut::Wav { id: job.id, index: job.index, draft },
+                    Err(error) => PiperOut::Failed { id: job.id, index: job.index, error },
                 };
-                if mtx.send(msg).is_err() { break; }
+                if potx.send(msg).is_err() { break; }
             }
-        }).expect("spawn speech worker");
-        self.tx = Some(jtx);
-        self.rx = Some(mrx);
+        }).expect("spawn speech-piper");
+        std::thread::Builder::new().name("speech-rhubarb".into()).spawn(move || {
+            while let Ok(job) = mrx.recv() {
+                if latest.load(Ordering::SeqCst) != job.id { continue; }
+                let cancelled = || latest.load(Ordering::SeqCst) != job.id;
+                let msg = match pipeline::mouth(&cfg, job.draft, &cancelled) {
+                    Ok(bundle) => MouthOut::Ready { id: job.id, index: job.index, bundle },
+                    Err(error) => MouthOut::Failed { id: job.id, index: job.index, error },
+                };
+                if motx.send(msg).is_err() { break; }
+            }
+        }).expect("spawn speech-rhubarb");
+        self.piper_tx = Some(ptx);
+        self.piper_rx = Some(porx);
+        self.mouth_tx = Some(mtx);
+        self.mouth_rx = Some(morx);
     }
 
     /// End the clip that is playing. `utterance_done` asks the next poll to
@@ -241,7 +275,8 @@ impl Speaker {
                 } else {
                     "synth"
                 };
-                let index = self.playing.as_ref().map(|p| p.index).or(if c.started { c.last_index } else { c.inflight });
+                let cooking = c.rhubarb_inflight.or(c.wav_held.as_ref().map(|w| w.index)).or(c.piper_inflight);
+                let index = self.playing.as_ref().map(|p| p.index).or(if c.started { c.last_index } else { cooking });
                 let sentence = index.and_then(|i| c.sentences.get(i)).cloned().unwrap_or_default();
                 SpeechView {
                     generation: c.id, phase, index, count: c.sentences.len(), sentence,
@@ -253,24 +288,47 @@ impl Speaker {
         self.board.publish(view);
     }
 
-    fn kick(&mut self) {
-        let Some(course) = self.course.as_mut() else { return };
-        if course.done || course.inflight.is_some() || course.ready.is_some() { return; }
-        if course.next_index >= course.sentences.len() { return; }
-        let index = course.next_index;
-        let text = course.sentences[index].clone();
-        let id = course.id;
-        course.next_index += 1;
-        course.inflight = Some(index);
-        if let Some(tx) = &self.tx {
-            let _ = tx.send(Job { id, index, text });
+    /// Hand a held wav to Rhubarb when the mouth is free and the ready slot is open,
+    /// then start Piper when that wav slot is empty. A finished bundle waiting to
+    /// play, with the mouth idle, holds the next Piper so bundles do not pile up.
+    fn pump(&mut self) {
+        let (hand, start) = {
+            let Some(course) = self.course.as_mut() else { return };
+            if course.done { return; }
+            if course.ready.is_none() && course.rhubarb_inflight.is_none() {
+                if let Some(cached) = course.cached.take() { course.ready = Some(cached); }
+            }
+            let hand = if course.rhubarb_inflight.is_none() && course.ready.is_none() { course.wav_held.take() } else { None };
+            if let Some(job) = &hand { course.rhubarb_inflight = Some(job.index); }
+            let slot_full = course.wav_held.is_some() || course.cached.is_some();
+            let caught_up = course.ready.is_some() && course.rhubarb_inflight.is_none() && !slot_full;
+            let start = if course.piper_inflight.is_none() && !slot_full && !caught_up && course.next_index < course.sentences.len() {
+                let index = course.next_index;
+                let text = course.sentences[index].clone();
+                let id = course.id;
+                course.next_index += 1;
+                course.piper_inflight = Some(index);
+                Some(PiperJob { id, index, text })
+            } else {
+                None
+            };
+            (hand, start)
+        };
+        if let Some(job) = hand {
+            if let Some(tx) = &self.mouth_tx { let _ = tx.send(job); }
+        }
+        if let Some(job) = start {
+            if let Some(tx) = &self.piper_tx { let _ = tx.send(job); }
         }
     }
 
     fn finish_course(&mut self) {
         if let Some(course) = self.course.as_mut() {
             course.done = true;
-            course.inflight = None;
+            course.piper_inflight = None;
+            course.wav_held = None;
+            course.rhubarb_inflight = None;
+            course.cached = None;
             course.ready = None;
         }
         self.finished_pending = true;
@@ -286,12 +344,13 @@ impl Speaker {
         let id = self.next_id;
         self.next_id += 1;
         self.latest.store(id, Ordering::SeqCst);
-        self.ensure_worker();
+        self.ensure_workers();
         self.last_error = None;
         self.course = Some(Course {
-            id, sentences, next_index: 0, inflight: None, ready: None, started: false, last_index: None, done: false,
+            id, sentences, next_index: 0, piper_inflight: None, wav_held: None, rhubarb_inflight: None,
+            cached: None, ready: None, started: false, last_index: None, done: false,
         });
-        self.kick();
+        self.pump();
         self.publish();
         Ok(())
     }
@@ -337,33 +396,68 @@ impl Speaker {
         self.last_error = Some(e);
     }
 
+    fn offer_bundle(&mut self, index: usize, bundle: Bundle) {
+        let Some(course) = self.course.as_mut() else { return };
+        if course.done { return; }
+        let earlier_mouth = course.rhubarb_inflight.is_some_and(|i| i < index) || course.wav_held.as_ref().is_some_and(|w| w.index < index);
+        if earlier_mouth || course.ready.is_some() {
+            if course.cached.is_none() { course.cached = Some((index, bundle)); }
+        } else if course.ready.is_none() {
+            course.ready = Some((index, bundle));
+        }
+    }
+
     fn accept_messages(&mut self) {
-        let mut incoming = vec![];
-        if let Some(rx) = &self.rx { while let Ok(m) = rx.try_recv() { incoming.push(m); } }
+        let mut piper_in = vec![];
+        let mut mouth_in = vec![];
+        if let Some(rx) = &self.piper_rx { while let Ok(m) = rx.try_recv() { piper_in.push(m); } }
+        if let Some(rx) = &self.mouth_rx { while let Ok(m) = rx.try_recv() { mouth_in.push(m); } }
         let current = self.latest.load(Ordering::SeqCst);
-        for m in incoming {
+        for m in piper_in {
             match m {
-                Msg::Ready { id, index, bundle } if id == current => {
+                PiperOut::Cached { id, index, bundle } if id == current => {
                     if let Some(course) = self.course.as_mut() {
-                        if course.inflight == Some(index) { course.inflight = None; }
-                        if !course.done && course.ready.is_none() { course.ready = Some((index, bundle)); }
+                        if course.piper_inflight == Some(index) { course.piper_inflight = None; }
+                    }
+                    self.offer_bundle(index, bundle);
+                }
+                PiperOut::Wav { id, index, draft } if id == current => {
+                    if let Some(course) = self.course.as_mut() {
+                        if course.piper_inflight == Some(index) { course.piper_inflight = None; }
+                        if !course.done && course.wav_held.is_none() {
+                            course.wav_held = Some(MouthJob { id, index, draft });
+                        }
                     }
                 }
-                Msg::Failed { id, index, error } if id == current => {
-                    let mut skipped = false;
+                PiperOut::Failed { id, index, error } if id == current => {
                     if let Some(course) = self.course.as_mut() {
-                        if course.inflight == Some(index) {
-                            course.inflight = None;
-                            skipped = true;
-                        }
+                        if course.piper_inflight == Some(index) { course.piper_inflight = None; }
                     }
                     let count = self.course.as_ref().map(|c| c.sentences.len()).unwrap_or(0);
                     self.report(format!("sentence {}/{} failed: {error}", index + 1, count));
-                    if skipped { self.kick(); }
                 }
                 _ => {}
             }
         }
+        for m in mouth_in {
+            match m {
+                MouthOut::Ready { id, index, bundle } if id == current => {
+                    if let Some(course) = self.course.as_mut() {
+                        if course.rhubarb_inflight == Some(index) { course.rhubarb_inflight = None; }
+                    }
+                    self.offer_bundle(index, bundle);
+                }
+                MouthOut::Failed { id, index, error } if id == current => {
+                    if let Some(course) = self.course.as_mut() {
+                        if course.rhubarb_inflight == Some(index) { course.rhubarb_inflight = None; }
+                    }
+                    let count = self.course.as_ref().map(|c| c.sentences.len()).unwrap_or(0);
+                    self.report(format!("sentence {}/{} failed: {error}", index + 1, count));
+                }
+                _ => {}
+            }
+        }
+        self.pump();
     }
 
     fn clip_finished(&mut self) -> bool {
@@ -383,14 +477,21 @@ impl Speaker {
         if self.playing.is_none() {
             if let Some((index, bundle)) = ready {
                 self.start_playback(index, bundle);
-                self.kick();
             }
         } else if let Some(course) = self.course.as_mut() {
             // Put an unused bundle back. Playback of the current clip is still going.
             if course.ready.is_none() { course.ready = ready; }
         }
+        self.pump();
         let finished = match &self.course {
-            Some(c) if !c.done && self.playing.is_none() && c.inflight.is_none() && c.ready.is_none() && c.next_index >= c.sentences.len() => true,
+            Some(c) if !c.done
+                && self.playing.is_none()
+                && c.piper_inflight.is_none()
+                && c.wav_held.is_none()
+                && c.rhubarb_inflight.is_none()
+                && c.cached.is_none()
+                && c.ready.is_none()
+                && c.next_index >= c.sentences.len() => true,
             _ => false,
         };
         if finished { self.finish_course(); }

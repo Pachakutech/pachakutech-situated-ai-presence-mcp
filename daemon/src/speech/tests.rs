@@ -116,6 +116,8 @@ fn two_sentences_play_in_order_and_the_second_is_prepared_during_the_first() {
     let t = Instant::now();
     while calls(&f, "piper") < 2 && t.elapsed() < Duration::from_secs(2) { let _ = sp.poll(&names); std::thread::sleep(Duration::from_millis(20)); }
     assert_eq!(calls(&f, "piper"), 2, "the next sentence is prepared while the first plays");
+    let t = Instant::now();
+    while calls(&f, "player") < 1 && t.elapsed() < Duration::from_secs(2) { std::thread::sleep(Duration::from_millis(10)); }
     assert_eq!(calls(&f, "player"), 1, "the second clip waits for the first to finish");
     let t = Instant::now();
     while calls(&f, "player") < 2 && t.elapsed() < Duration::from_secs(6) { let _ = sp.poll(&names); std::thread::sleep(Duration::from_millis(30)); }
@@ -124,6 +126,28 @@ fn two_sentences_play_in_order_and_the_second_is_prepared_during_the_first() {
     assert_eq!(view["count"], 2);
     assert_eq!(view["phase"], "play");
     assert_eq!(view["index"], 1);
+}
+
+#[test]
+fn the_next_piper_starts_while_rhubarb_is_still_on_this_sentence() {
+    let f = fake("overlap", true);
+    let log = f.dir.join("calls.log");
+    let json = f.dir.join("fixture.json");
+    script(
+        &f.dir.join("rhubarb"),
+        &format!("echo rhubarb-start >> {log:?}\nsleep 1.5\necho rhubarb-end >> {log:?}\nwhile [ $# -gt 0 ]; do [ \"$1\" = -o ] && out=$2; shift; done\ncp {json:?} \"$out\""),
+    );
+    let names = morph_names();
+    let mut sp = Speaker::new(f.cfg.clone());
+    sp.speak("Alpha one. Beta two.").unwrap();
+    let t = Instant::now();
+    while calls(&f, "piper") < 2 && t.elapsed() < Duration::from_secs(3) {
+        let _ = sp.poll(&names);
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    assert_eq!(calls(&f, "piper"), 2, "piper of the next sentence starts while this mouth is still running");
+    assert_eq!(calls(&f, "rhubarb-end"), 0, "the first rhubarb has not finished");
+    assert_eq!(calls(&f, "player"), 0, "playback waits for the mouth");
 }
 
 #[test]

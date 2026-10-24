@@ -46,6 +46,10 @@ Keep `two_sentences_play_in_order_and_the_second_is_prepared_during_the_first`. 
 
 This is the daemon. A release build, a stage, and a restart. The restart drops the live presence.
 
+## As built
+
+`speech-piper` and `speech-rhubarb` are the two workers. Piper for the next sentence is sent when this sentence's wav is handed to Rhubarb. One wav sits between them. A cache hit skips Rhubarb. The default recognizer is `phonetic`. `PRESENCE_RHUBARB_RECOGNIZER=pocketSphinx` is the slower pass. The test `the_next_piper_starts_while_rhubarb_is_still_on_this_sentence` locks the overlap. The viseme assertion is unchanged and still fails on this export, which has no shape keys.
+
 ### Out of scope
 
 A second Rhubarb. A long-lived Piper process, which is Phase C in `docs/plans/sentence_pipeline.md`. Once the next Piper sits beside the current Rhubarb, that cold start is behind the mouth pass, and it comes back onto the list only if a short clip still shows it. Linking Piper into the daemon stays out. Scroll speed, the cue clock, and the highlight cap stay as they are.

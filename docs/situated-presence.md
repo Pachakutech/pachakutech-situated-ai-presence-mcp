@@ -71,7 +71,10 @@ stays the gaussian.
 **Speech on the machine.** Piper synthesizes from
 `PRESENCE_PIPER_MODEL`. Rhubarb, at `PRESENCE_RHUBARB_BIN`, reads the
 wave; its `res/` directory has to sit beside that binary. The default
-recognizer is pocketSphinx (`PRESENCE_RHUBARB_RECOGNIZER` overrides it).
+recognizer is phonetic, so the mouth pass finishes inside the clip.
+`PRESENCE_RHUBARB_RECOGNIZER=pocketSphinx` selects the slower pass.
+Piper for the next sentence starts while Rhubarb is still reading this
+one. The render thread plays a clip only once that bundle is ready.
 The jaw follows the envelope. If the log says `GLB has no viseme_* morph
 targets; driving the jaw only`, this export of the mesh has no shape
 keys. The jaw still moves. The test that requires `viseme_aa` is left

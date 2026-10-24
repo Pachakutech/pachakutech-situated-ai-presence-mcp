@@ -14,7 +14,7 @@ An npm install speaks only when the person who starts the daemon has already ins
 |---|---|---|
 | Voice model | No default. Log: `no TTS voice configured: set PRESENCE_PIPER_MODEL to a Piper .onnx voice`. The speak command still prints `ok`, because the proposal is accepted before synthesis. | Yes |
 | Piper | Executable name `piper` on `PATH`. Override: `PRESENCE_PIPER_BIN`. | Yes |
-| Rhubarb | Executable name `rhubarb` on `PATH`. Override: `PRESENCE_RHUBARB_BIN`. Its `res/` directory has to sit beside that binary. | Yes, for the mouth track. The default recognizer is `pocketSphinx`. |
+| Rhubarb | Executable name `rhubarb` on `PATH`. Override: `PRESENCE_RHUBARB_BIN`. Its `res/` directory has to sit beside that binary. | Yes, for the mouth track. The running default is `phonetic`. `PRESENCE_RHUBARB_RECOGNIZER=pocketSphinx` is the slower pass. |
 | Player | First of `pw-play`, `paplay`, `aplay`, `ffplay` on `PATH`. Override: `PRESENCE_AUDIO_PLAYER`. | Yes, for sound. The jaw can still move if the player is missing; the log says it is animating silently. |
 
 On this machine after a reboot, Piper and Rhubarb were on `PATH` and the player was `pw-play`. The voice variable was empty, and that was the whole failure.
@@ -37,7 +37,7 @@ What has to ship is the executable plus `res/`, because the binary looks beside 
 
 `PRESENCE_RHUBARB_BIN` remains the override. When it is empty, the daemon uses the packaged binary, not a `rhubarb` that happens to be earlier on `PATH`. A packaged `res/` next to a different binary on `PATH` would be the wrong resources. The PATH name is only the fallback when no packaged binary exists, which is today's behavior and stays until the files are staged.
 
-The default recognizer stays `pocketSphinx`, so `res/sphinx` stays too. Switching to `phonetic` to shrink the package would change the mouth track. That is a separate decision.
+The running default is `phonetic` (`docs/plans/speech_overlap.md`). `res/sphinx` stays, because `PRESENCE_RHUBARB_RECOGNIZER=pocketSphinx` is still the precise pass.
 
 ## Piper
 

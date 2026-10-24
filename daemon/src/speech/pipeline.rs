@@ -1,13 +1,17 @@
 //! Utterance preparation: normalize -> cache lookup -> Piper (WAV) -> Rhubarb
-//! (cues) -> faceanim. Runs on the worker thread only; spawns the TTS and
-//! Rhubarb *CLIs* as child processes so no GPL code is linked into the daemon.
+//! (cues) -> faceanim. Piper and Rhubarb are separate stages so the next
+//! sentence can be synthesized while this one is still being mouthed.
+//! Each stage spawns its CLI as a child process. No GPL code is linked in.
 use super::faceanim::{FaceAnim, MAPPING_VERSION};
 use super::SpeechConfig;
 use sha2::{Digest, Sha256};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+
+static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 pub const MAX_TEXT_CHARS: usize = 2000;
 
@@ -207,54 +211,103 @@ fn load_cached(dir: &Path) -> Option<Bundle> {
     Some(Bundle { dir: dir.to_path_buf(), wav, face, cache_hit: true })
 }
 
-/// Produce (or fetch) the bundle for `text`.
-pub fn prepare(cfg: &SpeechConfig, text: &str, cancelled: &dyn Fn() -> bool) -> Result<Bundle, String> {
+/// A wav that exists and has not been mouthed yet. Dropping it deletes the temp dir.
+pub struct WavDraft {
+    text: String,
+    normalized: String,
+    key: String,
+    tmp: PathBuf,
+    wav: PathBuf,
+    tts_ms: u128,
+    wav_secs: f32,
+}
+
+impl Drop for WavDraft {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.tmp);
+    }
+}
+
+pub enum Synth {
+    Cached(Bundle),
+    Wav(WavDraft),
+}
+
+/// Cache lookup, or Piper. A hit never starts Rhubarb.
+pub fn synthesize(cfg: &SpeechConfig, text: &str, cancelled: &dyn Fn() -> bool) -> Result<Synth, String> {
     let normalized = normalize_text(text)?;
     let key = cache_key(cfg, &normalized);
     let dir = cfg.cache_dir.join(&key);
-    if let Some(b) = load_cached(&dir) { return Ok(b); }
+    if let Some(b) = load_cached(&dir) { return Ok(Synth::Cached(b)); }
     let model = cfg.piper_model.as_ref().ok_or("no TTS voice configured: set PRESENCE_PIPER_MODEL to a Piper .onnx voice")?;
 
     std::fs::create_dir_all(&cfg.cache_dir).map_err(|e| format!("cache dir: {e}"))?;
-    let tmp = cfg.cache_dir.join(format!("{key}.tmp-{}", std::process::id()));
+    let n = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = cfg.cache_dir.join(format!("{key}.tmp-{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).map_err(|e| format!("cache tmp: {e}"))?;
-    let result = (|| -> Result<(), String> {
-        let t0 = Instant::now();
-        let wav = tmp.join("speech.wav");
-        let mut piper = Command::new(&cfg.piper_bin);
-        piper.arg("-m").arg(model).arg("-f").arg(&wav); // short flags: valid for piper and piper1-gpl
-        run(piper, Some(&normalized), "piper", cancelled)?;
-        let tts_ms = t0.elapsed().as_millis();
-        let wav_secs = wav_duration(&wav)?;
-        if cancelled() { return Err("cancelled".into()); }
+    let wav = tmp.join("speech.wav");
+    let t0 = Instant::now();
+    let mut piper = Command::new(&cfg.piper_bin);
+    piper.arg("-m").arg(model).arg("-f").arg(&wav); // short flags: valid for piper and piper1-gpl
+    if let Err(e) = run(piper, Some(&normalized), "piper", cancelled) {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(e);
+    }
+    let tts_ms = t0.elapsed().as_millis();
+    let wav_secs = match wav_duration(&wav) {
+        Ok(s) => s,
+        Err(e) => { let _ = std::fs::remove_dir_all(&tmp); return Err(e); }
+    };
+    if cancelled() {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err("cancelled".into());
+    }
+    Ok(Synth::Wav(WavDraft { text: text.to_string(), normalized, key, tmp, wav, tts_ms, wav_secs }))
+}
 
-        let dialog = tmp.join("dialog.txt");
-        std::fs::write(&dialog, &normalized).map_err(|e| e.to_string())?;
-        let json = tmp.join("rhubarb.json");
+/// Rhubarb, then publish the bundle. Dropping the draft removes a temp dir that was not renamed away.
+pub fn mouth(cfg: &SpeechConfig, draft: WavDraft, cancelled: &dyn Fn() -> bool) -> Result<Bundle, String> {
+    let result = (|| -> Result<(), String> {
+        let dialog = draft.tmp.join("dialog.txt");
+        std::fs::write(&dialog, &draft.normalized).map_err(|e| e.to_string())?;
+        let json = draft.tmp.join("rhubarb.json");
         let t1 = Instant::now();
         let mut rb = Command::new(&cfg.rhubarb_bin);
-        rb.args(["-f", "json", "--extendedShapes", "GHX", "-q", "-r"]).arg(&cfg.rhubarb_recognizer).arg("-d").arg(&dialog).arg("-o").arg(&json).arg(&wav);
+        rb.args(["-f", "json", "--extendedShapes", "GHX", "-q", "-r"]).arg(&cfg.rhubarb_recognizer).arg("-d").arg(&dialog).arg("-o").arg(&json).arg(&draft.wav);
         run(rb, None, "rhubarb", cancelled)?;
         let rhubarb_ms = t1.elapsed().as_millis();
         let mut face = FaceAnim::from_rhubarb_json(&std::fs::read_to_string(&json).map_err(|e| format!("rhubarb.json: {e}"))?)?;
         // The WAV is the clock: trust its length over Rhubarb's metadata.
-        face.duration = wav_secs;
-        std::fs::write(tmp.join("faceanim.json"), face.to_json()).map_err(|e| e.to_string())?;
+        face.duration = draft.wav_secs;
+        std::fs::write(draft.tmp.join("faceanim.json"), face.to_json()).map_err(|e| e.to_string())?;
         let meta = serde_json::json!({
-            "key": key, "text": text, "normalized": normalized, "voice": cfg.voice_id(), "engine": cfg.engine_id,
+            "key": draft.key, "text": draft.text, "normalized": draft.normalized, "voice": cfg.voice_id(), "engine": cfg.engine_id,
             "recognizer": cfg.rhubarb_recognizer, "mappingVersion": MAPPING_VERSION,
-            "wavSeconds": wav_secs, "ttsMs": tts_ms, "rhubarbMs": rhubarb_ms,
+            "wavSeconds": draft.wav_secs, "ttsMs": draft.tts_ms, "rhubarbMs": rhubarb_ms,
         });
-        std::fs::write(tmp.join("speech.json"), serde_json::to_string_pretty(&meta).unwrap_or_default()).map_err(|e| e.to_string())?;
+        std::fs::write(draft.tmp.join("speech.json"), serde_json::to_string_pretty(&meta).unwrap_or_default()).map_err(|e| e.to_string())?;
+        let dir = cfg.cache_dir.join(&draft.key);
+        if dir.exists() {
+            let _ = std::fs::remove_dir_all(&draft.tmp);
+        } else if let Err(e) = std::fs::rename(&draft.tmp, &dir) {
+            let _ = std::fs::remove_dir_all(&draft.tmp);
+            if !dir.exists() { return Err(format!("cache publish: {e}")); }
+        }
         Ok(())
     })();
-    if let Err(e) = result { let _ = std::fs::remove_dir_all(&tmp); return Err(e); }
-    if dir.exists() { let _ = std::fs::remove_dir_all(&tmp); } else if let Err(e) = std::fs::rename(&tmp, &dir) {
-        let _ = std::fs::remove_dir_all(&tmp);
-        if !dir.exists() { return Err(format!("cache publish: {e}")); }
-    }
+    let key = draft.key.clone();
+    if let Err(e) = result { return Err(e); }
+    let dir = cfg.cache_dir.join(&key);
     let mut b = load_cached(&dir).ok_or("cache bundle unreadable after write")?;
     b.cache_hit = false;
     Ok(b)
+}
+
+/// Produce (or fetch) the bundle for `text`. Piper, then Rhubarb, on the caller's thread.
+pub fn prepare(cfg: &SpeechConfig, text: &str, cancelled: &dyn Fn() -> bool) -> Result<Bundle, String> {
+    match synthesize(cfg, text, cancelled)? {
+        Synth::Cached(bundle) => Ok(bundle),
+        Synth::Wav(draft) => mouth(cfg, draft, cancelled),
+    }
 }

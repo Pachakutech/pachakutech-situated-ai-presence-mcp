@@ -178,4 +178,4 @@ The daemon splits an utterance on `.?!` (abbreviations, initials, decimals, and 
 
 A teaching reply can pass cues. Each cue names a sentence and a passage. The locator finds the first passage before any audio. A follower polls `querySpeech` and looks up the next passage while the previous sentence plays, then moves the mark when the crop passes. One search at a time. On the web the open tab jumps to the phrase, the tint comes down for that jump, and a miss leaves it down. A mark placed this way stays up until the utterance ends. See `docs/plans/cue_jump.md`.
 
-The quiet that remains when the next prepare outlasts the clip is `docs/plans/speech_overlap.md`. Piper for the following sentence still waits inside one `prepare` until Rhubarb has returned.
+`docs/plans/speech_overlap.md` splits that prepare. Piper for the following sentence starts when this wav exists, while Rhubarb is still reading it. The default recognizer is phonetic.
