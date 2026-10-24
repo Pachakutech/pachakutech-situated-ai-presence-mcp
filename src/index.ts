@@ -232,9 +232,10 @@ server.registerTool(
       "One call. Pass text, the spoken reply, and either one query or cues. " +
       "cues annotate that reply: each at is one sentence of text, and each query is the passage to find on the page. " +
       "The runtime splits text, binds the cues, finds the first passage before any audio, then speaks. " +
-      "Later passages move with the sentence clips. During the quiet between clips the next passage is found. " +
-      "The tint comes down while the page moves and goes up when the crop passes. " +
-      "It stays for the utterance, and its safety cap is about as long as the words. A miss on the first passage does not tint and does not speak. " +
+      "A cue covers its sentence and every sentence until the next cue, and the same query keeps that highlight. " +
+      "Those sentences start once the tint is up. When they have been said, the page scrolls and the next tint goes up, and then those sentences begin. " +
+      "Inside one passage the sentences follow on. The tint comes down while the page moves and goes up when the crop passes. " +
+      "It stays for the passage, and its safety cap is about as long as the words. A miss on the first passage does not tint and does not speak. " +
       "With no cues, the tint lasts durationSeconds (default 90, max 360). " +
       "One rate-limit tick. text is the spoken line, not a summary of the matched phrase. " +
       "Web can scroll. PDF opens Evince and accepts page. Terminal, doc, and ide read a window already up. " +
@@ -252,7 +253,7 @@ server.registerTool(
           }),
         )
         .optional()
-        .describe("Notes on text. Each names a sentence and the words to find on the page. The first passage is found before any audio. The tint stays for the utterance, and its safety cap is about as long as the words"),
+        .describe("Notes on text. Each names a sentence and the words to find on the page. Sentences until the next cue share that highlight. The same query stays on one place. The tint goes up before those sentences, and the page moves when they have been said"),
     },
   },
   async ({ presenceId, text, source, query, uri, page, pad, timeoutS, noOpen, windowClass, windowTitle, durationSeconds, cues }) => {

@@ -8,7 +8,7 @@ import { sendProposal } from "../daemonControl.js";
 import { cueReport, spawnCueFollow, type CueJob } from "./cues.js";
 import { IDE_CLASS, TERMINAL_CLASS, chooseSurface, escapeRegExp } from "./choose.js";
 import { parseTsv, type Box, type Word } from "./core.js";
-import { resolveCues, speechHoldSeconds, splitSentences, type CueIn } from "./sentences.js";
+import { cueGroups, resolveCues, speechHoldSeconds, splitSentences, type CueIn } from "./sentences.js";
 import { WINDOW_PATH, locatePdf } from "./pdf.js";
 import { locateStill, type StillDeps } from "./surface.js";
 import { locateWeb, withTextFragment, type Client, type LocateErr, type LocateOk, type LocateResult, type WebOpts } from "./web.js";
@@ -695,13 +695,18 @@ async function speakWithCues(flags: Flags, presenceId: string, text: string): Pr
       cues: cueReport(resolved, null),
     };
   }
-  const first = armed.reduce((best, cue) => (cue.sentenceIndex! < best.sentenceIndex! ? cue : best));
-  const located = await locateRegion({ ...flags, query: first.query, verify: true, presence: presenceId });
+  const groups = cueGroups(
+    sentences.length,
+    armed.map((cue) => ({ query: cue.query, sentenceIndex: cue.sentenceIndex as number })),
+  );
+  const opening = groups[0];
+  const openingText = sentences.slice(opening.from, opening.to).join(" ");
+  const located = await locateRegion({ ...flags, query: opening.query, verify: true, presence: presenceId });
   if (!located.ok) {
     return { ...located, sentences, cues: cueReport(resolved, null) };
   }
+  const hold = speechHoldSeconds(openingText);
   try {
-    const hold = speechHoldSeconds(text);
     await mark(presenceId, located, hold, true);
     log(`locate: marked ${presenceId} until speech ends`);
   } catch (error) {
@@ -715,12 +720,20 @@ async function speakWithCues(flags: Flags, presenceId: string, text: string): Pr
       cues: cueReport(resolved, null),
     };
   }
+  let beforeGeneration = 0;
+  try {
+    const prior = await sendProposal({ kind: "querySpeech", proposalId: "cli-speech" });
+    const detail = prior.detail as { generation?: number } | undefined;
+    if (typeof detail?.generation === "number") beforeGeneration = detail.generation;
+  } catch {
+    // The follower still waits for a generation that carries these sentences.
+  }
   try {
     await sendProposal({
       kind: "animatePresence",
       proposalId: "cli-highlight-and-speak",
       presenceId,
-      text: text.trim(),
+      text: openingText,
     });
     log(`locate: spoke ${presenceId}`);
   } catch (error) {
@@ -731,7 +744,7 @@ async function speakWithCues(flags: Flags, presenceId: string, text: string): Pr
       error: "speak_failed",
       hint: `${detail} The tint is already up.`,
       sentences,
-      cues: cueReport(resolved, first.sentenceIndex),
+      cues: cueReport(resolved, opening.sentenceIndex),
     };
   }
   const job: CueJob = {
@@ -745,12 +758,14 @@ async function speakWithCues(flags: Flags, presenceId: string, text: string): Pr
     windowTitle: flags.windowTitle,
     page: flags.page,
     sentences,
+    beforeGeneration,
+    groups,
     cues: armed.map((cue) => ({
       at: cue.at,
       query: cue.query,
       sentenceIndex: cue.sentenceIndex as number,
-      state: cue.sentenceIndex === first.sentenceIndex ? "shown" : "pending",
-      ...(cue.sentenceIndex === first.sentenceIndex
+      state: cue.sentenceIndex === opening.sentenceIndex ? "shown" : "pending",
+      ...(cue.sentenceIndex === opening.sentenceIndex
         ? { u: located.u, v: located.v, w: located.w, h: located.h }
         : {}),
     })),
@@ -760,10 +775,10 @@ async function speakWithCues(flags: Flags, presenceId: string, text: string): Pr
   else log("locate: cue follow running");
   return {
     ...located,
-    highlight: { status: "ok", durationSeconds: speechHoldSeconds(text), untilSpeech: true },
+    highlight: { status: "ok", durationSeconds: hold, untilSpeech: true },
     speak: { status: "ok" },
     sentences,
-    cues: cueReport(resolved, first.sentenceIndex),
+    cues: cueReport(resolved, opening.sentenceIndex),
     follow: follow.ok ? "running" : "failed",
   };
 }

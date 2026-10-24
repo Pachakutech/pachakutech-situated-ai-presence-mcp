@@ -52,4 +52,4 @@ This is the daemon. A release build, a stage, and a restart. The restart drops t
 
 ### Out of scope
 
-A second Rhubarb. A long-lived Piper process, which is Phase C in `docs/plans/sentence_pipeline.md`. Once the next Piper sits beside the current Rhubarb, that cold start is behind the mouth pass, and it comes back onto the list only if a short clip still shows it. Linking Piper into the daemon stays out. Scroll speed, the cue clock, and the highlight cap stay as they are.
+A second Rhubarb. A long-lived Piper process, which is Phase C in `docs/plans/sentence_pipeline.md`. Once the next Piper sits beside the current Rhubarb, that cold start is behind the mouth pass, and it comes back onto the list only if a short clip still shows it. Linking Piper into the daemon stays out. Scroll speed and the highlight cap stay as they are. A teaching passage now finishes before the page moves.

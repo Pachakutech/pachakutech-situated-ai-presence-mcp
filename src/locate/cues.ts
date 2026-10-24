@@ -1,11 +1,13 @@
-// Moves the mark as the sentence clips play. The daemon owns the clock.
-// This process locates the next passage and tints it. Speech does not wait.
+// A cue is a passage. Its sentences are spoken once the highlight is showing.
+// When they have finished, this process scrolls and raises the next highlight,
+// and only then are those sentences spoken. Inside one passage the daemon
+// still runs the sentences on each other's heels.
 
 import { spawn } from "node:child_process";
 import { closeSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { daemonStateDir, sendProposal } from "../daemonControl.js";
-import { nextSearch, speechHoldSeconds, type ResolvedCue } from "./sentences.js";
+import { speechHoldSeconds, type CueGroup, type ResolvedCue } from "./sentences.js";
 
 export type CueJob = {
   presenceId: string;
@@ -18,6 +20,9 @@ export type CueJob = {
   windowTitle?: string;
   page?: number;
   sentences: string[];
+  /** Generation published before the opening passage was spoken. */
+  beforeGeneration: number;
+  groups: CueGroup[];
   cues: Array<{
     at: string;
     query: string;
@@ -51,10 +56,6 @@ function sleep(ms: number) {
 function sameSentences(a: string[] | undefined, b: string[]): boolean {
   if (!a || a.length !== b.length) return false;
   return a.every((sentence, i) => sentence === b[i]);
-}
-
-function near(a: Box, b: Box): boolean {
-  return Math.abs(a.u - b.u) < 0.004 && Math.abs(a.v - b.v) < 0.004 && Math.abs(a.w - b.w) < 0.004 && Math.abs(a.h - b.h) < 0.004;
 }
 
 async function querySpeech(): Promise<SpeechSnap | null> {
@@ -132,107 +133,47 @@ export async function cueFollowMain(path: string | undefined): Promise<number> {
   return 0;
 }
 
-/** Poll the sentence clock and move the mark. One page search at a time. */
-export async function followJob(job: CueJob): Promise<void> {
-  const cues = job.cues.map((cue) => ({ ...cue }));
-  let locked: number | null = null;
-  let sawPlay = false;
-  let lastLogged = -1;
-  let searching = false;
-  let lastBox: Box | null = null;
-  const shown = cues.find((cue) => cue.state === "shown" && cue.u !== undefined);
-  if (shown && shown.u !== undefined && shown.v !== undefined && shown.w !== undefined && shown.h !== undefined) {
-    lastBox = { u: shown.u, v: shown.v, w: shown.w, h: shown.h };
-  }
+type Wait = { status: "done"; generation: number } | { status: "lost" } | { status: "missed" };
+
+/** Wait until this passage has been accepted and then finished. */
+async function waitForUtterance(sentences: string[], beforeGeneration: number): Promise<Wait> {
   const appearBy = Date.now() + 8000;
   const giveUp = Date.now() + 360_000;
-  log(`cue follow ${job.presenceId} ${cues.length} cue(s)`);
-
+  let locked: number | null = null;
   while (Date.now() < giveUp) {
     const snap = await querySpeech();
-    if (!snap) {
-      await sleep(150);
-      continue;
-    }
-    if (locked === null) {
-      if (sameSentences(snap.sentences, job.sentences) && snap.phase !== "idle") {
-        locked = snap.generation ?? null;
-      } else if (Date.now() > appearBy) {
-        log("cue follow gave up waiting for the utterance");
-        return;
-      } else {
-        await sleep(120);
-        continue;
-      }
-    }
-    if (snap.generation !== locked) {
-      log("cue follow stopped because a new utterance started");
-      return;
-    }
-    if (snap.phase === "idle") {
-      log(sawPlay ? "cue follow done" : "cue follow stopped before any clip");
-      return;
-    }
-    const index = typeof snap.index === "number" ? snap.index : null;
-    if ((snap.phase === "play" || snap.phase === "gap") && index !== null) {
-      sawPlay = true;
-      if (snap.phase === "play" && index !== lastLogged) {
-        log(`sentence ${index + 1}/${snap.count ?? job.sentences.length}`);
-        lastLogged = index;
-      }
-      for (const cue of cues) {
-        if (cue.state === "pending" && cue.sentenceIndex < index) {
-          cue.state = "miss";
-          log(`cue sentence ${cue.sentenceIndex + 1} missed its clip`);
-        }
-      }
-      if (!searching) {
-        const target = nextSearch(
-          index,
-          cues.map((cue) => ({ sentenceIndex: cue.sentenceIndex, state: cue.state })),
-          snap.phase,
-        );
-        const cue = target === null ? undefined : cues.find((item) => item.sentenceIndex === target && item.state === "pending");
-        if (cue) {
-          searching = true;
-          cue.state = "searching";
-          const generation = locked;
-          await searchCue(job, cue, () => lastBox, (box) => {
-            lastBox = box;
-          }, async () => {
-            const now = await querySpeech();
-            if (!now || now.generation !== generation || now.phase === "idle") return false;
-            // A tint for a sentence that has already finished would colour the wrong line.
-            if (typeof now.index === "number" && now.index > cue.sentenceIndex) return false;
-            return true;
-          });
-          searching = false;
-        }
-      }
+    if (snap && sameSentences(snap.sentences, sentences) && (snap.generation ?? 0) !== beforeGeneration) {
+      locked = snap.generation ?? locked;
+      if (snap.phase === "idle") return { status: "done", generation: locked ?? beforeGeneration };
+    } else if (locked !== null && snap && snap.generation !== locked) {
+      return { status: "lost" };
+    } else if (locked === null && Date.now() > appearBy) {
+      return { status: "missed" };
     }
     await sleep(120);
   }
-  log("cue follow stopped at the utterance cap");
+  return locked === null ? { status: "missed" } : { status: "lost" };
 }
 
-async function searchCue(
-  job: CueJob,
-  cue: CueJob["cues"][number],
-  lastBox: () => Box | null,
-  setBox: (box: Box) => void,
-  stillCurrent: () => Promise<boolean>,
-): Promise<void> {
+async function generationStill(generation: number): Promise<boolean> {
+  const now = await querySpeech();
+  if (!now) return true;
+  return (now.generation ?? 0) === generation;
+}
+
+/** Scroll to this passage and tint it. Speech stays idle while the page moves. */
+async function placeGroup(job: CueJob, group: CueGroup, holdText: string, generation: number): Promise<"shown" | "miss" | "lost"> {
+  if (!(await generationStill(generation))) return "lost";
   const { locateRegion } = await import("./run.js");
   await concealForJump(job.presenceId);
   let located: Awaited<ReturnType<typeof locateRegion>>;
   try {
     located = await locateRegion({
       source: job.source,
-      query: cue.query,
+      query: group.query,
       uri: job.uri,
       pad: job.pad,
       timeoutS: job.timeoutS,
-      // The parent already opened the page. Another open would be another window.
       noOpen: true,
       fragmentJump: job.source === "web" && Boolean(job.uri),
       stepRatio: job.source === "web" ? 0.25 : undefined,
@@ -243,43 +184,90 @@ async function searchCue(
       presence: job.presenceId,
     });
   } catch (error) {
-    cue.state = "miss";
     const detail = error instanceof Error ? error.message : String(error);
-    log(`cue sentence ${cue.sentenceIndex + 1} miss ${detail}`);
-    return;
+    log(`cue sentence ${group.sentenceIndex + 1} miss ${detail}`);
+    return "miss";
   }
   if (!located.ok) {
-    cue.state = "miss";
-    log(`cue sentence ${cue.sentenceIndex + 1} miss ${located.error}`);
-    return;
+    log(`cue sentence ${group.sentenceIndex + 1} miss ${located.error}`);
+    return "miss";
   }
-  if (!(await stillCurrent())) {
-    cue.state = "miss";
-    log(`cue sentence ${cue.sentenceIndex + 1} missed its clip`);
-    return;
-  }
-  const box = { u: located.u, v: located.v, w: located.w, h: located.h };
-  const previous = lastBox();
-  if (previous && near(previous, box)) {
-    log(`cue sentence ${cue.sentenceIndex + 1} still on the same box`);
-  }
+  if (!(await generationStill(generation))) return "lost";
   try {
-    const from = Math.max(0, cue.sentenceIndex - 1);
-    const holdText = job.sentences.slice(from, cue.sentenceIndex + 1).join(" ");
-    await markHeld(job.presenceId, box, located.matchedText, holdText);
+    await markHeld(job.presenceId, { u: located.u, v: located.v, w: located.w, h: located.h }, located.matchedText, holdText);
   } catch (error) {
-    cue.state = "miss";
     const detail = error instanceof Error ? error.message : String(error);
-    log(`cue sentence ${cue.sentenceIndex + 1} miss ${detail}`);
+    log(`cue sentence ${group.sentenceIndex + 1} miss ${detail}`);
+    return "miss";
+  }
+  log(`cue sentence ${group.sentenceIndex + 1} shown ${located.evidence.screenBox.w}x${located.evidence.screenBox.h} at ${located.evidence.screenBox.x},${located.evidence.screenBox.y} ${located.matchedText}`);
+  return "shown";
+}
+
+async function speakGroup(presenceId: string, text: string): Promise<boolean> {
+  try {
+    await sendProposal({
+      kind: "animatePresence",
+      proposalId: "cli-cue-speak",
+      presenceId,
+      text,
+    });
+    return true;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    log(`cue speak failed: ${detail}`);
+    return false;
+  }
+}
+
+/**
+ * The opening passage is already tinted and speaking. Wait until it finishes,
+ * then move. Each later passage is tinted before its sentences start.
+ */
+export async function followJob(job: CueJob): Promise<void> {
+  const groups = job.groups ?? [];
+  if (!groups.length) {
+    log("cue follow had no passages");
     return;
   }
-  cue.state = "shown";
-  cue.u = box.u;
-  cue.v = box.v;
-  cue.w = box.w;
-  cue.h = box.h;
-  setBox(box);
-  log(`cue sentence ${cue.sentenceIndex + 1} shown ${located.evidence.screenBox.w}x${located.evidence.screenBox.h} at ${located.evidence.screenBox.x},${located.evidence.screenBox.y} ${located.matchedText}`);
+  log(`cue follow ${job.presenceId} ${groups.length} passage(s)`);
+  const opening = groups[0];
+  const openingSentences = job.sentences.slice(opening.from, opening.to);
+  let waited = await waitForUtterance(openingSentences, job.beforeGeneration ?? 0);
+  if (waited.status === "lost") {
+    log("cue follow stopped because a new utterance started");
+    return;
+  }
+  if (waited.status === "missed") {
+    log("cue follow gave up waiting for the utterance");
+    return;
+  }
+  let generation = waited.generation;
+  for (let i = 1; i < groups.length; i++) {
+    const group = groups[i];
+    const sentences = job.sentences.slice(group.from, group.to);
+    const text = sentences.join(" ");
+    const placed = await placeGroup(job, group, text, generation);
+    if (placed === "lost") {
+      log("cue follow stopped because a new utterance started");
+      return;
+    }
+    const prior = await querySpeech();
+    if (prior && (prior.generation ?? 0) !== generation) {
+      log("cue follow stopped because a new utterance started");
+      return;
+    }
+    const before = prior?.generation ?? generation;
+    if (!(await speakGroup(job.presenceId, text))) return;
+    log(`cue passage ${i + 1} speaking`);
+    waited = await waitForUtterance(sentences, before);
+    if (waited.status !== "done") {
+      log(waited.status === "lost" ? "cue follow stopped because a new utterance started" : "cue follow gave up waiting for the utterance");
+      return;
+    }
+    generation = waited.generation;
+  }
+  log("cue follow done");
 }
 
 export function cueReport(cues: ResolvedCue[], shownIndex: number | null) {

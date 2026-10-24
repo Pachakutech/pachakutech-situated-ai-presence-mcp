@@ -104,7 +104,7 @@ export async function locateStill(opts: StillOpts, deps: StillDeps): Promise<Loc
     }
     if (!picked) {
       deps.log("locate: waiting for a window");
-      await deps.sleep(300);
+      await deps.sleep(500);
       continue;
     }
     sawWindow = true;
@@ -151,7 +151,7 @@ export async function locateStill(opts: StillOpts, deps: StillDeps): Promise<Loc
       if (!paintStarted) paintStarted = deps.now();
       if (!fromMemory && !painted && deps.now() - paintStarted < PAINT_WAIT_MS) {
         deps.log("locate: window is up, text is not painted yet");
-        await deps.sleep(300);
+        await deps.sleep(500);
         continue frame;
       }
 
@@ -184,7 +184,7 @@ export async function locateStill(opts: StillOpts, deps: StillDeps): Promise<Loc
         }
         if (deps.now() < settleUntil) {
           deps.log("locate: page is settling");
-          await deps.sleep(300);
+          await deps.sleep(500);
           continue frame;
         }
         return fail(opts.source, "quote_not_found", painted ? opts.missedHint : opts.absentHint);

@@ -106,6 +106,8 @@ export type Deps = {
 
 const PAINT_WAIT_MS = 4000;
 const PAINT_WORDS = 5;
+/** The window is listed a little before it can be read. Half a second hits the first check. */
+const WINDOW_SETTLE_MS = 500;
 
 function fail(error: string, hint: string): LocateErr {
   return { ok: false, source: "web", error, hint };
@@ -144,6 +146,7 @@ export async function locateWeb(opts: WebOpts, deps: Deps): Promise<LocateResult
       const detail = error instanceof Error ? error.message : String(error);
       return fail("browser_open_failed", detail);
     }
+    await deps.sleep(WINDOW_SETTLE_MS);
   }
 
   let fragmentLanded = opts.opened;
@@ -165,7 +168,7 @@ export async function locateWeb(opts: WebOpts, deps: Deps): Promise<LocateResult
     const win = chooseWindow(clients, opts);
     if (!win) {
       deps.log("locate: waiting for a browser window");
-      await deps.sleep(300);
+      await deps.sleep(WINDOW_SETTLE_MS);
       continue;
     }
     // A window on another workspace still reports monitor coordinates. Subtracting
@@ -201,7 +204,7 @@ export async function locateWeb(opts: WebOpts, deps: Deps): Promise<LocateResult
       const painted = lines.reduce((sum, line) => sum + line.words.length, 0) >= PAINT_WORDS;
       if (!fromMemory && !painted && deps.now() - started < PAINT_WAIT_MS) {
         deps.log("locate: window is up, page text is not painted yet");
-        await deps.sleep(300);
+        await deps.sleep(WINDOW_SETTLE_MS);
         continue frame;
       }
       seenPaint = seenPaint || painted;
@@ -316,7 +319,7 @@ export async function locateWeb(opts: WebOpts, deps: Deps): Promise<LocateResult
       return fail("focus_failed", "Could not focus the browser, so the page was not scrolled.");
     }
     deps.log(decision.action.type === "top" ? "locate: scroll to top" : `locate: scroll ${decision.action.dy}`);
-    await deps.sleep(280);
+    await deps.sleep(WINDOW_SETTLE_MS);
     continue frame;
     }
   }

@@ -211,11 +211,11 @@ seconds, and the book is cleared when the session is hidden.
 A reply that walks through more than one passage is handed over once.
 `text` is the utterance. `cues` are notes on that same utterance. Each
 note is a pair, `at` and `query`. `at` names one sentence of `text`.
-`query` is the passage to find on the page while that sentence plays.
-Those words are the words on the glass, a phrase or `start ... end`.
-The annotation is the whole instruction. The call returns when the
-utterance is accepted, and the sentence clock inside the daemon moves
-the mark.
+`query` is the passage to find on the page for that sentence and the
+sentences that follow it until the next note. Those words are the words
+on the glass, a phrase or `start ... end`. The annotation is the whole
+instruction. The call returns when the first passage is accepted. The
+later passages move after each one has been said.
 
 The voice and the notes share one splitter. The reply is cut on
 `.?!`. Abbreviations, initials, decimals, and an ellipsis stay inside
@@ -226,18 +226,23 @@ sentence, and exactly one unused sentence does. Two matches are
 ambiguous, and an unmatched note is skipped. If none of the notes
 bind, the call returns the split sentences and does not speak.
 
-The earliest bound passage is located and tinted before any audio. If
-that locate fails, nothing is spoken. Later passages are looked up
-while the sentence before them plays, one search at a time. During the
-quiet between clips, while the next sentence is prepared, the next
-passage is looked up as well. On the web the open tab is sent to the
-phrase. If that jump does not land, the page is read again in a short
-step. The tint comes down while the page moves, and the new box goes
-up when the crop passes. A miss leaves the tint down. The voice
-continues. A passage whose sentence has already finished is left. The
-tint stays for the utterance and drops when the voice ends. Its safety
-cap is about as long as the words. A single `query`, with no cues,
-remains the one-passage call, and that tint defaults to 90 seconds.
+A cue opens a passage. The passage is that sentence and every sentence
+after it until the next cue, and they share one highlight. A later cue
+with the same query keeps the place, so a run of sentences can stay on
+one mark. The earliest passage is located and tinted before any audio.
+If that locate fails, nothing is spoken. The sentences of a passage are
+spoken once the tint is showing. Inside the passage they follow on
+each other's heels, which is the ordinary gap between clips. When those
+sentences have been said, the page scrolls and the next tint goes up,
+and the next sentences begin after that box is up. On the web the open
+tab is sent to the phrase. If that jump does not land, the page is read
+again in a short step. The first read waits half a second, so a window
+that has just appeared or just moved is there for the check. The tint
+comes down while the page moves, and the new box goes up when the crop
+passes. A miss leaves the tint down. The voice continues. The tint
+stays for the passage and drops when that passage ends. Its safety cap
+is about as long as the words. A single `query`, with no cues, remains
+the one-passage call, and that tint defaults to 90 seconds.
 
 ```bash
 presence highlight-and-speak "$id" --source web --uri "$url" \

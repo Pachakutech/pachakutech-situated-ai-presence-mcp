@@ -148,26 +148,65 @@ export function speechHoldSeconds(text: string): number {
   return Math.min(360, Math.max(6, secs));
 }
 
+export type CueGroup = {
+  query: string;
+  /** The sentence the first cue of this highlight is bound to. */
+  sentenceIndex: number;
+  /** Inclusive index in the sentence list. The opening group includes any lead-in. */
+  from: number;
+  /** Exclusive index. Sentences in `[from, to)` are spoken under this highlight. */
+  to: number;
+};
+
+function samePlace(a: string, b: string): boolean {
+  return a.trim().replace(/\s+/g, " ") === b.trim().replace(/\s+/g, " ");
+}
+
 /**
- * The next passage to look up. The cue on the sentence that is playing comes
- * first. Otherwise the cue on the following sentence, so the scroll can hide
- * in this one. During the quiet between clips, Piper is preparing the next
- * sentence, and the next pending passage is fair game even past that one
- * sentence. A cue whose sentence has already finished is left alone.
- * Null while a search is already running.
+ * One highlight and the sentences spoken under it. A cue covers its sentence
+ * and every sentence after it until the next cue. Another cue with the same
+ * query keeps that highlight, so several sentences can share one place.
+ * Sentences before the first cue are spoken under the first highlight.
+ */
+export function cueGroups(
+  sentenceCount: number,
+  cues: Array<{ query: string; sentenceIndex: number }>,
+): CueGroup[] {
+  if (sentenceCount <= 0) return [];
+  const sorted = cues
+    .filter((cue) => cue.sentenceIndex >= 0 && cue.sentenceIndex < sentenceCount && cue.query.trim())
+    .sort((a, b) => a.sentenceIndex - b.sentenceIndex);
+  const groups: CueGroup[] = [];
+  for (const cue of sorted) {
+    const last = groups[groups.length - 1];
+    if (last && samePlace(last.query, cue.query)) {
+      last.to = Math.max(last.to, cue.sentenceIndex + 1);
+      continue;
+    }
+    if (last) last.to = cue.sentenceIndex;
+    groups.push({
+      query: cue.query.trim(),
+      sentenceIndex: cue.sentenceIndex,
+      from: groups.length === 0 ? 0 : cue.sentenceIndex,
+      to: sentenceCount,
+    });
+  }
+  return groups;
+}
+
+/**
+ * The next passage to look up. Nothing is searched while a sentence is still
+ * playing. During the quiet after a clip, the next cue is due only when that
+ * clip was the last sentence of the current passage. A cue whose sentence is
+ * still ahead stays put, and a search already running stays the only search.
  */
 export function nextSearch(playIndex: number | null, cues: TrackedCue[], phase?: string): number | null {
   if (playIndex === null) return null;
+  if (phase !== "gap") return null;
   if (cues.some((cue) => cue.state === "searching")) return null;
-  const pending = cues.filter((cue) => cue.state === "pending");
-  const due = pending.find((cue) => cue.sentenceIndex === playIndex);
-  if (due) return due.sentenceIndex;
-  if (phase === "gap") {
-    const upcoming = pending
-      .filter((cue) => cue.sentenceIndex > playIndex)
-      .sort((a, b) => a.sentenceIndex - b.sentenceIndex)[0];
-    return upcoming ? upcoming.sentenceIndex : null;
-  }
-  const prefetch = pending.find((cue) => cue.sentenceIndex === playIndex + 1);
-  return prefetch ? prefetch.sentenceIndex : null;
+  const next = cues
+    .filter((cue) => cue.state === "pending" && cue.sentenceIndex > playIndex)
+    .sort((a, b) => a.sentenceIndex - b.sentenceIndex)[0];
+  if (!next || next.sentenceIndex !== playIndex + 1) return null;
+  return next.sentenceIndex;
 }
