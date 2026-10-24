@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { MAX_SENTENCE_CHARS, nextSearch, resolveCues, splitSentences } from "../src/locate/sentences.ts";
+import { MAX_SENTENCE_CHARS, nextSearch, resolveCues, speechHoldSeconds, splitSentences } from "../src/locate/sentences.ts";
 
 test("sentences split on stops and keep abbreviations", () => {
   assert.deepEqual(splitSentences("Hello. Next sentence."), ["Hello.", "Next sentence."]);
@@ -40,9 +40,18 @@ test("the next search is the due cue, else the following sentence", () => {
     { sentenceIndex: 4, state: "pending" as const },
   ];
   assert.equal(nextSearch(0, cues), null);
+  assert.equal(nextSearch(0, cues, "gap"), 2);
   assert.equal(nextSearch(1, cues), 2);
   assert.equal(nextSearch(2, cues), 2);
   assert.equal(nextSearch(3, cues), 4);
   cues[1].state = "searching";
-  assert.equal(nextSearch(3, cues), null);
+  assert.equal(nextSearch(3, cues, "gap"), null);
+});
+
+test("a speech-held tint is capped around the time the words take", () => {
+  const sentence = "Between the desire and the spasm falls the Shadow, and the world ends before the hand can close.";
+  const secs = speechHoldSeconds(sentence);
+  assert.ok(secs >= 6 && secs <= 20, String(secs));
+  assert.equal(speechHoldSeconds(""), 6);
+  assert.equal(speechHoldSeconds("word ".repeat(2000)), 360);
 });

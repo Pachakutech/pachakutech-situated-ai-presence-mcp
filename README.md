@@ -113,7 +113,8 @@ sentence, and finds the first passage before any audio. Later passages
 move with the sentence clips. On the web the open tab jumps to the
 phrase. The tint comes down for that jump and the new box goes up when
 the crop passes. A miss leaves the tint down. The voice continues, and
-the tint stays up until the voice ends. The binding rules are in
+the tint stays up until the voice ends. The safety cap is about as long
+as the words. During the quiet between clips the next passage is found. The binding rules are in
 [Annotating the reply](docs/situated-presence.md#annotating-the-reply).
 `highlight-query` is the same find and tint with no speech. Stdout is one JSON object: the locate box,
 `highlight.status`, and, when it speaks, `speak.status`. `--source` is

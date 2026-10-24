@@ -225,14 +225,16 @@ bind, the call returns the split sentences and does not speak.
 
 The earliest bound passage is located and tinted before any audio. If
 that locate fails, nothing is spoken. Later passages are looked up
-while the sentence before them plays, one search at a time. On the web
-the open tab is sent to the phrase. If that jump does not land, the
-page is read again in a short step. The tint comes down while the page
-moves, and the new box goes up when the crop passes. A miss leaves the
-tint down. The voice continues. A passage whose sentence has already
-finished is left. The tint stays for the utterance and drops when the
-voice ends. A single `query`, with no cues, remains the one-passage
-call, and that tint defaults to 90 seconds.
+while the sentence before them plays, one search at a time. During the
+quiet between clips, while the next sentence is prepared, the next
+passage is looked up as well. On the web the open tab is sent to the
+phrase. If that jump does not land, the page is read again in a short
+step. The tint comes down while the page moves, and the new box goes
+up when the crop passes. A miss leaves the tint down. The voice
+continues. A passage whose sentence has already finished is left. The
+tint stays for the utterance and drops when the voice ends. Its safety
+cap is about as long as the words. A single `query`, with no cues,
+remains the one-passage call, and that tint defaults to 90 seconds.
 
 ```bash
 presence highlight-and-speak "$id" --source web --uri "$url" \

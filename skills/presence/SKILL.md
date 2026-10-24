@@ -27,7 +27,7 @@ When one reply walks through more than one passage, annotate that reply. Pass `t
 
 The runtime splits `text` on `.?!` and binds each cue to one sentence. `at` is at least 16 characters, or the whole sentence, and it matches exactly one unused sentence: the sentence starts with `at`, or `at` starts with the sentence. An unknown or ambiguous `at` is reported and skipped. If none of the cues bind, the call does not speak.
 
-The first passage is found and tinted before any audio. Later passages move on the sentence clock. The call returns when the utterance is accepted. Nothing is sent back to ask for the next mark. On the web the open tab jumps to the phrase. The tint comes down while the page moves, and the new box goes up when the crop passes. A later miss leaves the tint down and the voice continues. The tint stays for the utterance and drops when the voice ends.
+The first passage is found and tinted before any audio. Later passages move on the sentence clock. During the quiet between clips the next passage is found, so the new box can be up while the next sentence is prepared. The call returns when the utterance is accepted. Nothing is sent back to ask for the next mark. On the web the open tab jumps to the phrase. The tint comes down while the page moves, and the new box goes up when the crop passes. A later miss leaves the tint down and the voice continues. The tint stays for the utterance and drops when the voice ends. Its safety cap is about as long as the words.
 
 If the phrase cannot be found, the tool returns the locate error. It does not tint, and it does not speak. Speak with no mark only by calling `animatePresence` yourself after that error.
 

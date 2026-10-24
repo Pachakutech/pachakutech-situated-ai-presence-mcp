@@ -5,7 +5,7 @@ import { spawn } from "node:child_process";
 import { closeSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { daemonStateDir, sendProposal } from "../daemonControl.js";
-import { nextSearch, type ResolvedCue } from "./sentences.js";
+import { nextSearch, speechHoldSeconds, type ResolvedCue } from "./sentences.js";
 
 export type CueJob = {
   presenceId: string;
@@ -76,7 +76,7 @@ async function concealForJump(presenceId: string): Promise<void> {
   }
 }
 
-async function markHeld(presenceId: string, box: Box, description: string): Promise<void> {
+async function markHeld(presenceId: string, box: Box, description: string, holdText: string): Promise<void> {
   const reply = await sendProposal({
     kind: "highlightRegion",
     proposalId: "cli-cue",
@@ -86,7 +86,8 @@ async function markHeld(presenceId: string, box: Box, description: string): Prom
     v: box.v,
     w: box.w,
     h: box.h,
-    durationSeconds: 360,
+    // The voice drops the tint when it ends. This is the cap if that signal is missed.
+    durationSeconds: speechHoldSeconds(holdText),
     untilSpeech: true,
   });
   if (reply.status === "error") throw new Error(reply.error || "highlight failed");
@@ -186,7 +187,11 @@ export async function followJob(job: CueJob): Promise<void> {
         }
       }
       if (!searching) {
-        const target = nextSearch(index, cues.map((cue) => ({ sentenceIndex: cue.sentenceIndex, state: cue.state })));
+        const target = nextSearch(
+          index,
+          cues.map((cue) => ({ sentenceIndex: cue.sentenceIndex, state: cue.state })),
+          snap.phase,
+        );
         const cue = target === null ? undefined : cues.find((item) => item.sentenceIndex === target && item.state === "pending");
         if (cue) {
           searching = true;
@@ -259,7 +264,9 @@ async function searchCue(
     log(`cue sentence ${cue.sentenceIndex + 1} still on the same box`);
   }
   try {
-    await markHeld(job.presenceId, box, located.matchedText);
+    const from = Math.max(0, cue.sentenceIndex - 1);
+    const holdText = job.sentences.slice(from, cue.sentenceIndex + 1).join(" ");
+    await markHeld(job.presenceId, box, located.matchedText, holdText);
   } catch (error) {
     cue.state = "miss";
     const detail = error instanceof Error ? error.message : String(error);

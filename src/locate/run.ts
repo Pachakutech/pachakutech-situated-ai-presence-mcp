@@ -8,7 +8,7 @@ import { sendProposal } from "../daemonControl.js";
 import { cueReport, spawnCueFollow, type CueJob } from "./cues.js";
 import { IDE_CLASS, TERMINAL_CLASS, chooseSurface, escapeRegExp } from "./choose.js";
 import { parseTsv, type Box, type Word } from "./core.js";
-import { resolveCues, splitSentences, type CueIn } from "./sentences.js";
+import { resolveCues, speechHoldSeconds, splitSentences, type CueIn } from "./sentences.js";
 import { WINDOW_PATH, locatePdf } from "./pdf.js";
 import { locateStill, type StillDeps } from "./surface.js";
 import { locateWeb, withTextFragment, type Client, type LocateErr, type LocateOk, type LocateResult, type WebOpts } from "./web.js";
@@ -448,7 +448,7 @@ async function mark(
     v: result.v,
     w: result.w,
     h: result.h,
-    durationSeconds: untilSpeech ? MAX_SECONDS : seconds,
+    durationSeconds: untilSpeech ? Math.min(MAX_SECONDS, Math.max(1, Math.round(seconds))) : seconds,
     ...(untilSpeech ? { untilSpeech: true } : {}),
   });
 }
@@ -701,7 +701,8 @@ async function speakWithCues(flags: Flags, presenceId: string, text: string): Pr
     return { ...located, sentences, cues: cueReport(resolved, null) };
   }
   try {
-    await mark(presenceId, located, MAX_SECONDS, true);
+    const hold = speechHoldSeconds(text);
+    await mark(presenceId, located, hold, true);
     log(`locate: marked ${presenceId} until speech ends`);
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
@@ -759,7 +760,7 @@ async function speakWithCues(flags: Flags, presenceId: string, text: string): Pr
   else log("locate: cue follow running");
   return {
     ...located,
-    highlight: { status: "ok", durationSeconds: MAX_SECONDS, untilSpeech: true },
+    highlight: { status: "ok", durationSeconds: speechHoldSeconds(text), untilSpeech: true },
     speak: { status: "ok" },
     sentences,
     cues: cueReport(resolved, first.sentenceIndex),

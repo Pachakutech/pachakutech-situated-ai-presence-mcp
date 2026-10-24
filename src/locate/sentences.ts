@@ -139,17 +139,35 @@ export function resolveCues(sentences: string[], cues: CueIn[]): ResolvedCue[] {
 export type TrackedCue = { sentenceIndex: number; state: "pending" | "searching" | "shown" | "miss" };
 
 /**
+ * How long a speech-held tint may stay up if the voice never signals the end.
+ * About the time these words take, plus a short tail. The voice still drops it sooner.
+ */
+export function speechHoldSeconds(text: string): number {
+  const chars = [...text.replace(/\s+/g, " ").trim()].length;
+  const secs = Math.ceil(chars / 15) + 3;
+  return Math.min(360, Math.max(6, secs));
+}
+
+/**
  * The next passage to look up. The cue on the sentence that is playing comes
  * first. Otherwise the cue on the following sentence, so the scroll can hide
- * in this one. A cue whose sentence has already finished is left alone.
+ * in this one. During the quiet between clips, Piper is preparing the next
+ * sentence, and the next pending passage is fair game even past that one
+ * sentence. A cue whose sentence has already finished is left alone.
  * Null while a search is already running.
  */
-export function nextSearch(playIndex: number | null, cues: TrackedCue[]): number | null {
+export function nextSearch(playIndex: number | null, cues: TrackedCue[], phase?: string): number | null {
   if (playIndex === null) return null;
   if (cues.some((cue) => cue.state === "searching")) return null;
   const pending = cues.filter((cue) => cue.state === "pending");
   const due = pending.find((cue) => cue.sentenceIndex === playIndex);
   if (due) return due.sentenceIndex;
+  if (phase === "gap") {
+    const upcoming = pending
+      .filter((cue) => cue.sentenceIndex > playIndex)
+      .sort((a, b) => a.sentenceIndex - b.sentenceIndex)[0];
+    return upcoming ? upcoming.sentenceIndex : null;
+  }
   const prefetch = pending.find((cue) => cue.sentenceIndex === playIndex + 1);
   return prefetch ? prefetch.sentenceIndex : null;
 }
