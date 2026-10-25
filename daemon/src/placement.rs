@@ -18,14 +18,17 @@
 
 use crate::actors::quietude::QuietudeMemory;
 
-/// Presence layer edge, in output pixels. The seated figure is framed to this.
-pub const DISC_PX: i32 = 330;
-/// Observing bubble, the earlier disc, while no presence owns the body.
+/// Presence layer edge, in output pixels. The seated figure is framed to this
+/// square, and focal length tracks the edge, so this is her size on the desktop.
+/// 220 is two thirds of the earlier 330. [`OBSERVE_PX`] is the idle edge.
+/// `adopt_side` still moves between the two, so a later "a bit bigger" is this constant.
+pub const DISC_PX: i32 = 220;
+/// Observing bubble, while no presence owns the body.
 pub const OBSERVE_PX: i32 = 220;
 /// Side of the square whose area is one and a half times the presence disc.
-/// 330 * sqrt(1.5), rounded. Tight enough that a small calm rectangle
+/// 220 * sqrt(1.5), rounded. Tight enough that a small calm rectangle
 /// is not averaged together with the text beside it.
-pub const NEIGHBOR_SIDE: i32 = 404;
+pub const NEIGHBOR_SIDE: i32 = 269;
 
 /// Side of the 1.5-area window for a disc of `disc` pixels.
 /// The seat shader computes the same round(edge * sqrt(1.5)).
@@ -93,7 +96,7 @@ pub struct Placement {
     hold_y: i32,
     hold_secs: f32,
     was_idle: bool,
-    /// Edge of the disc this glide is placing. 330 with a presence, 220 without.
+    /// Edge of the disc this glide is placing. [`DISC_PX`] with a presence, [`OBSERVE_PX`] without.
     disc_px: i32,
 }
 

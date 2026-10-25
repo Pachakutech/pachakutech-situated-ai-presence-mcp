@@ -12,8 +12,8 @@ the notes under `docs/plans/`.
 
 ## What is running
 
-- A layer-shell disc, 220 pixels while idle and 330 once a presence owns
-  the body. It takes no pointer input and reserves no layout space. A
+- A layer-shell disc, 220 pixels on a side, idle and with a presence.
+  It takes no pointer input and reserves no layout space. A
   heat field over the captured screen chooses the seat. A visible mark
   is written into that field as hot.
 - A MakeHuman proxy, 181 joints, about 50,000 Gaussians, skinned and

@@ -19,8 +19,8 @@ are listed here because each one is load-bearing, and because several of
 them are easy to miss if one only reads the tool list.
 
 **One surface, not a window.** The daemon opens a `wlr-layer-shell`
-surface. Before a presence owns the body the surface is 220 pixels on a
-side. Once a presence does, it is 330. `exclusive_zone` is −1, so the
+surface. The surface is 220 pixels on a side, idle and with a presence.
+`exclusive_zone` is −1, so the
 surface reserves no space in the layout. The input region is empty, so
 the pointer falls through to whatever is underneath. A second surface,
 under the figure, carries the highlight tint.
@@ -121,10 +121,11 @@ the viewer's right. A half-turn about Y faced her and also exchanged
 left and right, so a log of `wrist.L` drew what read as the right arm.
 The root adds no second half-turn: `FACING_YAW` is 0. Two half-turns
 showed her back. Toward a mark she yaws up to a quarter turn, nose
-toward the mark. Focal length is 1.2 times the layer edge, and focal y
-is positive, so that under Rx(π) the head remains above the feet in a
-viewport whose y increases downward. Beneath her, theta 0, the arms
-stay down.
+toward the mark. Focal length is 1.55 times the layer edge. The disc
+center looks at the upper chest of the seated figure, and that center
+is the pointing anchor. Focal y is positive, so that under Rx(π) the
+head remains above the hips in a viewport whose y increases downward.
+Beneath her, theta 0, the arms stay down.
 
 **One daemon, several clients.** The socket keeps a list of connections.
 Each MCP server process applies its own policy gate: 1.5 seconds between

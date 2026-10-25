@@ -95,14 +95,23 @@ pub struct AvatarActor {
     gpu_scratch: Vec<AnimatedSplatGpu>,
 }
 
-/// Rigid camera: on +Z, looking at the origin, with the body upright.
+/// World Y at the disc center. Aim uses that center, so this height is the
+/// pointing anchor. 1.28 m is the upper chest on the seated export (`spine01`,
+/// where the breasts sit). A standing pose would move it with the chest.
+const CAMERA_LOOK_Y: f32 = 1.28;
+
+/// Focal length in layer-edges. 1.55 fills the square with the seated figure.
+/// A raised arm at a quarter turn still lands inside the layer.
+const FOCAL_PER_EDGE: f32 = 1.55;
+
+/// Rigid camera: on +Z, looking at the upper chest, with the body upright.
 /// `Rx(π)` turns the face (+Z) toward the camera and keeps skeleton +X
 /// (her left) on the viewer's right. `Ry(π)` did the same face turn and
 /// also swapped left and right, so `wrist.L` read as her right arm.
 /// Translation is `-R * camera`.
 fn body_camera_dq() -> DualQuatGpu {
     let q = quat_axis_angle([1.0, 0.0, 0.0], std::f32::consts::PI);
-    let cam_y = 0.90_f32;
+    let cam_y = CAMERA_LOOK_Y;
     let cam_z = 2.55_f32;
     let t = [0.0_f32, cam_y, cam_z];
     let dual = quat_mul([t[0], t[1], t[2], 0.0], q);
@@ -303,10 +312,11 @@ impl AvatarActor {
         }
     }
 
-    /// Camera for the layer: body centered, facing the disc, +Y up.
-    /// Focal length tracks the layer edge, so a larger surface is a larger figure.
+    /// Camera for the layer. The disc center is the upper chest, and the aim
+    /// uses that center. Focal length tracks the layer edge, so a larger
+    /// surface is a larger figure.
     pub fn layer_camera(width: f32, height: f32, frame: u32) -> ProjectionUniformsGpu {
-        let focal = width.max(height) * 1.2;
+        let focal = width.max(height) * FOCAL_PER_EDGE;
         ProjectionUniformsGpu::new(
             body_camera_dq(),
             [focal, focal],

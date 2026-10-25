@@ -114,8 +114,8 @@ arithmetic is still the one in the binary.
 
 A `wlr-layer-shell-unstable-v1` surface, `exclusive_zone = -1`, empty
 input region. Pointer and keyboard fall through. The surface is the size
-of the disc: 220 pixels while no presence owns the body, 330 once one
-does. It is not a fullscreen transparent window. A second layer carries
+of the disc: 220 pixels on a side, idle and with a presence.
+It is not a fullscreen transparent window. A second layer carries
 the highlight tint, under the figure.
 
 The disc moves. `placement.rs` reads a heat grid built from the screen

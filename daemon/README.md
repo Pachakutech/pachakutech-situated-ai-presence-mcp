@@ -29,7 +29,7 @@ The compute shaders are
 - `src/avatar/` — the GLB rig, the `Point` and `Breathe` clips, the aim
   clock, the jaw, and the appearance sampler.
 - `src/overlay.rs` — the disc (`placement::OBSERVE_PX` 220, then
-  `DISC_PX` 330), empty input region, `exclusive_zone = -1`. Screen
+  `DISC_PX` 220), empty input region, `exclusive_zone = -1`. Screen
   capture prefers a compositor dma-buf imported into Vulkan. The
   fallback is one reused memfd at about 10 frames per second. The
   surface is hidden on idle (120 seconds), on the Hyprland lock, and on

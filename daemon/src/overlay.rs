@@ -83,7 +83,7 @@ pub struct Overlay {
     /// Top-left of the disc in output pixels. Placement writes this.
     bubble_x: i32,
     bubble_y: i32,
-    /// Live edge. 220 while the bubble is up, 330 while a presence owns the body.
+    /// Live edge. The bubble is `OBSERVE_PX`. A presence adopts `DISC_PX`.
     side: u32,
     born: Instant,
     mark_seq: u32,

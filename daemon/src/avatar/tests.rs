@@ -271,28 +271,39 @@ fn camera_space(p: [f32; 3]) -> [f32; 3] {
 }
 
 #[test]
-fn layer_camera_frames_the_body_upright() {
-    let chest = camera_space([0.0, 0.90, 0.0]);
-    assert!(chest[0].abs() < 1e-3 && chest[1].abs() < 1e-3, "chest not centered: {chest:?}");
+fn layer_camera_frames_the_upper_chest() {
+    let look = super::CAMERA_LOOK_Y;
+    let chest = camera_space([0.0, look, 0.0]);
+    assert!(chest[0].abs() < 1e-3 && chest[1].abs() < 1e-3, "upper chest not centered: {chest:?}");
     assert!((chest[2] - 2.55).abs() < 1e-3, "chest depth: {chest:?}");
-    let nose = camera_space([0.0, 0.90, 0.08]);
+    let nose = camera_space([0.0, look, 0.08]);
     assert!(nose[2] < chest[2] - 0.05, "face (+Z) should be nearer the camera");
     let side = crate::placement::DISC_PX as f32;
-    let focal = side * 1.2;
+    let focal = side * super::FOCAL_PER_EDGE;
     let mid_px = side * 0.5;
     let project = |p: [f32; 3]| {
         let c = camera_space(p);
         [focal * c[0] / c[2] + mid_px, focal * c[1] / c[2] + mid_px]
     };
-    let head = project([0.0, 1.62, 0.0]);
-    let mid = project([0.0, 0.90, 0.0]);
-    let feet = project([0.0, 0.05, 0.0]);
-    let lo = side * 4.0 / 220.0;
-    let hi = side * 216.0 / 220.0;
-    for (name, s) in [("head", head), ("chest", mid), ("feet", feet)] {
-        assert!(s[0] > lo && s[0] < hi && s[1] > lo && s[1] < hi, "{name} off the disc: {s:?}");
+    // Seated export: crown near 1.72 m, hips near 0.90 m, lowest splats near 0.83 m.
+    let crown = project([0.0, 1.72, 0.0]);
+    let hips = project([0.0, 0.90, 0.0]);
+    let seat = project([0.0, 0.83, 0.0]);
+    let anchor = project([0.0, look, 0.0]);
+    for (name, s) in [("crown", crown), ("chest", anchor), ("hips", hips), ("seat", seat)] {
+        assert!(
+            s[0] > 8.0 && s[0] < side - 8.0 && s[1] > 8.0 && s[1] < side - 8.0,
+            "{name} off the disc: {s:?}"
+        );
     }
-    assert!(head[1] < mid[1] && mid[1] < feet[1], "head {head:?} chest {mid:?} feet {feet:?} should stack top to bottom");
+    assert!(
+        (anchor[0] - mid_px).abs() < 1.0 && (anchor[1] - mid_px).abs() < 1.0,
+        "anchor {anchor:?}"
+    );
+    assert!(
+        crown[1] < anchor[1] && anchor[1] < hips[1] && hips[1] < seat[1],
+        "crown {crown:?} chest {anchor:?} hips {hips:?} seat {seat:?}"
+    );
 }
 
 /// `cargo test --bin presence-daemon -- --ignored time_the_breath_expand`

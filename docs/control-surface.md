@@ -24,7 +24,7 @@ triangles, 50,000 samples.
 ## The pose
 
 `tick_avatar` builds the pose while the figure is visible and the layer
-is the 330-pixel disc. The clock is 33 ms.
+is the 220-pixel disc. The clock is 33 ms.
 
 1. Socket commands are applied: bind, speak, rest, a manual jaw.
 2. The clock advances.
@@ -56,8 +56,10 @@ The matrices are what leave the CPU.
 
 The seat is the layer origin, two integers, chosen from the heat grid.
 The camera that frames the body is a projection uniform: a dual
-quaternion `Rx(π)`, and a focal length of `1.2` times the layer edge.
-Both are applied when the finished splats are drawn.
+quaternion `Rx(π)`, and a focal length of `1.55` times the layer edge.
+The look height is the upper chest of the seated figure. The disc
+center is that height, and the aim reads from the disc center. Both
+are applied when the finished splats are drawn.
 
 ## What crosses on each tick
 
