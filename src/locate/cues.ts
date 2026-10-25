@@ -177,6 +177,7 @@ async function placeGroup(job: CueJob, group: CueGroup, holdText: string, genera
       noOpen: true,
       fragmentJump: job.source === "web" && Boolean(job.uri),
       stepRatio: job.source === "web" ? 0.25 : undefined,
+      watch: job.groups.map((group) => group.query),
       verify: true,
       windowClass: job.windowClass,
       windowTitle: job.windowTitle,

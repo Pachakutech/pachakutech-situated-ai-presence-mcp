@@ -9,6 +9,7 @@ import { cueReport, spawnCueFollow, type CueJob } from "./cues.js";
 import { IDE_CLASS, TERMINAL_CLASS, chooseSurface, escapeRegExp } from "./choose.js";
 import { parseTsv, type Box, type Word } from "./core.js";
 import { cueGroups, resolveCues, speechHoldSeconds, splitSentences, type CueIn } from "./sentences.js";
+import { fileKey } from "./pageNotes.js";
 import { WINDOW_PATH, locatePdf } from "./pdf.js";
 import { locateStill, type StillDeps } from "./surface.js";
 import { locateWeb, withTextFragment, type Client, type LocateErr, type LocateOk, type LocateResult, type WebOpts } from "./web.js";
@@ -33,6 +34,8 @@ type Flags = {
   /** Follower only. Jump the open tab to the phrase, then walk in short steps. */
   fragmentJump?: boolean;
   stepRatio?: number;
+  /** Phrases to file as they pass. Defaults to the cues on this call. */
+  watch?: string[];
 };
 
 function arg(args: string[], name: string): string | undefined {
@@ -294,22 +297,22 @@ type CdpSocket = {
   close(): void;
 };
 
-async function cdpEval(expression: string): Promise<boolean> {
-  if (!cdpPort) return false;
+async function cdpCall(expression: string): Promise<{ ok: true; value: unknown } | { ok: false }> {
+  if (!cdpPort) return { ok: false };
   const Socket = (globalThis as unknown as { WebSocket?: new (url: string) => CdpSocket }).WebSocket;
-  if (!Socket) return false;
+  if (!Socket) return { ok: false };
   let list: Array<{ type?: string; webSocketDebuggerUrl?: string }>;
   try {
     const response = await fetch(`http://127.0.0.1:${cdpPort}/json/list`);
     list = (await response.json()) as typeof list;
   } catch {
-    return false;
+    return { ok: false };
   }
   const page = list.find((target) => target.type === "page" && target.webSocketDebuggerUrl);
-  if (!page?.webSocketDebuggerUrl) return false;
+  if (!page?.webSocketDebuggerUrl) return { ok: false };
   const url = page.webSocketDebuggerUrl;
   try {
-    await new Promise<void>((resolve, reject) => {
+    const value = await new Promise<unknown>((resolve, reject) => {
       const ws = new Socket(url);
       const timer = setTimeout(() => {
         ws.close();
@@ -319,22 +322,42 @@ async function cdpEval(expression: string): Promise<boolean> {
         ws.send(JSON.stringify({ id: 1, method: "Runtime.evaluate", params: { expression, returnByValue: true } }));
       });
       ws.addEventListener("message", (event) => {
-        const msg = JSON.parse(String(event.data)) as { id?: number };
-        if (msg.id === 1) {
-          clearTimeout(timer);
-          ws.close();
-          resolve();
-        }
+        const msg = JSON.parse(String(event.data)) as {
+          id?: number;
+          error?: unknown;
+          result?: { result?: { value?: unknown }; exceptionDetails?: unknown };
+        };
+        if (msg.id !== 1) return;
+        clearTimeout(timer);
+        ws.close();
+        if (msg.error || msg.result?.exceptionDetails) reject(new Error("cdp eval"));
+        else resolve(msg.result?.result?.value);
       });
       ws.addEventListener("error", () => {
         clearTimeout(timer);
         reject(new Error("cdp socket"));
       });
     });
-    return true;
+    return { ok: true, value };
   } catch {
-    return false;
+    return { ok: false };
   }
+}
+
+async function cdpEval(expression: string): Promise<boolean> {
+  return (await cdpCall(expression)).ok;
+}
+
+function asScroll(value: unknown): number | null {
+  const n = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  return Number.isFinite(n) ? n : null;
+}
+
+async function readScroll(): Promise<number | null> {
+  ensureCdpPort();
+  if (!cdpPort) return null;
+  const reply = await cdpCall("(document.scrollingElement || document.documentElement).scrollTop");
+  return reply.ok ? asScroll(reply.value) : null;
 }
 
 async function focus(address: string): Promise<boolean> {
@@ -382,6 +405,22 @@ async function scrollBy(address: string, dy: number): Promise<boolean> {
   const key = dy > 0 ? "Down" : "Up";
   const times = Math.min(24, Math.max(1, Math.round(Math.abs(dy) / 40)));
   await press(key, times);
+  return true;
+}
+
+async function scrollTo(address: string, top: number): Promise<boolean> {
+  ensureCdpPort();
+  const target = Math.max(0, Math.round(top));
+  if (!cdpPort) return false;
+  const started = await cdpEval(`window.scrollTo({ top: ${target}, behavior: "smooth" }); true`);
+  if (!started) return false;
+  const deadline = Date.now() + 1200;
+  while (Date.now() < deadline) {
+    const now = await readScroll();
+    if (now !== null && Math.abs(now - target) <= 48) return true;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  await cdpEval(`(document.scrollingElement || document.documentElement).scrollTop = ${target}; true`);
   return true;
 }
 
@@ -487,6 +526,17 @@ async function activate(bus: string, name: string): Promise<boolean> {
   return called.code === 0;
 }
 
+/** Evince stores a 0-based page on the file. The notes use the 1-based page a person counts. */
+async function readEvincePage(path: string): Promise<number | null> {
+  const info = await run("gio", ["info", "-a", "metadata::evince::page", path], 2500);
+  if (info.code !== 0) return null;
+  const match = info.stdout.match(/metadata::evince::page:\s*(?:int32\s+|uint32\s+)?(-?\d+)/);
+  if (!match) return null;
+  const model = Number(match[1]);
+  if (!Number.isInteger(model) || model < 0 || model > 9998) return null;
+  return model + 1;
+}
+
 async function fitWidth(bus: string): Promise<void> {
   await run(
     "busctl",
@@ -551,6 +601,7 @@ export async function locateRegion(flags: Flags): Promise<LocateResult | LocateE
   const verify = flags.verify || Boolean(flags.presence);
   const classRe = windowClass as RegExp | undefined;
   const titleRe = windowTitle as RegExp | undefined;
+  const watch = flags.watch ?? flags.cues?.map((cue) => cue.query);
 
   let result: LocateResult | LocateErr;
   try {
@@ -567,6 +618,7 @@ export async function locateRegion(flags: Flags): Promise<LocateResult | LocateE
         opened: !flags.noOpen,
         fragmentJump: flags.fragmentJump,
         stepRatio: flags.stepRatio,
+        watch,
       };
       result = await locateWeb(opts, {
         clients: async () => asClients(await hyprJson(["clients", "-j"])),
@@ -575,6 +627,8 @@ export async function locateRegion(flags: Flags): Promise<LocateResult | LocateE
         focus,
         scrollBy,
         scrollTop,
+        readScroll,
+        scrollTo,
         open: openBrowser,
         jump: jumpToFragment,
         sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
@@ -595,8 +649,9 @@ export async function locateRegion(flags: Flags): Promise<LocateResult | LocateE
           windowClass: classRe,
           windowTitle: titleRe,
           page: flags.page,
+          watch,
         },
-        { ...stillDeps(), open: openEvince, busForPid, actionEnabled, activate, fitWidth },
+        { ...stillDeps(), open: openEvince, busForPid, actionEnabled, activate, fitWidth, readPage: readEvincePage },
       );
     } else if (flags.source === "doc" && flags.uri && !flags.noOpen) {
       await openDocument(flags.uri);
@@ -668,6 +723,14 @@ async function locateDocument(
       verify,
       missedHint: "The phrase is not in the visible window. Scroll it into view yourself. This locator does not send keys.",
       absentHint: "The window never painted any text.",
+      notes: flags.uri
+        ? {
+            uri: fileKey(flags.uri),
+            watch: flags.watch ?? flags.cues?.map((cue) => cue.query),
+            kind: "view",
+            position: () => null,
+          }
+        : undefined,
       choose: (clients, focusedAddress, workspace) =>
         chooseSurface(clients, { workspace, focusedAddress, classRe, titleRe }),
     },

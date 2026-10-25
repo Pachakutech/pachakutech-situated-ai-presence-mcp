@@ -4,6 +4,7 @@
 
 import { basename } from "node:path";
 import { chooseSurface, escapeRegExp, pageAdvanceCount } from "./choose.js";
+import { fileKey, loadPageNotes, scrollSense } from "./pageNotes.js";
 import { locateStill, type StillDeps } from "./surface.js";
 import type { Client, LocateErr, LocateResult } from "./web.js";
 
@@ -16,6 +17,8 @@ export type PdfBus = {
   activate(bus: string, name: string): Promise<boolean>;
   fitWidth(bus: string): Promise<void>;
   sleep(ms: number): Promise<void>;
+  /** Evince metadata page, 1-based. Null when the file has no saved page. */
+  readPage?(path: string): Promise<number | null>;
 };
 
 export type PdfOpts = {
@@ -28,6 +31,8 @@ export type PdfOpts = {
   windowClass?: RegExp;
   windowTitle?: RegExp;
   page?: number;
+  /** Phrases to file when they are on the page being read. */
+  watch?: string[];
 };
 
 function fail(error: string, hint: string): LocateErr {
@@ -82,6 +87,31 @@ export async function locatePdf(opts: PdfOpts, deps: StillDeps & PdfBus): Promis
     opts.windowTitle ??
     (opts.uri ? new RegExp(escapeRegExp(basename(opts.uri)), "i") : undefined);
 
+  const key = opts.uri ? fileKey(opts.uri) : undefined;
+  const spot = { position: null as number | null };
+  let target = opts.page;
+  if (target === undefined && key) {
+    const known = scrollSense(loadPageNotes(key), opts.query, null).to;
+    if (typeof known === "number" && Number.isInteger(known) && known >= 1 && known <= 9999) {
+      let here: number | null = null;
+      if (deps.readPage) {
+        try {
+          here = await deps.readPage(key);
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          deps.log(`locate: page notes could not read the open page (${detail})`);
+        }
+      }
+      if (here === known) {
+        spot.position = known;
+        deps.log(`locate: page notes already on ${known}`);
+      } else {
+        target = known;
+        deps.log(`locate: page notes open at ${known}`);
+      }
+    }
+  }
+
   return locateStill(
     {
       source: "pdf",
@@ -91,6 +121,20 @@ export async function locatePdf(opts: PdfOpts, deps: StillDeps & PdfBus): Promis
       verify: opts.verify,
       missedHint: "The phrase is not on this page. Pass --page, or leave the page that shows it up and pass --no-open.",
       absentHint: "Evince never painted any text.",
+      notes: key
+        ? {
+            uri: key,
+            watch: opts.watch,
+            kind: "page",
+            position: async () => {
+              if (spot.position !== null) return spot.position;
+              if (!deps.readPage) return null;
+              const here = await deps.readPage(key);
+              if (here !== null) spot.position = here;
+              return spot.position;
+            },
+          }
+        : undefined,
       choose: (clients, focusedAddress, workspace) =>
         chooseSurface(clients, {
           workspace,
@@ -99,7 +143,9 @@ export async function locatePdf(opts: PdfOpts, deps: StillDeps & PdfBus): Promis
           titleRe,
         }),
       prepare: async (win: Client) => {
-        if (opts.page === undefined && !opened) return { ok: true };
+        if (target === undefined && !opened) {
+          return { ok: true, ...(spot.position !== null ? { page: spot.position } : {}) };
+        }
         const bus = await resolveBus(win.pid, deps, deps.now() + 4000, deps.now);
         if (!bus) return fail("pdf_page_failed", "Evince is up, and its window was not on the session bus.");
         if (opened) {
@@ -109,8 +155,10 @@ export async function locatePdf(opts: PdfOpts, deps: StillDeps & PdfBus): Promis
             // Zoom is a preference. The box is still the words.
           }
         }
-        if (opts.page === undefined) return { ok: true };
-        return goToPage(bus, opts.page, deps);
+        if (target === undefined) return { ok: true };
+        const went = await goToPage(bus, target, deps);
+        if (went.ok) spot.position = went.page;
+        return went.ok ? { ...went, fresh: true } : went;
       },
     },
     deps,

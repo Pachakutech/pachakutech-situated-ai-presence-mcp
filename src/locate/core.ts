@@ -19,15 +19,23 @@ export type Run = { start: number; end: number };
 export type SeekState = {
   walkedFromTop: boolean;
   nudgePx: number;
-  /** A scroll has been issued since the last jump to the top. */
+  /** A scroll has been issued. A stuck picture may turn around once. */
   scrolled: boolean;
   /** The phrase was brought on screen by a search scroll, not already in view. */
   walked: boolean;
+  /** A remembered scroll was already opened. */
+  aimed?: boolean;
+  /** The walk has already turned around once. */
+  flipped?: boolean;
+  sweep?: "down" | "up";
 };
+
+/** `to` opens a remembered scroll once. `dir` is the first step when the phrase has no pixel of its own. */
+export type SeekHint = { to?: number; dir?: 1 | -1 };
 
 export type SeekAction =
   | { type: "scroll"; dy: number }
-  | { type: "top" }
+  | { type: "to"; top: number }
   | { type: "accept" }
   | { type: "fail"; error: "quote_not_found" };
 
@@ -336,7 +344,8 @@ export function meanConfidence(lines: Line[], run: Run): number {
 /**
  * What to do after one OCR. `pictureMoved` is false when this frame's text
  * matches the frame before the last scroll. Positive `dy` moves the document
- * down, so the words rise on the screen.
+ * down, so the words rise on the screen. A remembered scroll is opened once.
+ * A stuck picture turns around once, then the search stops.
  */
 export function seek(
   placement: { band: "ok" | "low" | "high" } | null,
@@ -344,6 +353,7 @@ export function seek(
   state: SeekState,
   windowH: number,
   stepRatio = 0.7,
+  hint?: SeekHint,
 ): { action: SeekAction; state: SeekState } {
   if (placement) {
     // Already on screen: only a short nudge, the fragment case. Found by walking:
@@ -359,14 +369,26 @@ export function seek(
       state: { ...state, nudgePx: state.nudgePx + NUDGE_PX },
     };
   }
+  if (typeof hint?.to === "number" && !state.aimed) {
+    return {
+      action: { type: "to", top: hint.to },
+      state: { ...state, aimed: true, scrolled: true, walked: true },
+    };
+  }
+  const step = Math.max(200, Math.round(windowH * stepRatio));
   if (!pictureMoved && state.scrolled) {
-    if (!state.walkedFromTop) {
-      return { action: { type: "top" }, state: { ...state, walkedFromTop: true, scrolled: false } };
+    if (!state.flipped) {
+      const goingDown = state.sweep !== "up";
+      return {
+        action: { type: "scroll", dy: goingDown ? -step : step },
+        state: { ...state, flipped: true, sweep: goingDown ? "up" : "down", scrolled: true, walked: true },
+      };
     }
     return { action: { type: "fail", error: "quote_not_found" }, state };
   }
-  const dy = Math.max(200, Math.round(windowH * stepRatio));
-  return { action: { type: "scroll", dy }, state: { ...state, scrolled: true, walked: true } };
+  const sweep = state.sweep ?? (hint?.dir === -1 ? "up" : "down");
+  const dy = sweep === "up" ? -step : step;
+  return { action: { type: "scroll", dy }, state: { ...state, scrolled: true, walked: true, sweep } };
 }
 
 export function fingerprint(lines: Line[]): string {

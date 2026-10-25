@@ -118,7 +118,7 @@ test("a bottom-parked passage is nudged up, and a missing one is given up", () =
       break;
     }
     if (decision.action.type === "fail") break;
-    if (decision.action.type === "top") scroll = 0;
+    if (decision.action.type === "to") scroll = Math.max(0, decision.action.top);
     if (decision.action.type === "scroll") {
       const maxScroll = Math.max(0, docBottom - windowH);
       scroll = Math.max(0, Math.min(maxScroll, scroll + decision.action.dy));
@@ -129,19 +129,31 @@ test("a bottom-parked passage is nudged up, and a missing one is given up", () =
   assert.ok(center <= 0.82, `center ${center}`);
   assert.ok(center >= 0.62, `center ${center}`);
 
-  let missing: SeekState = { walkedFromTop: false, nudgePx: 0, scrolled: false, walked: false };
-  let action = seek(null, true, missing, windowH).action;
+  const fresh = (): SeekState => ({ walkedFromTop: false, nudgePx: 0, scrolled: false, walked: false });
+  let action = seek(null, true, fresh(), windowH).action;
   assert.equal(action.type, "scroll");
-  missing = { walkedFromTop: false, nudgePx: 0, scrolled: true, walked: true };
-  action = seek(null, false, missing, windowH).action;
-  assert.equal(action.type, "top");
-  missing = { walkedFromTop: true, nudgePx: 0, scrolled: true, walked: true };
-  action = seek(null, false, missing, windowH).action;
+  if (action.type === "scroll") assert.ok(action.dy > 0);
+  const turned = seek(null, false, { ...fresh(), scrolled: true, walked: true, sweep: "down" }, windowH, 0.25);
+  assert.equal(turned.action.type, "scroll");
+  if (turned.action.type === "scroll") assert.equal(turned.action.dy, -Math.max(200, Math.round(windowH * 0.25)));
+  assert.equal(turned.state.flipped, true);
+  assert.equal(turned.state.sweep, "up");
+  action = seek(null, false, turned.state, windowH).action;
   assert.deepEqual(action, { type: "fail", error: "quote_not_found" });
 
-  const fine = seek(null, true, { walkedFromTop: false, nudgePx: 0, scrolled: false, walked: false }, windowH, 0.25);
+  const aimed = seek(null, true, fresh(), windowH, 0.25, { to: 1400, dir: -1 });
+  assert.deepEqual(aimed.action, { type: "to", top: 1400 });
+  assert.equal(aimed.state.aimed, true);
+  const afterAim = seek(null, true, aimed.state, windowH, 0.25, { to: 1400, dir: -1 });
+  assert.equal(afterAim.action.type, "scroll");
+  if (afterAim.action.type === "scroll") assert.ok(afterAim.action.dy < 0);
+
+  const fine = seek(null, true, fresh(), windowH, 0.25);
   assert.equal(fine.action.type, "scroll");
   if (fine.action.type === "scroll") assert.equal(fine.action.dy, Math.max(200, Math.round(windowH * 0.25)));
+  const upward = seek(null, true, fresh(), windowH, 0.25, { dir: -1 });
+  assert.equal(upward.action.type, "scroll");
+  if (upward.action.type === "scroll") assert.equal(upward.action.dy, -fine.action.dy);
 });
 
 test("a word stays in the chosen window, shifts to its origin, and drops under an occluder", () => {

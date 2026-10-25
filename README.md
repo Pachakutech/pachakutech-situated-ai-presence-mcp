@@ -111,8 +111,13 @@ reply. `query` is the passage to find on the page, a phrase or
 `start ... end`. The runtime splits the reply, binds each cue to a
 sentence, and finds the first passage before any audio. Later passages
 move with the sentence clips. On the web the open tab jumps to the
-phrase. The tint comes down for that jump and the new box goes up when
-the crop passes. A miss leaves the tint down. The voice continues, and
+phrase. Views already read, and the cues in them, are written under
+`~/.local/share/pachakutech/pages/` for a person to read. A cue in that
+file is opened at its scroll, and a search turns around at the end of
+the page. A PDF keeps the page number in that file and opens it when the
+call does not name a page. A document window is written into the file
+from the view on screen. The document reader does not send keys. The tint
+comes down for that jump and the new box goes up when the crop passes. A miss leaves the tint down. The voice continues, and
 the tint stays up until the voice ends. The safety cap is about as long
 as the words. During the quiet between clips the next passage is found. The binding rules are in
 [Annotating the reply](docs/situated-presence.md#annotating-the-reply).

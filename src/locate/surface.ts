@@ -6,6 +6,7 @@ import {
   cropOk,
   findRun,
   matchedText,
+  lineText,
   meanConfidence,
   neighborTexts,
   prepareLines,
@@ -15,9 +16,12 @@ import {
   toWindowWords,
   unionBox,
   type Box,
+  type Line,
+  type Run,
   type Word,
 } from "./core.js";
 import { occludes } from "./choose.js";
+import { loadPageNotes, notesPath, recordCues, recordPass, savePageNotes, type PageKind, type PageNotes } from "./pageNotes.js";
 import type { Client, LocateErr, LocateResult, LocateSource } from "./web.js";
 
 const PAINT_WAIT_MS = 4000;
@@ -42,11 +46,18 @@ export type StillOpts = {
   pad: number;
   timeoutMs: number;
   verify: boolean;
-  /** Runs once, after the window is on this workspace and before the measure. */
-  prepare?(win: Client): Promise<{ ok: true; page?: number } | LocateErr>;
+  /** Runs once, after the window is on this workspace and before the measure. `fresh` means the glass just changed. */
+  prepare?(win: Client): Promise<{ ok: true; page?: number; fresh?: boolean } | LocateErr>;
   choose(clients: Client[], focusedAddress: string | undefined, workspace: number): Client | "ambiguous" | null;
   missedHint: string;
   absentHint: string;
+  /** Write the view that was just read. Terminal and the editor leave this unset. */
+  notes?: {
+    uri: string;
+    watch?: string[];
+    kind: PageKind;
+    position(): number | null | Promise<number | null>;
+  };
 };
 
 function fail(source: string, error: string, hint: string): LocateErr {
@@ -84,9 +95,58 @@ export async function locateStill(opts: StillOpts, deps: StillDeps): Promise<Loc
   let geomRetries = 0;
   let prepared = false;
   let page: number | undefined;
+  let trustMemory = true;
   let paintStarted: number | null = null;
   let sawWindow = false;
   let settleUntil = 0;
+  let notes: PageNotes | null = null;
+  let notesLogged = false;
+  if (opts.notes) {
+    notes = loadPageNotes(opts.notes.uri);
+    notes.kind = opts.notes.kind;
+    if (notes.passes.length || notes.cues.length) {
+      deps.log(`page notes: ${notesPath(opts.notes.uri)}`);
+      notesLogged = true;
+    }
+  }
+
+  async function remember(lines: Line[], title: string, fromMemory: boolean, found: Run | "ambiguous" | null): Promise<void> {
+    if (!opts.notes || !notes) return;
+    const foundQuery = Boolean(found && found !== "ambiguous");
+    if (fromMemory && !foundQuery) return;
+    try {
+      if (!notes.title && title.trim()) notes.title = title.replace(/\s+/g, " ").trim();
+      let at: number | null = null;
+      try {
+        at = await opts.notes.position();
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        deps.log(`page notes: ${detail}`);
+      }
+      if (typeof at === "number") page = at;
+      const watched = [opts.query, ...(opts.notes.watch ?? [])];
+      const visible = watched.filter((query) => {
+        const hit = findRun(lines, query);
+        return Boolean(hit && hit !== "ambiguous");
+      });
+      const passChanged = recordPass(
+        notes,
+        at,
+        lines.map((line) => lineText(line)),
+      );
+      const cueChanged = recordCues(notes, at, visible);
+      if (passChanged || cueChanged) {
+        const path = savePageNotes(notes);
+        if (!notesLogged) {
+          deps.log(`page notes: ${path}`);
+          notesLogged = true;
+        }
+      }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      deps.log(`page notes: ${detail}`);
+    }
+  }
 
   frame: while (deps.now() < deadline) {
     const where = await deps.focused();
@@ -114,6 +174,7 @@ export async function locateStill(opts: StillOpts, deps: StillDeps): Promise<Loc
       prepared = true;
       if (!prep.ok) return prep;
       page = prep.page;
+      if (prep.fresh) trustMemory = false;
       settleUntil = deps.now() + 1800;
       await deps.sleep(350);
       continue;
@@ -124,7 +185,7 @@ export async function locateStill(opts: StillOpts, deps: StillDeps): Promise<Loc
       .map((client) => ({ x: client.x, y: client.y, w: client.w, h: client.h }));
     let fromMemory = false;
     let words: Word[] | undefined;
-    if (deps.recall) {
+    if (deps.recall && trustMemory) {
       const local = toWindowWords(await deps.recall(), picked, others);
       const hit = findRun(prepareLines(local), opts.query);
       if (hit && hit !== "ambiguous") {
@@ -156,13 +217,10 @@ export async function locateStill(opts: StillOpts, deps: StillDeps): Promise<Loc
       }
 
       let found = findRun(lines, opts.query);
-      if (found === "ambiguous") {
-        if (fromMemory) {
-          deps.log("locate: memory is ambiguous in this window; reading the window");
-          words = undefined;
-          continue;
-        }
-        return fail(opts.source, "ambiguous_query", "That phrase is on screen more than once. Pass a longer query.");
+      if (found === "ambiguous" && fromMemory) {
+        deps.log("locate: memory is ambiguous in this window; reading the window");
+        words = undefined;
+        continue;
       }
       if (!found && !fromMemory && painted) {
         // A dense-block read misses a one-line PDF. Try the sparse pass once per frame.
@@ -175,6 +233,10 @@ export async function locateStill(opts: StillOpts, deps: StillDeps): Promise<Loc
           lines = sparseLines;
           found = sparseFound;
         }
+      }
+      if (found || deps.now() >= settleUntil) await remember(lines, picked.title, fromMemory, found);
+      if (found === "ambiguous") {
+        return fail(opts.source, "ambiguous_query", "That phrase is on screen more than once. Pass a longer query.");
       }
       if (!found) {
         if (fromMemory) {

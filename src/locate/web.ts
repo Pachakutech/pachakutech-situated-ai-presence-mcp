@@ -7,6 +7,7 @@ import {
   cropOk,
   fingerprint,
   findRun,
+  lineText,
   matchedText,
   meanConfidence,
   neighborTexts,
@@ -22,6 +23,7 @@ import {
   type Word,
 } from "./core.js";
 import { occludes } from "./choose.js";
+import { loadPageNotes, notesPath, recordCues, recordPass, savePageNotes, scrollSense, type PageNotes } from "./pageNotes.js";
 
 export type Client = {
   address: string;
@@ -83,6 +85,8 @@ export type WebOpts = {
   fragmentJump?: boolean;
   /** Fraction of the window for an off-screen step. Default 0.7. */
   stepRatio?: number;
+  /** Other phrases to file when they appear. The query itself is always filed. */
+  watch?: string[];
 };
 
 export type Deps = {
@@ -94,6 +98,10 @@ export type Deps = {
   /** Positive dy moves the document down. Returns false when focus failed. */
   scrollBy(address: string, dy: number): Promise<boolean>;
   scrollTop(address: string): Promise<boolean>;
+  /** Pixels from the top of the document, or null when the scroller cannot be read. */
+  readScroll?(): Promise<number | null>;
+  /** Open the document at this scroll. False when the scroller cannot be moved. */
+  scrollTo?(address: string, top: number): Promise<boolean>;
   open(uri: string): Promise<void>;
   /** Move the already-open tab to the phrase. False when no debugger is listening. */
   jump?(uri: string, query: string): Promise<boolean>;
@@ -149,8 +157,17 @@ export async function locateWeb(opts: WebOpts, deps: Deps): Promise<LocateResult
     await deps.sleep(WINDOW_SETTLE_MS);
   }
 
+  const notes: PageNotes | null = opts.uri ? loadPageNotes(opts.uri) : null;
+  let notesLogged = false;
+  const knownScroll = notes && opts.uri ? scrollSense(notes, opts.query, null).to : undefined;
+  if (notes && opts.uri && (notes.passes.length || notes.cues.length)) {
+    deps.log(`page notes: ${notesPath(opts.uri)}`);
+    notesLogged = true;
+  }
+  if (knownScroll !== undefined) deps.log(`locate: page notes open at ${knownScroll}`);
+
   let fragmentLanded = opts.opened;
-  if (opts.fragmentJump && opts.noOpen && opts.uri && deps.jump) {
+  if (opts.fragmentJump && opts.noOpen && opts.uri && deps.jump && knownScroll === undefined) {
     const jumped = await deps.jump(opts.uri, opts.query);
     fragmentLanded = fragmentLanded || jumped;
     deps.log(jumped ? "locate: fragment jump" : "locate: fragment jump unavailable");
@@ -178,7 +195,8 @@ export async function locateWeb(opts: WebOpts, deps: Deps): Promise<LocateResult
       .map((client) => ({ x: client.x, y: client.y, w: client.w, h: client.h }));
     let fromMemory = false;
     let words: Word[] | undefined;
-    if (deps.recall) {
+    // A known scroll is about to move the page. The remembered viewport would describe the old one.
+    if (deps.recall && knownScroll === undefined) {
       const local = toWindowWords(await deps.recall(), win, others);
       const hit = findRun(prepareLines(local), opts.query);
       if (hit && hit !== "ambiguous") {
@@ -228,7 +246,34 @@ export async function locateWeb(opts: WebOpts, deps: Deps): Promise<LocateResult
         if (box) placement = { band: bandOf(box, win.h, opts.pad) };
       }
 
-      const decision = seek(placement, pictureMoved, state, win.h, opts.stepRatio ?? 0.7);
+      let currentTop: number | null = null;
+      const frameIsLive = !fromMemory || found !== null;
+      if (notes && opts.uri && (frameIsLive || deps.readScroll)) {
+        if (deps.readScroll) currentTop = await deps.readScroll();
+        if (frameIsLive) {
+          if (!notes.title && win.title) notes.title = win.title.replace(/\s+/g, " ").trim();
+          const watched = [opts.query, ...(opts.watch ?? [])];
+          const visible = watched.filter((query) => {
+            const hit = findRun(lines, query);
+            return Boolean(hit && hit !== "ambiguous");
+          });
+          const passChanged = recordPass(
+            notes,
+            currentTop,
+            lines.map((line) => lineText(line)),
+          );
+          const cueChanged = recordCues(notes, currentTop, visible);
+          if (passChanged || cueChanged) {
+            const path = savePageNotes(notes);
+            if (!notesLogged) {
+              deps.log(`page notes: ${path}`);
+              notesLogged = true;
+            }
+          }
+        }
+      }
+      const hint = notes ? scrollSense(notes, opts.query, currentTop) : undefined;
+      const decision = seek(placement, pictureMoved, state, win.h, opts.stepRatio ?? 0.7, hint);
       if (fromMemory && decision.action.type === "fail") {
         deps.log("locate: memory gave up the page; reading the window");
         words = undefined;
@@ -304,23 +349,26 @@ export async function locateWeb(opts: WebOpts, deps: Deps): Promise<LocateResult
         return fail(
           "quote_not_found",
           seenPaint
-            ? "The phrase was not on screen after one walk from the top of the page."
+            ? "The phrase was not on screen. The search turned around at the end of the page."
             : "The page never painted any text.",
         );
       }
 
       lastFp = fp;
       state = decision.state;
-      const moved =
-        decision.action.type === "top"
-          ? await deps.scrollTop(win.address)
-          : await deps.scrollBy(win.address, decision.action.dy);
-    if (!moved) {
-      return fail("focus_failed", "Could not focus the browser, so the page was not scrolled.");
-    }
-    deps.log(decision.action.type === "top" ? "locate: scroll to top" : `locate: scroll ${decision.action.dy}`);
-    await deps.sleep(WINDOW_SETTLE_MS);
-    continue frame;
+      if (decision.action.type === "to") {
+        const aimed = deps.scrollTo ? await deps.scrollTo(win.address, decision.action.top) : false;
+        deps.log(aimed ? `locate: scroll to ${decision.action.top}` : "locate: remembered scroll unavailable");
+        await deps.sleep(WINDOW_SETTLE_MS);
+        continue frame;
+      }
+      const moved = await deps.scrollBy(win.address, decision.action.dy);
+      if (!moved) {
+        return fail("focus_failed", "Could not focus the browser, so the page was not scrolled.");
+      }
+      deps.log(`locate: scroll ${decision.action.dy}`);
+      await deps.sleep(WINDOW_SETTLE_MS);
+      continue frame;
     }
   }
 
