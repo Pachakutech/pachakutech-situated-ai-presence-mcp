@@ -142,8 +142,24 @@ export async function locateWeb(opts: WebOpts, deps: Deps): Promise<LocateResult
   let geomRetries = 0;
   let viewer: "pending" | "placed" = "pending";
   let endUsed = 0;
+  let retried = false;
   const passage = /\s+\.\.\.\s+/.test(opts.query);
   const opening = openingPhrase(opts.query);
+
+  // The first photograph can land while the window, or the jump before this cue, is still moving.
+  // One more find and one more photograph. A second miss stands.
+  const photographAgain = async (why: string): Promise<boolean> => {
+    if (retried) return false;
+    retried = true;
+    viewer = "pending";
+    state = { nudgePx: 0 };
+    endUsed = 0;
+    lastFp = null;
+    geomRetries = 0;
+    deps.log(`locate: ${why}; waiting for the screen to settle, then photographing again`);
+    await deps.sleep(WINDOW_SETTLE_MS);
+    return true;
+  };
 
   frame: while (deps.now() < deadline) {
     const clients = await deps.clients();
@@ -227,6 +243,7 @@ export async function locateWeb(opts: WebOpts, deps: Deps): Promise<LocateResult
       const openingOnGlass = Boolean(openingHit && openingHit !== "ambiguous");
       if (passage && endStep(false, openingOnGlass, endUsed) === "nudge") {
         if (!pictureMoved && endUsed > 0) {
+          if (await photographAgain("the photograph missed the end of the passage")) continue;
           return fail("quote_not_found", "The end of the passage stayed out of the photograph.");
         }
         endUsed += 1;
@@ -237,6 +254,7 @@ export async function locateWeb(opts: WebOpts, deps: Deps): Promise<LocateResult
         await deps.sleep(WINDOW_SETTLE_MS);
         continue;
       }
+      if (painted && (await photographAgain("the photograph did not contain the phrase"))) continue;
       return fail(
         "quote_not_found",
         painted
@@ -246,7 +264,10 @@ export async function locateWeb(opts: WebOpts, deps: Deps): Promise<LocateResult
     }
 
     const box = unionBox(lines, found, opts.pad, { w: win.w, h: win.h });
-    if (!box) return fail("quote_not_found", "The phrase left the screen before the box was settled.");
+    if (!box) {
+      if (await photographAgain("the photograph lost the phrase")) continue;
+      return fail("quote_not_found", "The phrase left the screen before the box was settled.");
+    }
     const decision = seek({ band: bandOf(box, win.h, opts.pad) }, pictureMoved, state);
 
     if (decision.action.type === "fail") {
@@ -281,7 +302,15 @@ export async function locateWeb(opts: WebOpts, deps: Deps): Promise<LocateResult
               failed = retry;
             }
           }
-          if (!failed.ok) return failed;
+          if (!failed.ok) {
+            if (
+              failed.hint.includes("does not contain the query") &&
+              (await photographAgain("the crop did not contain the phrase"))
+            ) {
+              continue frame;
+            }
+            return failed;
+          }
         }
       }
       state = decision.state;

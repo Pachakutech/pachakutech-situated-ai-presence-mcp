@@ -237,7 +237,9 @@ each other's heels, which is the ordinary gap between clips. When those
 sentences have been said, the page scrolls and the next tint goes up,
 and the next sentences begin after that box is up. On the web the open
 tab's find brings the phrase into view. The browser's highlight is
-cleared before the photograph. One photograph is the box. A line sitting
+cleared before the photograph. One photograph is the box. When that
+photograph does not contain the phrase, the locator waits for the screen
+to settle and photographs once more. A second miss stands. A line sitting
 high or low moves eighty pixels and is photographed again. A phrase the
 find does not see stops the search. The first read waits half a second,
 so a window that has just appeared or just moved is there for the check.

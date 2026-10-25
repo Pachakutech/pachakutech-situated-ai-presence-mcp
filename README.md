@@ -112,7 +112,7 @@ reply. `query` is the passage to find on the page, a phrase or
 sentence, and finds the first passage before any audio. Later passages
 move with the sentence clips. On the web the open tab's find brings the
 phrase into view. The browser's highlight is cleared before the
-photograph. One photograph is the box. A line sitting high or low moves
+photograph. One photograph is the box. When that photograph does not contain the phrase, the locator waits for the screen to settle and photographs once more. A second miss stands. A line sitting high or low moves
 eighty pixels and is photographed again. Our tint uses that box. A
 phrase the find does not see stops the search. A PDF is searched in its
 text layer, and Evince turns to that page. `--page` wins when the call

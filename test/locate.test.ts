@@ -20,6 +20,14 @@ import {
   type SeekState,
   type Word,
 } from "../src/locate/core.ts";
+import type { Deps } from "../src/locate/web.ts";
+
+type LocateWeb = (typeof import("../src/locate/web.ts"))["locateWeb"];
+
+async function loadLocate(): Promise<LocateWeb> {
+  const mod = await import("../dist/locate/web.js");
+  return mod.locateWeb;
+}
 
 const fixture = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "fixtures", "fellow-mortal.tsv"), "utf8");
 const bounds = { w: 1920, h: 1080 };
@@ -159,4 +167,140 @@ test("a word stays in the chosen window, shifts to its origin, and drops under a
   );
   assert.equal(kept[0].x, 20);
   assert.equal(kept[0].y, 20);
+});
+
+const browser = {
+  address: "0x1",
+  x: 960,
+  y: 0,
+  w: 941,
+  h: 1080,
+  className: "chromium",
+  title: "The Waste Land",
+  workspace: 1,
+  pid: 1,
+  floating: false,
+  focusHistoryID: 1,
+};
+
+function glass(texts: string[], y = 720): Word[] {
+  return texts.map((text, i) => ({ x: 80 + i * 50, y, w: 40, h: 18, text, conf: 90 }));
+}
+
+const phrase = glass(["hermit", "thrush", "sings", "in", "pines"]);
+const noise = glass(["alpha", "beta", "gamma", "delta", "epsilon"]);
+
+function webDeps(opts: {
+  full: () => Word[];
+  crop: () => Word[];
+  found?: boolean;
+}): { deps: Deps; finds: number; scrolls: number[]; logs: string[] } {
+  const logs: string[] = [];
+  const scrolls: number[] = [];
+  let finds = 0;
+  const deps: Deps = {
+    async clients() {
+      return [browser];
+    },
+    async screen() {
+      return { w: 1920, h: 1080 };
+    },
+    async ocr(rect) {
+      return rect.w >= 900 ? opts.full() : opts.crop();
+    },
+    async scrollBy(_address, dy) {
+      scrolls.push(dy);
+      return true;
+    },
+    async open() {},
+    async findInPage() {
+      finds += 1;
+      return {
+        found: opts.found !== false,
+        rect: opts.found === false ? null : { x: 80, y: 720, w: 200, h: 18 },
+      };
+    },
+    async sleep() {},
+    now: () => 1_000,
+    log(line) {
+      logs.push(line);
+    },
+  };
+  return {
+    deps,
+    scrolls,
+    logs,
+    get finds() {
+      return finds;
+    },
+  };
+}
+
+const webOpts = {
+  query: "hermit thrush sings",
+  pad: 12,
+  timeoutMs: 10_000,
+  noOpen: true,
+  verify: true,
+};
+
+test("a photograph that misses the phrase is taken once more after the screen settles", async () => {
+  const locateWeb = await loadLocate();
+  let shots = 0;
+  const harness = webDeps({
+    full: () => {
+      shots += 1;
+      return shots === 1 ? noise : phrase;
+    },
+    crop: () => phrase,
+  });
+  const located = await locateWeb(webOpts, harness.deps);
+  assert.equal(located.ok, true);
+  if (!located.ok) return;
+  assert.equal(located.matchedText.includes("hermit"), true);
+  assert.equal(harness.finds, 2);
+  assert.equal(harness.scrolls.length, 0);
+  assert.equal(harness.logs.filter((line) => line.includes("photographing again")).length, 1);
+});
+
+test("a second miss stands, and a find that does not see the phrase is not photographed again", async () => {
+  const locateWeb = await loadLocate();
+  const missed = webDeps({ full: () => noise, crop: () => noise });
+  const first = await locateWeb(webOpts, missed.deps);
+  assert.equal(first.ok, false);
+  if (first.ok) return;
+  assert.equal(first.error, "quote_not_found");
+  assert.equal(missed.finds, 2);
+  assert.equal(missed.logs.filter((line) => line.includes("photographing again")).length, 1);
+
+  const absent = webDeps({ full: () => phrase, crop: () => phrase, found: false });
+  const second = await locateWeb(webOpts, absent.deps);
+  assert.equal(second.ok, false);
+  if (second.ok) return;
+  assert.equal(second.hint, "The browser's find did not see that phrase.");
+  assert.equal(absent.finds, 1);
+  assert.equal(absent.logs.some((line) => line.includes("photographing again")), false);
+});
+
+test("a crop that does not contain the phrase is photographed once more, and a second crop miss stands", async () => {
+  const locateWeb = await loadLocate();
+  let crops = 0;
+  const recovered = webDeps({
+    full: () => phrase,
+    crop: () => {
+      crops += 1;
+      return crops <= 2 ? noise : phrase;
+    },
+  });
+  const located = await locateWeb(webOpts, recovered.deps);
+  assert.equal(located.ok, true);
+  assert.equal(recovered.finds, 2);
+  assert.equal(recovered.logs.filter((line) => line.includes("crop did not contain")).length, 1);
+
+  const stuck = webDeps({ full: () => phrase, crop: () => noise });
+  const failed = await locateWeb(webOpts, stuck.deps);
+  assert.equal(failed.ok, false);
+  if (failed.ok) return;
+  assert.equal(failed.error, "verify_failed");
+  assert.equal(stuck.finds, 2);
 });
