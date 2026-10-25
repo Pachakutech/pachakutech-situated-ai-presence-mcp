@@ -236,18 +236,15 @@ spoken once the tint is showing. Inside the passage they follow on
 each other's heels, which is the ordinary gap between clips. When those
 sentences have been said, the page scrolls and the next tint goes up,
 and the next sentences begin after that box is up. On the web the open
-tab is sent to the phrase, unless the page notes already record its
-scroll. Each view the search passes, and any cue on screen in that view,
-is written to a markdown file under `~/.local/share/pachakutech/pages/`.
-A cue in that file is opened at its scroll. A search that reaches the
-end of the page turns around once. If the jump does not land and the
-phrase is not in the notes, the page is read again in a short step. The
-first read waits half a second, so a window
-that has just appeared or just moved is there for the check. The tint
-comes down while the page moves, and the new box goes up when the crop
-passes. A miss leaves the tint down. The voice continues. The tint
-stays for the passage and drops when that passage ends. Its safety cap
-is about as long as the words. A single `query`, with no cues, remains
+tab's find brings the phrase into view. The browser's highlight is
+cleared before the photograph. One photograph is the box. A line sitting
+high or low moves eighty pixels and is photographed again. A phrase the
+find does not see stops the search. The first read waits half a second,
+so a window that has just appeared or just moved is there for the check.
+The tint comes down while the page moves, and the new box goes up when
+the crop passes. A miss leaves the tint down. The voice continues. The
+tint stays for the passage and drops when that passage ends. Its safety
+cap is about as long as the words. A single `query`, with no cues, remains
 the one-passage call, and that tint defaults to 90 seconds.
 
 ```bash
@@ -256,14 +253,13 @@ presence highlight-and-speak "$id" --source web --uri "$url" \
   --cues '[{"at":"Touch here is a gesture","query":"Shape without form ... gesture without motion"},{"at":"The hand then prays","query":"stone images ... fading star"}]'
 ```
 
-PDF, a terminal, and the editor have no text fragment. They drop the
-tint before the search and raise it only after the crop passes. A
+A PDF is searched in its text layer. Evince turns to that page, and the
+call's `--page` wins when it is named. Evince's search highlight stays
+off. A scanned page has no text layer, and the search stops there. A
 terminal and the editor accept a passage when the words are already in
-the window. A PDF page already read is written into the same notes,
-with the page number in place of a scroll, and a later cue opens on
-that page when the call does not name one. A document window is written
-into that file from the view on the glass. The document reader does not
-send keys.
+the window. A document window is the same: one photograph of the glass
+already up. The document reader does not send keys. The tint drops
+before that move and rises only after the crop passes.
 
 `spawn` accepts `--context`, `--style`, and `--artifact`. Context and
 style are recorded. They do not restyle the mesh. An artifact id does

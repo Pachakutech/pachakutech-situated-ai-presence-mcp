@@ -7,12 +7,11 @@ import { basename, join } from "node:path";
 import { sendProposal } from "../daemonControl.js";
 import { cueReport, spawnCueFollow, type CueJob } from "./cues.js";
 import { IDE_CLASS, TERMINAL_CLASS, chooseSurface, escapeRegExp } from "./choose.js";
-import { parseTsv, type Box, type Word } from "./core.js";
+import { pageContaining, parseTsv, type Box, type Word } from "./core.js";
 import { cueGroups, resolveCues, speechHoldSeconds, splitSentences, type CueIn } from "./sentences.js";
-import { fileKey } from "./pageNotes.js";
 import { WINDOW_PATH, locatePdf } from "./pdf.js";
 import { locateStill, type StillDeps } from "./surface.js";
-import { locateWeb, withTextFragment, type Client, type LocateErr, type LocateOk, type LocateResult, type WebOpts } from "./web.js";
+import { locateWeb, type Client, type LocateErr, type LocateOk, type LocateResult, type WebOpts } from "./web.js";
 
 const MAX_SECONDS = 360;
 const MARK_DEFAULT_SECONDS = 90;
@@ -31,11 +30,6 @@ type Flags = {
   seconds?: number;
   page?: number;
   cues?: CueIn[];
-  /** Follower only. Jump the open tab to the phrase, then walk in short steps. */
-  fragmentJump?: boolean;
-  stepRatio?: number;
-  /** Phrases to file as they pass. Defaults to the cues on this call. */
-  watch?: string[];
 };
 
 function arg(args: string[], name: string): string | undefined {
@@ -348,16 +342,15 @@ async function cdpEval(expression: string): Promise<boolean> {
   return (await cdpCall(expression)).ok;
 }
 
-function asScroll(value: unknown): number | null {
-  const n = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
-  return Number.isFinite(n) ? n : null;
-}
-
-async function readScroll(): Promise<number | null> {
-  ensureCdpPort();
-  if (!cdpPort) return null;
-  const reply = await cdpCall("(document.scrollingElement || document.documentElement).scrollTop");
-  return reply.ok ? asScroll(reply.value) : null;
+function asRect(value: unknown): Box | null {
+  if (!value || typeof value !== "object") return null;
+  const row = value as { x?: unknown; y?: unknown; w?: unknown; h?: unknown };
+  const x = Number(row.x);
+  const y = Number(row.y);
+  const w = Number(row.w);
+  const h = Number(row.h);
+  if (![x, y, w, h].every((n) => Number.isFinite(n))) return null;
+  return { x, y, w, h };
 }
 
 async function focus(address: string): Promise<boolean> {
@@ -388,11 +381,33 @@ function ensureCdpPort(): void {
   }
 }
 
-async function jumpToFragment(uri: string, query: string): Promise<boolean> {
+/** Chromium's find. The selection is read, then cleared, before this returns. */
+async function findInPage(phrase: string): Promise<{ found: boolean; rect: Box | null } | null> {
   ensureCdpPort();
-  if (!cdpPort) return false;
-  const target = withTextFragment(uri, query);
-  return cdpEval(`location.href = ${JSON.stringify(target)}; true`);
+  if (!cdpPort || !phrase) return null;
+  const expression = `(() => {
+    const found = window.find(${JSON.stringify(phrase)}, false, false, true, false, false, false);
+    const sel = window.getSelection && window.getSelection();
+    let rect = null;
+    if (sel && sel.rangeCount) {
+      const r = sel.getRangeAt(0).getBoundingClientRect();
+      rect = { x: r.x, y: r.y, w: r.width, h: r.height };
+    }
+    if (sel && sel.removeAllRanges) sel.removeAllRanges();
+    return { found: Boolean(found), rect };
+  })()`;
+  const reply = await cdpCall(expression);
+  if (!reply.ok || !reply.value || typeof reply.value !== "object") return null;
+  const row = reply.value as { found?: unknown; rect?: unknown };
+  return { found: row.found === true, rect: asRect(row.rect) };
+}
+
+async function findPdfPage(path: string, query: string): Promise<number | null> {
+  const result = await run("pdftotext", ["-q", "-layout", path, "-"]);
+  if (result.code !== 0) {
+    throw new Error(result.stderr.trim() || "pdftotext failed");
+  }
+  return pageContaining(result.stdout, query);
 }
 
 async function scrollBy(address: string, dy: number): Promise<boolean> {
@@ -405,32 +420,6 @@ async function scrollBy(address: string, dy: number): Promise<boolean> {
   const key = dy > 0 ? "Down" : "Up";
   const times = Math.min(24, Math.max(1, Math.round(Math.abs(dy) / 40)));
   await press(key, times);
-  return true;
-}
-
-async function scrollTo(address: string, top: number): Promise<boolean> {
-  ensureCdpPort();
-  const target = Math.max(0, Math.round(top));
-  if (!cdpPort) return false;
-  const started = await cdpEval(`window.scrollTo({ top: ${target}, behavior: "smooth" }); true`);
-  if (!started) return false;
-  const deadline = Date.now() + 1200;
-  while (Date.now() < deadline) {
-    const now = await readScroll();
-    if (now !== null && Math.abs(now - target) <= 48) return true;
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  await cdpEval(`(document.scrollingElement || document.documentElement).scrollTop = ${target}; true`);
-  return true;
-}
-
-async function scrollTop(address: string): Promise<boolean> {
-  ensureCdpPort();
-  if (cdpPort && (await cdpEval(`(document.scrollingElement || document.documentElement).scrollTop = 0; true`))) {
-    return true;
-  }
-  if (!(await focus(address))) return false;
-  await press("Home", 1);
   return true;
 }
 
@@ -526,7 +515,7 @@ async function activate(bus: string, name: string): Promise<boolean> {
   return called.code === 0;
 }
 
-/** Evince stores a 0-based page on the file. The notes use the 1-based page a person counts. */
+/** Evince stores a 0-based page on the file. Callers count from 1. */
 async function readEvincePage(path: string): Promise<number | null> {
   const info = await run("gio", ["info", "-a", "metadata::evince::page", path], 2500);
   if (info.code !== 0) return null;
@@ -601,7 +590,6 @@ export async function locateRegion(flags: Flags): Promise<LocateResult | LocateE
   const verify = flags.verify || Boolean(flags.presence);
   const classRe = windowClass as RegExp | undefined;
   const titleRe = windowTitle as RegExp | undefined;
-  const watch = flags.watch ?? flags.cues?.map((cue) => cue.query);
 
   let result: LocateResult | LocateErr;
   try {
@@ -615,27 +603,17 @@ export async function locateRegion(flags: Flags): Promise<LocateResult | LocateE
         verify,
         windowClass: classRe,
         windowTitle: titleRe,
-        opened: !flags.noOpen,
-        fragmentJump: flags.fragmentJump,
-        stepRatio: flags.stepRatio,
-        watch,
       };
       result = await locateWeb(opts, {
         clients: async () => asClients(await hyprJson(["clients", "-j"])),
         screen: screenSize,
         ocr: ocrRect,
-        focus,
         scrollBy,
-        scrollTop,
-        readScroll,
-        scrollTo,
         open: openBrowser,
-        jump: jumpToFragment,
+        findInPage,
         sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
         now: () => Date.now(),
         log,
-        // After a jump the remembered words still describe the old viewport.
-        recall: flags.fragmentJump ? undefined : recallWords,
       });
     } else if (flags.source === "pdf") {
       result = await locatePdf(
@@ -649,9 +627,17 @@ export async function locateRegion(flags: Flags): Promise<LocateResult | LocateE
           windowClass: classRe,
           windowTitle: titleRe,
           page: flags.page,
-          watch,
         },
-        { ...stillDeps(), open: openEvince, busForPid, actionEnabled, activate, fitWidth, readPage: readEvincePage },
+        {
+          ...stillDeps(),
+          open: openEvince,
+          busForPid,
+          actionEnabled,
+          activate,
+          fitWidth,
+          readPage: readEvincePage,
+          findPage: findPdfPage,
+        },
       );
     } else if (flags.source === "doc" && flags.uri && !flags.noOpen) {
       await openDocument(flags.uri);
@@ -723,14 +709,6 @@ async function locateDocument(
       verify,
       missedHint: "The phrase is not in the visible window. Scroll it into view yourself. This locator does not send keys.",
       absentHint: "The window never painted any text.",
-      notes: flags.uri
-        ? {
-            uri: fileKey(flags.uri),
-            watch: flags.watch ?? flags.cues?.map((cue) => cue.query),
-            kind: "view",
-            position: () => null,
-          }
-        : undefined,
       choose: (clients, focusedAddress, workspace) =>
         chooseSurface(clients, { workspace, focusedAddress, classRe, titleRe }),
     },

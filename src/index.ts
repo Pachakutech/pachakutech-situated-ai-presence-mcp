@@ -238,7 +238,7 @@ server.registerTool(
       "It stays for the passage, and its safety cap is about as long as the words. A miss on the first passage does not tint and does not speak. " +
       "With no cues, the tint lasts durationSeconds (default 90, max 360). " +
       "One rate-limit tick. text is the spoken line, not a summary of the matched phrase. " +
-      "Web can scroll. PDF opens Evince and accepts page. Terminal, doc, and ide read a window already up. " +
+      "On the web the browser's find moves the page. PDF opens Evince on the text-layer page, and an explicit page wins. Terminal, doc, and ide read a window already up. " +
       "ide is the editor window (code, code-oss, cursor, zed, jetbrains). Reveal the line. It does not type.",
     inputSchema: {
       presenceId: z.string().describe("Live presence from spawnPresence"),
@@ -293,7 +293,7 @@ server.registerTool(
     description:
       "Finds the phrase, checks the crop, and tints it. No speech. " +
       "The tint lasts durationSeconds (default 90, max 360). A locate miss does not tint. " +
-      "One rate-limit tick. Web can scroll. PDF opens Evince and accepts page. " +
+      "One rate-limit tick. On the web the browser's find moves the page. PDF opens Evince on the text-layer page, and an explicit page wins. " +
       "Terminal, doc, and ide read a window already up and do not type. " +
       "ide is the editor window (code, code-oss, cursor, zed, jetbrains).",
     inputSchema: {

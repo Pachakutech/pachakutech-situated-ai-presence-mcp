@@ -110,32 +110,37 @@ a JSON list of `{at, query}` beside it. `at` names one sentence of that
 reply. `query` is the passage to find on the page, a phrase or
 `start ... end`. The runtime splits the reply, binds each cue to a
 sentence, and finds the first passage before any audio. Later passages
-move with the sentence clips. On the web the open tab jumps to the
-phrase. Views already read, and the cues in them, are written under
-`~/.local/share/pachakutech/pages/` for a person to read. A cue in that
-file is opened at its scroll, and a search turns around at the end of
-the page. A PDF keeps the page number in that file and opens it when the
-call does not name a page. A document window is written into the file
-from the view on screen. The document reader does not send keys. The tint
-comes down for that jump and the new box goes up when the crop passes. A miss leaves the tint down. The voice continues, and
-the tint stays up until the voice ends. The safety cap is about as long
-as the words. During the quiet between clips the next passage is found. The binding rules are in
+move with the sentence clips. On the web the open tab's find brings the
+phrase into view. The browser's highlight is cleared before the
+photograph. One photograph is the box. A line sitting high or low moves
+eighty pixels and is photographed again. Our tint uses that box. A
+phrase the find does not see stops the search. A PDF is searched in its
+text layer, and Evince turns to that page. `--page` wins when the call
+names one. Evince's search highlight stays off. A terminal, an editor,
+and a document window are one read of the glass already up. The document
+reader does not send keys. The tint comes down while the page moves, and
+the new box goes up when the crop passes. A miss leaves the tint down.
+The voice continues, and the tint stays up until the voice ends. The
+safety cap is about as long as the words. During the quiet between clips
+the next passage is found. The binding rules are in
 [Annotating the reply](docs/situated-presence.md#annotating-the-reply).
 `highlight-query` is the same find and tint with no speech. Stdout is one JSON object: the locate box,
 `highlight.status`, and, when it speaks, `speak.status`. `--source` is
-`web`, `pdf`, `terminal`, `doc`, or `ide`. Web can scroll. PDF takes a
-path and `--page`. Terminal, doc, and ide read a window already up and
-do not type into it. `ide` is the editor window (`code`, `code-oss`,
-`cursor`, `zed`, `jetbrains`); reveal the line first.
+`web`, `pdf`, `terminal`, `doc`, or `ide`. On the web the browser's find
+moves the page. PDF takes a path, and the text layer names the page.
+Terminal, doc, and ide read a window already up and do not type into it.
+`ide` is the editor window (`code`, `code-oss`, `cursor`, `zed`,
+`jetbrains`); reveal the line first.
 
-Locate reads the daemon's latest screen-text message before it
-screenshots a window. The message is the columns of one capture
-(`text`, `x`, `y`, `w`, `h`, `conf`), kept for about eight seconds
-after it is posted. One hit in the chosen window is the measure, and
-the method is `screen-text-memory`. The crop is still read before a
-tint. A quiet message, two hits, or a failed crop uses the screenshot
-path. `presence screen-text` prints the message. It does not tint and
-it does not speak.
+A terminal, a PDF, a document, and the editor read the daemon's latest
+screen-text message before the screenshot. The message is the columns
+of one capture (`text`, `x`, `y`, `w`, `h`, `conf`), kept for about
+eight seconds after it is posted. One hit in the chosen window is the
+measure, and the method is `screen-text-memory`. The crop is still read
+before a tint. A quiet message, two hits, or a failed crop uses the
+screenshot path. The web measure is the photograph after the browser's
+find, because that find has just moved the page. `presence screen-text`
+prints the message. It does not tint and it does not speak.
 
 `u`, `v`, `w`, and `h` are fractions of the whole composited output,
 origin at the top left, `v` downward. A bare `highlight` lasts 5 seconds

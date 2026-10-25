@@ -1,29 +1,29 @@
-// Web adapter. The core decides whether to scroll; this file only fetches
-// pixels, moves the page, and checks the crop before anyone may mark it.
+// Web adapter. The viewer's find moves the page. This file photographs the
+// line, nudges it into the band, and checks the crop before anyone may mark it.
 
 import {
   bandOf,
   coveredBy,
   cropOk,
+  endStep,
   fingerprint,
   findRun,
-  lineText,
   matchedText,
   meanConfidence,
   neighborTexts,
+  NUDGE_PX,
+  openingPhrase,
   prepareLines,
   queryInBlob,
   seek,
   shiftBox,
   toUv,
-  toWindowWords,
   unionBox,
   type Box,
   type SeekState,
   type Word,
 } from "./core.js";
 import { occludes } from "./choose.js";
-import { loadPageNotes, notesPath, recordCues, recordPass, savePageNotes, scrollSense, type PageNotes } from "./pageNotes.js";
 
 export type Client = {
   address: string;
@@ -52,7 +52,7 @@ export type LocateOk = {
   screen: { w: number; h: number };
   window: { class: string; title: string; x: number; y: number; w: number; h: number };
   confidence: number;
-  method: "tesseract" | "text-fragment+ocr" | "hypr-focused-ocr" | "screen-text-memory";
+  method: "tesseract" | "hypr-focused-ocr" | "screen-text-memory";
   evidence: {
     lineHint: string;
     nudgedPx: number;
@@ -79,14 +79,6 @@ export type WebOpts = {
   windowClass?: RegExp;
   windowTitle?: RegExp;
   verify: boolean;
-  /** Set when this process launched the page, so a text fragment may have scrolled it. */
-  opened: boolean;
-  /** Ask the open tab to scroll to the phrase before any walk. */
-  fragmentJump?: boolean;
-  /** Fraction of the window for an off-screen step. Default 0.7. */
-  stepRatio?: number;
-  /** Other phrases to file when they appear. The query itself is always filed. */
-  watch?: string[];
 };
 
 export type Deps = {
@@ -94,22 +86,17 @@ export type Deps = {
   screen(): Promise<{ w: number; h: number }>;
   /** Window-relative words. The rect is the window on screen. */
   ocr(rect: Box, psm?: "6" | "3"): Promise<Word[]>;
-  focus(address: string): Promise<boolean>;
   /** Positive dy moves the document down. Returns false when focus failed. */
   scrollBy(address: string, dy: number): Promise<boolean>;
-  scrollTop(address: string): Promise<boolean>;
-  /** Pixels from the top of the document, or null when the scroller cannot be read. */
-  readScroll?(): Promise<number | null>;
-  /** Open the document at this scroll. False when the scroller cannot be moved. */
-  scrollTo?(address: string, top: number): Promise<boolean>;
   open(uri: string): Promise<void>;
-  /** Move the already-open tab to the phrase. False when no debugger is listening. */
-  jump?(uri: string, query: string): Promise<boolean>;
+  /**
+   * Ask the open tab to bring `phrase` into view, read the selection, and clear it.
+   * Null when the debugger is not listening. `found` false means the phrase is absent.
+   */
+  findInPage?(phrase: string): Promise<{ found: boolean; rect: Box | null } | null>;
   sleep(ms: number): Promise<void>;
   now(): number;
   log(line: string): void;
-  /** Screen-space words from the daemon's latest message. Empty when it is quiet. */
-  recall?(): Promise<Word[]>;
 };
 
 const PAINT_WAIT_MS = 4000;
@@ -136,20 +123,12 @@ export function chooseWindow(clients: Client[], opts: WebOpts): Client | null {
   return matches.sort((a, b) => b.w * b.h - a.w * a.h)[0];
 }
 
-export function withTextFragment(uri: string, query: string): string {
-  if (uri.includes("#:~:text=")) return uri;
-  const phrase = query.split(/\s+\.\.\.\s+/)[0].split(/\s+/).slice(0, 6).join(" ").trim();
-  if (!phrase) return uri;
-  const base = uri.split("#")[0];
-  return `${base}#:~:text=${encodeURIComponent(phrase)}`;
-}
-
 export async function locateWeb(opts: WebOpts, deps: Deps): Promise<LocateResult> {
   const deadline = deps.now() + opts.timeoutMs;
   if (!opts.noOpen) {
     if (!opts.uri) return fail("uri_required", "Pass --uri, or --no-open to measure a window that is already up.");
     try {
-      await deps.open(withTextFragment(opts.uri, opts.query));
+      await deps.open(opts.uri);
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       return fail("browser_open_failed", detail);
@@ -157,28 +136,14 @@ export async function locateWeb(opts: WebOpts, deps: Deps): Promise<LocateResult
     await deps.sleep(WINDOW_SETTLE_MS);
   }
 
-  const notes: PageNotes | null = opts.uri ? loadPageNotes(opts.uri) : null;
-  let notesLogged = false;
-  const knownScroll = notes && opts.uri ? scrollSense(notes, opts.query, null).to : undefined;
-  if (notes && opts.uri && (notes.passes.length || notes.cues.length)) {
-    deps.log(`page notes: ${notesPath(opts.uri)}`);
-    notesLogged = true;
-  }
-  if (knownScroll !== undefined) deps.log(`locate: page notes open at ${knownScroll}`);
-
-  let fragmentLanded = opts.opened;
-  if (opts.fragmentJump && opts.noOpen && opts.uri && deps.jump && knownScroll === undefined) {
-    const jumped = await deps.jump(opts.uri, opts.query);
-    fragmentLanded = fragmentLanded || jumped;
-    deps.log(jumped ? "locate: fragment jump" : "locate: fragment jump unavailable");
-    if (jumped) await deps.sleep(800);
-  }
-
-  let state: SeekState = { walkedFromTop: false, nudgePx: 0, scrolled: false, walked: false };
+  let state: SeekState = { nudgePx: 0 };
   let lastFp: string | null = null;
-  let seenPaint = false;
   const started = deps.now();
   let geomRetries = 0;
+  let viewer: "pending" | "placed" = "pending";
+  let endUsed = 0;
+  const passage = /\s+\.\.\.\s+/.test(opts.query);
+  const opening = openingPhrase(opts.query);
 
   frame: while (deps.now() < deadline) {
     const clients = await deps.clients();
@@ -193,183 +158,156 @@ export async function locateWeb(opts: WebOpts, deps: Deps): Promise<LocateResult
     const others = clients
       .filter((client) => client.address !== win.address && client.workspace === win.workspace && occludes(win, client))
       .map((client) => ({ x: client.x, y: client.y, w: client.w, h: client.h }));
-    let fromMemory = false;
-    let words: Word[] | undefined;
-    // A known scroll is about to move the page. The remembered viewport would describe the old one.
-    if (deps.recall && knownScroll === undefined) {
-      const local = toWindowWords(await deps.recall(), win, others);
-      const hit = findRun(prepareLines(local), opts.query);
-      if (hit && hit !== "ambiguous") {
-        words = local;
-        fromMemory = true;
-        deps.log("locate: memory");
-      }
-    }
 
-    for (;;) {
-      if (!words) {
-        try {
-          words = (await deps.ocr({ x: win.x, y: win.y, w: win.w, h: win.h })).filter(
-            (word) => !coveredBy(word, { x: win.x, y: win.y }, others),
-          );
-        } catch (error) {
-          const detail = error instanceof Error ? error.message : String(error);
-          return fail("ocr_failed", detail);
-        }
-        fromMemory = false;
+    if (viewer === "pending") {
+      if (!deps.findInPage) {
+        return fail("quote_not_found", "The browser's find is not available, so the page was left where it was.");
       }
-      const lines = prepareLines(words);
-      const painted = lines.reduce((sum, line) => sum + line.words.length, 0) >= PAINT_WORDS;
-      if (!fromMemory && !painted && deps.now() - started < PAINT_WAIT_MS) {
-        deps.log("locate: window is up, page text is not painted yet");
-        await deps.sleep(WINDOW_SETTLE_MS);
-        continue frame;
-      }
-      seenPaint = seenPaint || painted;
-
-      const fp = fingerprint(lines);
-      const pictureMoved = lastFp === null || fp !== lastFp;
-      const found = findRun(lines, opts.query);
-      if (found === "ambiguous") {
-        if (fromMemory) {
-          deps.log("locate: memory is ambiguous in this window; reading the window");
-          words = undefined;
+      const hit = await deps.findInPage(opening);
+      if (!hit) {
+        if (deps.now() - started < PAINT_WAIT_MS) {
+          deps.log("locate: browser find is not answering yet");
+          await deps.sleep(WINDOW_SETTLE_MS);
           continue;
         }
-        return fail("ambiguous_query", "That phrase is on screen more than once. Pass a longer query.");
+        return fail("quote_not_found", "The browser's find is not available, so the page was left where it was.");
       }
-
-      let placement: { band: "ok" | "low" | "high" } | null = null;
-      let box: Box | null = null;
-      if (found) {
-        box = unionBox(lines, found, opts.pad, { w: win.w, h: win.h });
-        if (box) placement = { band: bandOf(box, win.h, opts.pad) };
-      }
-
-      let currentTop: number | null = null;
-      const frameIsLive = !fromMemory || found !== null;
-      if (notes && opts.uri && (frameIsLive || deps.readScroll)) {
-        if (deps.readScroll) currentTop = await deps.readScroll();
-        if (frameIsLive) {
-          if (!notes.title && win.title) notes.title = win.title.replace(/\s+/g, " ").trim();
-          const watched = [opts.query, ...(opts.watch ?? [])];
-          const visible = watched.filter((query) => {
-            const hit = findRun(lines, query);
-            return Boolean(hit && hit !== "ambiguous");
-          });
-          const passChanged = recordPass(
-            notes,
-            currentTop,
-            lines.map((line) => lineText(line)),
-          );
-          const cueChanged = recordCues(notes, currentTop, visible);
-          if (passChanged || cueChanged) {
-            const path = savePageNotes(notes);
-            if (!notesLogged) {
-              deps.log(`page notes: ${path}`);
-              notesLogged = true;
-            }
-          }
+      if (!hit.found) {
+        // A document that is still loading answers false. An open page does not get that wait.
+        if (!opts.noOpen && deps.now() - started < PAINT_WAIT_MS) {
+          deps.log("locate: browser find did not see the phrase yet");
+          await deps.sleep(WINDOW_SETTLE_MS);
+          continue;
         }
+        return fail("quote_not_found", "The browser's find did not see that phrase.");
       }
-      const hint = notes ? scrollSense(notes, opts.query, currentTop) : undefined;
-      const decision = seek(placement, pictureMoved, state, win.h, opts.stepRatio ?? 0.7, hint);
-      if (fromMemory && decision.action.type === "fail") {
-        deps.log("locate: memory gave up the page; reading the window");
-        words = undefined;
+      viewer = "placed";
+      if (hit.rect && hit.rect.w >= 8 && hit.rect.h >= 8) {
+        const band = bandOf(
+          { x: hit.rect.x, y: hit.rect.y, w: hit.rect.w, h: hit.rect.h },
+          win.h,
+          opts.pad,
+        );
+        deps.log(
+          `locate: viewer find ${band} ${Math.round(hit.rect.w)}x${Math.round(hit.rect.h)} at ${Math.round(hit.rect.x)},${Math.round(hit.rect.y)}`,
+        );
+      } else {
+        deps.log("locate: viewer find");
+      }
+      await deps.sleep(WINDOW_SETTLE_MS);
+      continue;
+    }
+
+    let words: Word[];
+    try {
+      words = (await deps.ocr({ x: win.x, y: win.y, w: win.w, h: win.h })).filter(
+        (word) => !coveredBy(word, { x: win.x, y: win.y }, others),
+      );
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      return fail("ocr_failed", detail);
+    }
+    const lines = prepareLines(words);
+    const painted = lines.reduce((sum, line) => sum + line.words.length, 0) >= PAINT_WORDS;
+    if (!painted && deps.now() - started < PAINT_WAIT_MS) {
+      deps.log("locate: window is up, page text is not painted yet");
+      await deps.sleep(WINDOW_SETTLE_MS);
+      continue;
+    }
+
+    const fp = fingerprint(lines);
+    const pictureMoved = lastFp === null || fp !== lastFp;
+    const found = findRun(lines, opts.query);
+    if (found === "ambiguous") {
+      return fail("ambiguous_query", "That phrase is on screen more than once. Pass a longer query.");
+    }
+
+    if (!found) {
+      const openingHit = opening === opts.query.trim() ? null : findRun(lines, opening);
+      const openingOnGlass = Boolean(openingHit && openingHit !== "ambiguous");
+      if (passage && endStep(false, openingOnGlass, endUsed) === "nudge") {
+        if (!pictureMoved && endUsed > 0) {
+          return fail("quote_not_found", "The end of the passage stayed out of the photograph.");
+        }
+        endUsed += 1;
+        lastFp = fp;
+        const moved = await deps.scrollBy(win.address, NUDGE_PX);
+        if (!moved) return fail("focus_failed", "Could not focus the browser, so the page was not scrolled.");
+        deps.log(`locate: scroll ${NUDGE_PX}`);
+        await deps.sleep(WINDOW_SETTLE_MS);
         continue;
       }
-
-      if (decision.action.type === "accept") {
-        if (!found || !box) {
-          if (fromMemory) {
-            words = undefined;
-            continue;
-          }
-          return fail("quote_not_found", "The phrase left the screen before the box was settled.");
-        }
-        const again = chooseWindow(await deps.clients(), opts);
-        if (!again || !sameWindow(again, win)) {
-          if (geomRetries++ < 1) {
-            deps.log("locate: window moved between the measure and the check; measuring again");
-            lastFp = null;
-            state = { walkedFromTop: false, nudgePx: 0, scrolled: false, walked: false };
-            continue frame;
-          }
-          return fail("window_moved", "The browser moved twice during the measure. Locate again.");
-        }
-        let screenBox = shiftBox(box, win);
-        const neighbors = neighborTexts(lines, found);
-        if (opts.verify) {
-          const checked = await verifyBox(screenBox, opts, neighbors, deps);
-          if (!checked.ok) {
-            const tight = unionBox(lines, found, 0, { w: win.w, h: win.h });
-            let failed: LocateErr | { ok: true } = checked;
-            if (tight) {
-              const tightScreen = shiftBox(tight, win);
-              const retry = await verifyBox(tightScreen, opts, neighbors, deps);
-              if (retry.ok) {
-                box = tight;
-                screenBox = tightScreen;
-                failed = { ok: true };
-              } else {
-                failed = retry;
-              }
-            }
-            if (!failed.ok) {
-              if (fromMemory) {
-                deps.log("locate: memory crop failed; reading the window");
-                words = undefined;
-                continue;
-              }
-              return failed;
-            }
-          }
-        }
-        lastFp = fp;
-        state = decision.state;
-        const screen = await deps.screen();
-        const uv = toUv(screenBox, screen);
-        const text = matchedText(lines, found);
-        deps.log(`locate: ${screenBox.w}x${screenBox.h} at ${screenBox.x},${screenBox.y}`);
-        return {
-          ok: true,
-          source: "web",
-          ...uv,
-          matchedText: text,
-          screen,
-          window: { class: win.className, title: win.title, x: win.x, y: win.y, w: win.w, h: win.h },
-          confidence: meanConfidence(lines, found),
-          method: fromMemory ? "screen-text-memory" : fragmentLanded ? "text-fragment+ocr" : "tesseract",
-          evidence: { lineHint: text.slice(0, 180), nudgedPx: state.nudgePx, screenBox },
-        };
-      }
-
-      if (decision.action.type === "fail") {
-        return fail(
-          "quote_not_found",
-          seenPaint
-            ? "The phrase was not on screen. The search turned around at the end of the page."
-            : "The page never painted any text.",
-        );
-      }
-
-      lastFp = fp;
-      state = decision.state;
-      if (decision.action.type === "to") {
-        const aimed = deps.scrollTo ? await deps.scrollTo(win.address, decision.action.top) : false;
-        deps.log(aimed ? `locate: scroll to ${decision.action.top}` : "locate: remembered scroll unavailable");
-        await deps.sleep(WINDOW_SETTLE_MS);
-        continue frame;
-      }
-      const moved = await deps.scrollBy(win.address, decision.action.dy);
-      if (!moved) {
-        return fail("focus_failed", "Could not focus the browser, so the page was not scrolled.");
-      }
-      deps.log(`locate: scroll ${decision.action.dy}`);
-      await deps.sleep(WINDOW_SETTLE_MS);
-      continue frame;
+      return fail(
+        "quote_not_found",
+        painted
+          ? "The phrase was not on screen after the browser's find."
+          : "The page never painted any text.",
+      );
     }
+
+    const box = unionBox(lines, found, opts.pad, { w: win.w, h: win.h });
+    if (!box) return fail("quote_not_found", "The phrase left the screen before the box was settled.");
+    const decision = seek({ band: bandOf(box, win.h, opts.pad) }, pictureMoved, state);
+
+    if (decision.action.type === "fail") {
+      return fail("quote_not_found", "The phrase was not on screen after the browser's find.");
+    }
+
+    if (decision.action.type === "accept") {
+      const again = chooseWindow(await deps.clients(), opts);
+      if (!again || !sameWindow(again, win)) {
+        if (geomRetries++ < 1) {
+          deps.log("locate: window moved between the measure and the check; measuring again");
+          lastFp = null;
+          state = { nudgePx: 0 };
+          continue frame;
+        }
+        return fail("window_moved", "The browser moved twice during the measure. Locate again.");
+      }
+      let screenBox = shiftBox(box, win);
+      const neighbors = neighborTexts(lines, found);
+      if (opts.verify) {
+        const checked = await verifyBox(screenBox, opts, neighbors, deps);
+        if (!checked.ok) {
+          const tight = unionBox(lines, found, 0, { w: win.w, h: win.h });
+          let failed: LocateErr | { ok: true } = checked;
+          if (tight) {
+            const tightScreen = shiftBox(tight, win);
+            const retry = await verifyBox(tightScreen, opts, neighbors, deps);
+            if (retry.ok) {
+              screenBox = tightScreen;
+              failed = { ok: true };
+            } else {
+              failed = retry;
+            }
+          }
+          if (!failed.ok) return failed;
+        }
+      }
+      state = decision.state;
+      const screen = await deps.screen();
+      const uv = toUv(screenBox, screen);
+      const text = matchedText(lines, found);
+      deps.log(`locate: ${screenBox.w}x${screenBox.h} at ${screenBox.x},${screenBox.y}`);
+      return {
+        ok: true,
+        source: "web",
+        ...uv,
+        matchedText: text,
+        screen,
+        window: { class: win.className, title: win.title, x: win.x, y: win.y, w: win.w, h: win.h },
+        confidence: meanConfidence(lines, found),
+        method: "tesseract",
+        evidence: { lineHint: text.slice(0, 180), nudgedPx: state.nudgePx + endUsed * NUDGE_PX, screenBox },
+      };
+    }
+
+    lastFp = fp;
+    state = decision.state;
+    const moved = await deps.scrollBy(win.address, decision.action.dy);
+    if (!moved) return fail("focus_failed", "Could not focus the browser, so the page was not scrolled.");
+    deps.log(`locate: scroll ${decision.action.dy}`);
+    await deps.sleep(WINDOW_SETTLE_MS);
   }
 
   return fail("timeout", `No settled box within ${Math.round(opts.timeoutMs / 1000)}s.`);

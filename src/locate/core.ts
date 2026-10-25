@@ -17,33 +17,22 @@ export type Box = { x: number; y: number; w: number; h: number };
 export type Run = { start: number; end: number };
 
 export type SeekState = {
-  walkedFromTop: boolean;
+  /** Pixels already spent centering a phrase that is on the glass. */
   nudgePx: number;
-  /** A scroll has been issued. A stuck picture may turn around once. */
-  scrolled: boolean;
-  /** The phrase was brought on screen by a search scroll, not already in view. */
-  walked: boolean;
-  /** A remembered scroll was already opened. */
-  aimed?: boolean;
-  /** The walk has already turned around once. */
-  flipped?: boolean;
-  sweep?: "down" | "up";
 };
-
-/** `to` opens a remembered scroll once. `dir` is the first step when the phrase has no pixel of its own. */
-export type SeekHint = { to?: number; dir?: 1 | -1 };
 
 export type SeekAction =
   | { type: "scroll"; dy: number }
-  | { type: "to"; top: number }
   | { type: "accept" }
   | { type: "fail"; error: "quote_not_found" };
 
 const TOKEN_CAP = 40;
 const LINE_SLACK = 10;
 const COLUMN_GAP = 80;
-const NUDGE_PX = 80;
+export const NUDGE_PX = 80;
 const NUDGE_CAP = 400;
+/** Short downward steps when the opening of a passage is on the glass and the end is not. */
+export const END_NUDGE_MAX = NUDGE_CAP / NUDGE_PX;
 const BAND_LOW = 0.82;
 const BAND_HIGH = 0.62;
 /** OCR tokens a contiguous phrase may skip between two query tokens. */
@@ -202,6 +191,37 @@ function allPhrases(seq: Seq[], phrase: string[]): Array<{ start: number; end: n
   return hits;
 }
 
+/** The words the viewer's find is asked for. A passage uses the opening phrase. */
+export function openingPhrase(query: string): string {
+  return query.split(/\s+\.\.\.\s+/)[0]?.trim() ?? "";
+}
+
+/**
+ * 1-based page whose text contains the phrase. `text` is Poppler output with a
+ * form feed between pages. A passage matches on its opening phrase.
+ * Null when no page contains it. A trailing form feed is not an extra page.
+ */
+export function pageContaining(text: string, query: string): number | null {
+  const phrase = openingPhrase(query).replace(/\s+/g, " ").trim().toLowerCase();
+  if (!phrase) return null;
+  const pages = text.split("\f");
+  const last = pages.length - 1;
+  const count = last >= 0 && pages[last] === "" ? last : pages.length;
+  for (let i = 0; i < count; i++) {
+    if (pages[i].replace(/\s+/g, " ").toLowerCase().includes(phrase)) return i + 1;
+  }
+  return null;
+}
+
+/**
+ * Downward steps still allowed when a passage's opening is on the glass and the end is not.
+ * The passage itself, a missing opening, or a spent cap is a stop.
+ */
+export function endStep(passageFound: boolean, openingFound: boolean, used: number): "nudge" | "stop" {
+  if (passageFound || !openingFound || used >= END_NUDGE_MAX) return "stop";
+  return "nudge";
+}
+
 /**
  * A query is a phrase, or `start ... end` for a passage. The passage unions
  * every line from the first anchor through the second, and nothing past it.
@@ -342,53 +362,27 @@ export function meanConfidence(lines: Line[], run: Run): number {
 }
 
 /**
- * What to do after one OCR. `pictureMoved` is false when this frame's text
- * matches the frame before the last scroll. Positive `dy` moves the document
- * down, so the words rise on the screen. A remembered scroll is opened once.
- * A stuck picture turns around once, then the search stops.
+ * What to do after one photograph of a view the viewer has already placed.
+ * A missing phrase stops. A phrase in the band is the box. A phrase high or
+ * low moves eighty pixels. A nudge that does not move the picture, or 400
+ * pixels of nudging, accepts the box where it sits. Positive `dy` moves the
+ * document down, so the words rise on the screen.
  */
 export function seek(
   placement: { band: "ok" | "low" | "high" } | null,
   pictureMoved: boolean,
   state: SeekState,
-  windowH: number,
-  stepRatio = 0.7,
-  hint?: SeekHint,
 ): { action: SeekAction; state: SeekState } {
-  if (placement) {
-    // Already on screen: only a short nudge, the fragment case. Found by walking:
-    // the page step is most of the window, so the correction may be too.
-    const cap = state.walked ? Math.round(windowH * 0.6) : NUDGE_CAP;
-    if (placement.band === "ok") return { action: { type: "accept" }, state };
-    if ((!pictureMoved && state.nudgePx > 0) || state.nudgePx >= cap) {
-      return { action: { type: "accept" }, state };
-    }
-    const dy = placement.band === "low" ? NUDGE_PX : -NUDGE_PX;
-    return {
-      action: { type: "scroll", dy },
-      state: { ...state, nudgePx: state.nudgePx + NUDGE_PX },
-    };
+  if (!placement) return { action: { type: "fail", error: "quote_not_found" }, state };
+  if (placement.band === "ok") return { action: { type: "accept" }, state };
+  if ((!pictureMoved && state.nudgePx > 0) || state.nudgePx >= NUDGE_CAP) {
+    return { action: { type: "accept" }, state };
   }
-  if (typeof hint?.to === "number" && !state.aimed) {
-    return {
-      action: { type: "to", top: hint.to },
-      state: { ...state, aimed: true, scrolled: true, walked: true },
-    };
-  }
-  const step = Math.max(200, Math.round(windowH * stepRatio));
-  if (!pictureMoved && state.scrolled) {
-    if (!state.flipped) {
-      const goingDown = state.sweep !== "up";
-      return {
-        action: { type: "scroll", dy: goingDown ? -step : step },
-        state: { ...state, flipped: true, sweep: goingDown ? "up" : "down", scrolled: true, walked: true },
-      };
-    }
-    return { action: { type: "fail", error: "quote_not_found" }, state };
-  }
-  const sweep = state.sweep ?? (hint?.dir === -1 ? "up" : "down");
-  const dy = sweep === "up" ? -step : step;
-  return { action: { type: "scroll", dy }, state: { ...state, scrolled: true, walked: true, sweep } };
+  const dy = placement.band === "low" ? NUDGE_PX : -NUDGE_PX;
+  return {
+    action: { type: "scroll", dy },
+    state: { ...state, nudgePx: state.nudgePx + NUDGE_PX },
+  };
 }
 
 export function fingerprint(lines: Line[]): string {

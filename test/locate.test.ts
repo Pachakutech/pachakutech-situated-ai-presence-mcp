@@ -6,8 +6,12 @@ import test from "node:test";
 import {
   bandOf,
   cropOk,
+  endStep,
+  END_NUDGE_MAX,
   findRun,
   leaksLine,
+  NUDGE_PX,
+  pageContaining,
   parseTsv,
   prepareLines,
   seek,
@@ -78,82 +82,67 @@ test("doubtna leaks and the matched crop does not", () => {
   assert.equal(cropOk(`${blob} doubtna`, query, neighbors), false);
 });
 
-test("a bottom-parked passage is nudged up, and a missing one is given up", () => {
+test("a phrase on the glass is nudged eighty pixels, and a missing one is not scrolled", () => {
   const lines = prepareLines(parseTsv(fixture));
   const run = findRun(lines, query);
   if (run === "ambiguous" || !run) throw new Error("expected one run");
   const parked = unionBox(lines, run, 12, bounds);
   assert.ok(parked);
-  assert.equal(bandOf(parked, 1080, 12), "low");
-
-  const doc: Word[] = [
-    { x: 400, y: 120, w: 80, h: 14, text: "Header", conf: 90 },
-    { x: 490, y: 120, w: 70, h: 14, text: "above", conf: 90 },
-    { x: 570, y: 120, w: 60, h: 14, text: "the", conf: 90 },
-    { x: 640, y: 120, w: 70, h: 14, text: "poem", conf: 90 },
-    ...parseTsv(fixture).map((word) => ({ ...word, y: word.y + 1600 })),
-    { x: 400, y: 4200, w: 80, h: 14, text: "Footer", conf: 90 },
-  ];
-  let scroll = 0;
-  let state: SeekState = { walkedFromTop: false, nudgePx: 0, scrolled: false, walked: false };
-  let lastFp: string | null = null;
-  let accepted: { y: number; h: number } | null = null;
   const windowH = 1080;
-  const docBottom = 4500;
-  for (let step = 0; step < 30 && !accepted; step++) {
-    const visible = doc
-      .filter((word) => word.y - scroll >= 0 && word.y - scroll < windowH)
-      .map((word) => ({ ...word, y: word.y - scroll }));
-    const frame = prepareLines(visible);
-    const fp = frame.map((line) => line.words.map((word) => word.text).join(" ")).join("|");
-    const moved = lastFp === null || fp !== lastFp;
-    lastFp = fp;
-    const hit = findRun(frame, query);
-    const box = hit && hit !== "ambiguous" ? unionBox(frame, hit, 12, bounds) : null;
-    const decision = seek(box ? { band: bandOf(box, windowH, 12) } : null, moved, state, windowH);
+  assert.equal(bandOf(parked, windowH, 12), "low");
+
+  let state: SeekState = { nudgePx: 0 };
+  let boxY = parked.y;
+  const scrolls: number[] = [];
+  let accepted = false;
+  for (let step = 0; step < 8 && !accepted; step++) {
+    const box = { ...parked, y: boxY };
+    const decision = seek({ band: bandOf(box, windowH, 12) }, true, state);
     state = decision.state;
     if (decision.action.type === "accept") {
-      assert.ok(box);
-      accepted = box;
+      accepted = true;
       break;
     }
-    if (decision.action.type === "fail") break;
-    if (decision.action.type === "to") scroll = Math.max(0, decision.action.top);
-    if (decision.action.type === "scroll") {
-      const maxScroll = Math.max(0, docBottom - windowH);
-      scroll = Math.max(0, Math.min(maxScroll, scroll + decision.action.dy));
-    }
+    assert.equal(decision.action.type, "scroll");
+    if (decision.action.type !== "scroll") break;
+    assert.equal(decision.action.dy, NUDGE_PX);
+    scrolls.push(decision.action.dy);
+    boxY -= decision.action.dy;
   }
   assert.ok(accepted);
-  const center = (accepted.y + accepted.h / 2) / windowH;
+  assert.ok(scrolls.length >= 1);
+  const center = (boxY + parked.h / 2) / windowH;
   assert.ok(center <= 0.82, `center ${center}`);
   assert.ok(center >= 0.62, `center ${center}`);
 
-  const fresh = (): SeekState => ({ walkedFromTop: false, nudgePx: 0, scrolled: false, walked: false });
-  let action = seek(null, true, fresh(), windowH).action;
-  assert.equal(action.type, "scroll");
-  if (action.type === "scroll") assert.ok(action.dy > 0);
-  const turned = seek(null, false, { ...fresh(), scrolled: true, walked: true, sweep: "down" }, windowH, 0.25);
-  assert.equal(turned.action.type, "scroll");
-  if (turned.action.type === "scroll") assert.equal(turned.action.dy, -Math.max(200, Math.round(windowH * 0.25)));
-  assert.equal(turned.state.flipped, true);
-  assert.equal(turned.state.sweep, "up");
-  action = seek(null, false, turned.state, windowH).action;
-  assert.deepEqual(action, { type: "fail", error: "quote_not_found" });
+  const high = seek({ band: "high" }, true, { nudgePx: 0 });
+  assert.deepEqual(high.action, { type: "scroll", dy: -NUDGE_PX });
+  const capped = seek({ band: "low" }, true, { nudgePx: 400 });
+  assert.deepEqual(capped.action, { type: "accept" });
+  const stuck = seek({ band: "low" }, false, { nudgePx: NUDGE_PX });
+  assert.deepEqual(stuck.action, { type: "accept" });
 
-  const aimed = seek(null, true, fresh(), windowH, 0.25, { to: 1400, dir: -1 });
-  assert.deepEqual(aimed.action, { type: "to", top: 1400 });
-  assert.equal(aimed.state.aimed, true);
-  const afterAim = seek(null, true, aimed.state, windowH, 0.25, { to: 1400, dir: -1 });
-  assert.equal(afterAim.action.type, "scroll");
-  if (afterAim.action.type === "scroll") assert.ok(afterAim.action.dy < 0);
+  const missing = seek(null, true, { nudgePx: 0 });
+  assert.deepEqual(missing.action, { type: "fail", error: "quote_not_found" });
+  assert.equal(missing.state.nudgePx, 0);
+});
 
-  const fine = seek(null, true, fresh(), windowH, 0.25);
-  assert.equal(fine.action.type, "scroll");
-  if (fine.action.type === "scroll") assert.equal(fine.action.dy, Math.max(200, Math.round(windowH * 0.25)));
-  const upward = seek(null, true, fresh(), windowH, 0.25, { dir: -1 });
-  assert.equal(upward.action.type, "scroll");
-  if (upward.action.type === "scroll") assert.equal(upward.action.dy, -fine.action.dy);
+test("a passage end may take a few short steps, then stops", () => {
+  assert.equal(END_NUDGE_MAX, 5);
+  assert.equal(endStep(false, true, 0), "nudge");
+  assert.equal(endStep(false, true, END_NUDGE_MAX - 1), "nudge");
+  assert.equal(endStep(false, true, END_NUDGE_MAX), "stop");
+  assert.equal(endStep(true, true, 0), "stop");
+  assert.equal(endStep(false, false, 0), "stop");
+});
+
+test("poppler text names the page that holds the phrase", () => {
+  const text = "cover page\fThe hermit-thrush sings in the pine trees\fdrip drop drip drop\f";
+  assert.equal(pageContaining(text, "hermit-thrush"), 2);
+  assert.equal(pageContaining(text, "hermit-thrush sings ... drip drop"), 2);
+  assert.equal(pageContaining(text, "not in the file"), null);
+  assert.equal(pageContaining("only one page", "only one"), 1);
+  assert.equal(pageContaining("", "only one"), null);
 });
 
 test("a word stays in the chosen window, shifts to its origin, and drops under an occluder", () => {
