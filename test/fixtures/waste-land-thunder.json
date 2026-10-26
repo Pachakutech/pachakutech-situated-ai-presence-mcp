@@ -1,0 +1,51 @@
+{
+  "uri": "https://en.wikisource.org/wiki/The_Waste_Land_(Eliot,_1922)",
+  "text": "The last part of The Waste Land sorts its signs the way a clan sorts its marks. Some of those marks are inherited, and they still answer to an old root. One mark is carried in from another country, and it is a bird.\n\nThe hermit-thrush sings in the pine trees, drip drop, and Eliot's note puts that singer in Quebec County. He names the bird Turdus aonalaschkae pallasii. He calls the sound its water-dripping song. It is a water totem for a land with no water, and there is no water.\n\nBetween the birds, a third person walks beside you, hooded, and cannot be counted. Eliot's note on the Hanged Man ties that figure to the road to Emmaus. The identity in this passage belongs to that road.\n\nThe cock on the rooftree belongs to the older set. He stands over the empty chapel, the wind's home. A damp gust follows, bringing rain. Only then does the thunder speak.\n\nWhat the thunder says is one syllable, Da. In the Upanishad, Prajapati offers that syllable to the gods, to human beings, and to the demons. The gods hear control, human beings hear give, and the demons hear sympathize. Eliot's note calls this the fable of the Thunder, and he cites the Brihadaranyaka Upanishad, section five, one, in Deussen, page 489. Scholars place the same fable at five point two. Eliot sets the human word first.\n\nDatta is that human word, give. The Proto-Indo-European root is spoken star deh three, and Latin keeps that give in dare. The poem asks what we have given, and answers with the awful daring of a moment's surrender, which an age of prudence can never retract. By this, and by this only, we have existed.\n\nDayadhvam is sympathize, the word the demons heard. The note glosses the word as sympathize and stops there. The poem keeps it as compassion inside a locked room. He has heard the key turn in the door once and turn once only. Thinking of the key, each person confirms a prison.\n\nDamyata is control, the word the gods heard first. Eliot sets it last. The Proto-Indo-European root is spoken star dem h two, and Latin keeps that tame in domare. The boat responded gaily to the hand expert with sail and oar. The heart would have responded the same way, to controlling hands.\n\nThen the speaker takes a last identity. He sits upon the shore, fishing, with the arid plain behind him. He asks whether he shall set his lands in order. That is the Fisher King, and Eliot's opening note sends the plan of the poem to Jessie Weston.\n\nThe three clan-laws stand together on the closing lines, Datta, Dayadhvam, Damyata. Give and control still wear their old roots. The poem ends on shantih, three times, the formal close of an Upanishad.",
+  "cues": [
+    {
+      "at": "The hermit-thrush sings in the pine trees",
+      "query": "Where the hermit-thrush sings in the pine trees ... But there is no water"
+    },
+    {
+      "at": "Between the birds, a third person walks beside you",
+      "query": "Who is the third who walks always beside you ... on the other side of you"
+    },
+    {
+      "at": "The cock on the rooftree belongs to the older set",
+      "query": "Only a cock stood on the rooftree"
+    },
+    {
+      "at": "What the thunder says is one syllable",
+      "query": "Then spoke the thunder ... what have we given"
+    },
+    {
+      "at": "Datta is that human word, give",
+      "query": "The awful daring of a moment's surrender ... we have existed"
+    },
+    {
+      "at": "Dayadhvam is sympathize, the word the demons heard",
+      "query": "Dayadhvam: I have heard the key ... each confirms a prison"
+    },
+    {
+      "at": "Damyata is control, the word the gods heard first",
+      "query": "Damyata: The boat responded ... controlling hands"
+    },
+    {
+      "at": "Then the speaker takes a last identity",
+      "query": "I sat upon the shore ... set my lands in order"
+    },
+    {
+      "at": "The three clan-laws stand together on the closing lines",
+      "query": "Datta. Dayadhvam. Damyata. ... Shantih shantih shantih"
+    }
+  ],
+  "lastRun": {
+    "presence": "p-xr2pf6",
+    "shown": ["hermit-thrush", "hooded third", "cock", "thunder", "surrender", "shantih"],
+    "missed": [
+      { "name": "Dayadhvam", "error": "quote_not_found", "find": "low 239x18 at 224,1060" },
+      { "name": "Damyata", "error": "verify_failed", "find": "ok 216x18 at 224,840", "hint": "the crop includes the next line" },
+      { "name": "shore", "error": "quote_not_found", "find": "low 141x18 at 368,905" }
+    ]
+  }
+}

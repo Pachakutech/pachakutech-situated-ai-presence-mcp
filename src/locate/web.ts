@@ -13,6 +13,7 @@ import {
   meanConfidence,
   neighborTexts,
   NUDGE_PX,
+  openingKnown,
   openingPhrase,
   prepareLines,
   queryInBlob,
@@ -172,22 +173,17 @@ export async function locateWeb(opts: WebOpts, deps: Deps): Promise<LocateResult
     const moved = await deps.scrollBy(win.address, dy);
     if (!moved) return "focus";
     state = { nudgePx: state.nudgePx + NUDGE_PX };
-    placedRect = { ...measured, y: measured.y - dy };
+    // The find rectangle stays as measured. A shifted y reads as the center band.
     deps.log(`locate: scroll ${dy}`);
     return "scrolled";
   };
 
-  // One recovery. It does not call find again. A second miss stands.
-  const recover = async (
-    win: Client,
-    measured: Box | null,
-    why: string,
-  ): Promise<"again" | "focus" | "stand"> => {
+  // One settle, and no scroll. The passage chase owns the next step of a passage.
+  // A second miss stands. Find is not called again.
+  const recover = async (why: string): Promise<"again" | "stand"> => {
     if (retried) return "stand";
     retried = true;
     deps.log(`locate: ${why}; correcting from the measurement`);
-    const step = await edgeScroll(win, measured ?? placedRect ?? { x: 0, y: 0, w: 0, h: 0 });
-    if (step === "focus") return "focus";
     await deps.sleep(WINDOW_SETTLE_MS);
     return "again";
   };
@@ -272,47 +268,42 @@ export async function locateWeb(opts: WebOpts, deps: Deps): Promise<LocateResult
     }
 
     if (!found) {
-      const openingHit = opening === opts.query.trim() ? null : findRun(lines, opening);
-      const openingOnGlass = Boolean(openingHit && openingHit !== "ambiguous");
-      if (passage && endStep(false, openingOnGlass, endUsed) === "nudge") {
-        if (!pictureMoved && endUsed > 0) {
-          const again = await recover(win, placedRect, "the photograph missed the end of the passage");
-          if (again === "again") continue;
-          if (again === "focus") {
-            return fail("focus_failed", "Could not focus the browser, so the page was not scrolled.");
-          }
-          return fail("quote_not_found", "The end of the passage stayed out of the photograph.");
+      const openingHit = passage ? findRun(lines, opening) : null;
+      const openingOnGlass = openingKnown(placedRect, Boolean(openingHit && openingHit !== "ambiguous"));
+      const spent = Math.round(state.nudgePx / NUDGE_PX) + endUsed;
+      if (passage && endStep(false, openingOnGlass, spent) === "nudge") {
+        if (await atScrollEnd(win.address, NUDGE_PX)) {
+          deps.log("locate: the passage continues past the photograph; the page is already at the bottom");
+        } else {
+          endUsed += 1;
+          lastFp = fp;
+          const moved = await deps.scrollBy(win.address, NUDGE_PX);
+          if (!moved) return fail("focus_failed", "Could not focus the browser, so the page was not scrolled.");
+          deps.log(`locate: scroll ${NUDGE_PX}`);
+          await deps.sleep(WINDOW_SETTLE_MS);
+          continue;
         }
-        endUsed += 1;
-        lastFp = fp;
-        const moved = await deps.scrollBy(win.address, NUDGE_PX);
-        if (!moved) return fail("focus_failed", "Could not focus the browser, so the page was not scrolled.");
-        deps.log(`locate: scroll ${NUDGE_PX}`);
-        await deps.sleep(WINDOW_SETTLE_MS);
-        continue;
       }
       if (painted) {
-        const again = await recover(win, placedRect, "the photograph did not contain the phrase");
+        const again = await recover(
+          passage ? "the photograph missed the rest of the passage" : "the photograph did not contain the phrase",
+        );
         if (again === "again") continue;
-        if (again === "focus") {
-          return fail("focus_failed", "Could not focus the browser, so the page was not scrolled.");
-        }
       }
       return fail(
         "quote_not_found",
-        painted
-          ? "The phrase was not on screen after the browser's find."
-          : "The page never painted any text.",
+        passage && endUsed > 0
+          ? "The end of the passage stayed out of the photograph."
+          : painted
+            ? "The phrase was not on screen after the browser's find."
+            : "The page never painted any text.",
       );
     }
 
     const box = unionBox(lines, found, opts.pad, { w: win.w, h: win.h });
     if (!box) {
-      const again = await recover(win, placedRect, "the photograph lost the phrase");
+      const again = await recover("the photograph lost the phrase");
       if (again === "again") continue;
-      if (again === "focus") {
-        return fail("focus_failed", "Could not focus the browser, so the page was not scrolled.");
-      }
       return fail("quote_not_found", "The phrase left the screen before the box was settled.");
     }
     const decision = seek({ band: bandOf(box, win.h, opts.pad) }, pictureMoved, state);
@@ -336,30 +327,12 @@ export async function locateWeb(opts: WebOpts, deps: Deps): Promise<LocateResult
       const neighbors = neighborTexts(lines, found);
       if (opts.verify) {
         const checked = await verifyBox(screenBox, opts, neighbors, deps);
-        if (!checked.ok) {
-          const tight = unionBox(lines, found, 0, { w: win.w, h: win.h });
-          let failed: LocateErr | { ok: true } = checked;
-          if (tight) {
-            const tightScreen = shiftBox(tight, win);
-            const retry = await verifyBox(tightScreen, opts, neighbors, deps);
-            if (retry.ok) {
-              screenBox = tightScreen;
-              failed = { ok: true };
-            } else {
-              failed = retry;
-            }
-          }
-          if (!failed.ok) {
-            const why = failed.hint.includes("does not contain the query")
-              ? "the crop did not contain the phrase"
-              : "the crop includes the next line";
-            const again = await recover(win, box, why);
-            if (again === "again") continue frame;
-            if (again === "focus") {
-              return fail("focus_failed", "Could not focus the browser, so the page was not scrolled.");
-            }
-            return failed;
-          }
+        if (!checked.ok && checked.hint.includes("includes the next line")) {
+          deps.log("locate: the crop also holds the next line; highlighting the matched text");
+        } else if (!checked.ok) {
+          const again = await recover("the crop did not contain the phrase");
+          if (again === "again") continue frame;
+          return checked;
         }
       }
       state = decision.state;

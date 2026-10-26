@@ -209,31 +209,19 @@ export async function locateStill(opts: StillOpts, deps: StillDeps): Promise<Loc
         return fail(opts.source, "window_moved", "The window moved twice during the measure. Locate again.");
       }
 
-      let screenBox = shiftBox(box, picked);
+      const screenBox = shiftBox(box, picked);
       const neighbors = neighborTexts(lines, found);
       if (opts.verify) {
         const checked = await verifyBox(screenBox, opts.query, neighbors, deps, opts.source);
-        if (!checked.ok) {
-          const tight = unionBox(lines, found, 0, { w: picked.w, h: picked.h });
-          let failed: LocateErr | { ok: true } = checked;
-          if (tight) {
-            const tightScreen = shiftBox(tight, picked);
-            const retry = await verifyBox(tightScreen, opts.query, neighbors, deps, opts.source);
-            if (retry.ok) {
-              screenBox = tightScreen;
-              failed = { ok: true };
-            } else {
-              failed = retry;
-            }
+        if (!checked.ok && checked.hint.includes("includes the next line")) {
+          deps.log("locate: the crop also holds the next line; highlighting the matched text");
+        } else if (!checked.ok) {
+          if (fromMemory) {
+            deps.log("locate: memory crop failed; reading the window");
+            words = undefined;
+            continue;
           }
-          if (!failed.ok) {
-            if (fromMemory) {
-              deps.log("locate: memory crop failed; reading the window");
-              words = undefined;
-              continue;
-            }
-            return failed;
-          }
+          return checked;
         }
       }
 

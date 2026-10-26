@@ -5,7 +5,7 @@ import { existsSync, mkdtemp, readFileSync, rm, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { sendProposal } from "../daemonControl.js";
-import { cueReport, spawnCueFollow, type CueJob } from "./cues.js";
+import { cueReport, LOCATE_RETRY_MS, spawnCueFollow, type CueJob } from "./cues.js";
 import { IDE_CLASS, TERMINAL_CLASS, chooseSurface, escapeRegExp } from "./choose.js";
 import { BOX_PAD, pageContaining, parseTsv, type Box, type Word } from "./core.js";
 import { cueGroups, resolveCues, speechHoldSeconds, splitSentences, type CueIn } from "./sentences.js";
@@ -736,6 +736,15 @@ async function locateDocument(
 
 type WithCues = { sentences?: string[]; cues?: ReturnType<typeof cueReport> };
 
+/** A miss is photographed again after the page has had 1.5 seconds to settle. */
+async function locateWithRetry(flags: Flags): Promise<LocateResult | LocateErr> {
+  const first = await locateRegion(flags);
+  if (first.ok) return first;
+  log(`locate: ${first.error}; retrying the find in 1.5s`);
+  await new Promise((resolve) => setTimeout(resolve, LOCATE_RETRY_MS));
+  return locateRegion(flags);
+}
+
 /** Find the passages, tint the first, speak, and let a follower move the mark. */
 async function speakWithCues(flags: Flags, presenceId: string, text: string): Promise<(LocateErr | Fused) & WithCues> {
   const sentences = splitSentences(text);
@@ -760,7 +769,7 @@ async function speakWithCues(flags: Flags, presenceId: string, text: string): Pr
   );
   const opening = groups[0];
   const openingText = sentences.slice(opening.from, opening.to).join(" ");
-  const located = await locateRegion({ ...flags, query: opening.query, verify: true, presence: presenceId });
+  const located = await locateWithRetry({ ...flags, query: opening.query, verify: true, presence: presenceId });
   if (!located.ok) {
     return { ...located, sentences, cues: cueReport(resolved, null) };
   }
@@ -858,7 +867,7 @@ export async function fuseRegion(
     return { ok: false, source: flags.source, error: "bad_args", hint: "Pass the words to speak." };
   }
   const seconds = flags.seconds ?? MARK_DEFAULT_SECONDS;
-  const located = await locateRegion({ ...flags, verify: true, presence: presenceId });
+  const located = await locateWithRetry({ ...flags, verify: true, presence: presenceId });
   if (!located.ok) return located;
   try {
     await mark(presenceId, located, seconds);

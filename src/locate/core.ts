@@ -30,8 +30,8 @@ const TOKEN_CAP = 40;
 const LINE_SLACK = 10;
 const COLUMN_GAP = 80;
 export const NUDGE_PX = 80;
-/** Device pixels of padding inside a box declared from the photograph. */
-export const BOX_PAD = 15;
+/** The highlight is the matched ink. Callers add pixels only by passing a pad. */
+export const BOX_PAD = 0;
 const NUDGE_CAP = 400;
 /** Short downward steps when the opening of a passage is on the glass and the end is not. */
 export const END_NUDGE_MAX = NUDGE_CAP / NUDGE_PX;
@@ -225,6 +225,15 @@ export function endStep(passageFound: boolean, openingFound: boolean, used: numb
 }
 
 /**
+ * The browser's find rectangle is the opening of a passage.
+ * An OCR reading of that same opening counts as well.
+ */
+export function openingKnown(measured: Box | null, readOnGlass: boolean): boolean {
+  if (readOnGlass) return true;
+  return measured !== null && measured.w >= 8 && measured.h >= 8;
+}
+
+/**
  * A query is a phrase, or `start ... end` for a passage. The passage unions
  * every line from the first anchor through the second, and nothing past it.
  */
@@ -260,8 +269,8 @@ function cluster(lines: Line[], start: number, end: number): Word[] {
 }
 
 /**
- * Pad around the matched lines, then stop at the next unmatched row.
- * The pad is a margin inside the gap, not a license to cross it.
+ * The box is the matched ink. `pad` is added only when a caller passes it.
+ * The default is 0. Only the window clamps the box.
  */
 export function unionBox(lines: Line[], run: Run, pad: number, bounds: { w: number; h: number }): Box | null {
   const words = cluster(lines, run.start, run.end);
@@ -270,21 +279,6 @@ export function unionBox(lines: Line[], run: Run, pad: number, bounds: { w: numb
   let bottom = Math.max(...words.map((w) => w.y + w.h)) + pad;
   let left = Math.min(...words.map((w) => w.x)) - pad;
   let right = Math.max(...words.map((w) => w.x + w.w)) + pad;
-
-  if (run.start > 0) {
-    const prev = pageWords(lines[run.start - 1].words);
-    if (prev.length) {
-      const prevBottom = Math.max(...prev.map((w) => w.y + w.h));
-      if (top <= prevBottom) top = prevBottom + 2;
-    }
-  }
-  if (run.end + 1 < lines.length) {
-    const next = pageWords(lines[run.end + 1].words);
-    if (next.length) {
-      const nextTop = Math.min(...next.map((w) => w.y));
-      if (bottom >= nextTop) bottom = nextTop - 2;
-    }
-  }
 
   left = Math.max(0, left);
   top = Math.max(0, top);

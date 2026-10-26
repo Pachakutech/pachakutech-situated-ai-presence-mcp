@@ -6,6 +6,8 @@ Record of the Waste Land reading on p-8zjbhh, after the one-shot settle retry sh
 
 The recovery no longer calls `window.find` again. A line whose measurement is high or low is scrolled from that rectangle, eighty pixels, and only when the document is not already at that end of the scroll. A line in the band is left where it is. The declared box pads 15 pixels and is clamped to the window. A second miss still stands.
 
+`docs/plans/passage_chase.md` is the later correction, from the p-xr2pf6 run. A passage whose photograph misses the end now steps downward from the browser's find. The find rectangle is no longer rewritten after that step. A crop that includes the next line is inset by one line and checked again. The record below is the p-8zjbhh run.
+
 ### The question
 
 Halfway through, the tint went down and stayed down. The closing lines, Shantih, were marked. The suspicion is that the one-shot retry stayed locked, so later passages could not mark until some timer released it.

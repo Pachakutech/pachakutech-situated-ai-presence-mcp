@@ -12,12 +12,15 @@ import {
   leaksLine,
   BOX_PAD,
   NUDGE_PX,
+  openingKnown,
   pageContaining,
   parseTsv,
   prepareLines,
   seek,
   toWindowWords,
   unionBox,
+  type Box,
+  type Line,
   type SeekState,
   type Word,
 } from "../src/locate/core.ts";
@@ -39,7 +42,7 @@ function stanza() {
   const run = findRun(lines, query);
   assert.equal(typeof run, "object");
   if (run === "ambiguous" || !run) throw new Error("expected one run");
-  const box = unionBox(lines, run, 12, bounds);
+  const box = unionBox(lines, run, BOX_PAD, bounds);
   assert.ok(box);
   return { lines, run, box };
 }
@@ -67,13 +70,23 @@ test("the fellow-mortal passage holds man's dominion and stops before doubtna", 
   assert.ok(box.y > 848);
 });
 
-test("a pad wider than the gap still stops at the next line", () => {
+test("the matched box stays on the ink when the next line is close", () => {
   const lines = prepareLines(parseTsv(fixture));
   const run = findRun(lines, query);
   if (run === "ambiguous" || !run) throw new Error("expected one run");
-  const box = unionBox(lines, run, 40, bounds);
+  const box = unionBox(lines, run, BOX_PAD, bounds);
   assert.ok(box);
-  assert.ok(box.y + box.h < 1028);
+  if (!box) return;
+  assert.ok(box.y + box.h < 1028, "the ink stops before doubtna");
+  const near: Line[] = [
+    { words: [{ x: 10, y: 100, w: 40, h: 18, text: "datta", conf: 90 }] },
+    { words: [{ x: 10, y: 120, w: 40, h: 18, text: "shore", conf: 90 }] },
+  ];
+  const ink = unionBox(near, { start: 0, end: 0 }, BOX_PAD, { w: 800, h: 600 });
+  assert.ok(ink);
+  if (!ink) return;
+  assert.equal(ink.y, 100);
+  assert.equal(ink.y + ink.h, 118);
 });
 
 test("a phrase that occurs twice is ambiguous", () => {
@@ -143,6 +156,10 @@ test("a passage end may take a few short steps, then stops", () => {
   assert.equal(endStep(false, true, END_NUDGE_MAX), "stop");
   assert.equal(endStep(true, true, 0), "stop");
   assert.equal(endStep(false, false, 0), "stop");
+  assert.equal(openingKnown({ x: 224, y: 715, w: 325, h: 18 }, false), true);
+  assert.equal(openingKnown(null, true), true);
+  assert.equal(openingKnown(null, false), false);
+  assert.equal(openingKnown({ x: 0, y: 0, w: 4, h: 4 }, false), false);
 });
 
 test("poppler text names the page that holds the phrase", () => {
@@ -193,7 +210,7 @@ const noise = glass(["alpha", "beta", "gamma", "delta", "epsilon"]);
 
 function webDeps(opts: {
   full: () => Word[];
-  crop: () => Word[];
+  crop: (rect: Box) => Word[];
   found?: boolean;
   rect?: { x: number; y: number; w: number; h: number };
   ends?: { atTop: boolean; atBottom: boolean };
@@ -209,7 +226,7 @@ function webDeps(opts: {
       return { w: 1920, h: 1080 };
     },
     async ocr(rect) {
-      return rect.w >= 900 ? opts.full() : opts.crop();
+      return rect.w >= 900 ? opts.full() : opts.crop(rect);
     },
     async scrollBy(_address, dy) {
       scrolls.push(dy);
@@ -244,7 +261,7 @@ function webDeps(opts: {
 
 const webOpts = {
   query: "hermit thrush sings",
-  pad: 12,
+  pad: 0,
   timeoutMs: 10_000,
   noOpen: true,
   verify: true,
@@ -295,7 +312,7 @@ test("a crop that does not contain the phrase is photographed once more, and a s
     full: () => phrase,
     crop: () => {
       crops += 1;
-      return crops <= 2 ? noise : phrase;
+      return crops === 1 ? noise : phrase;
     },
   });
   const located = await locateWeb(webOpts, recovered.deps);
@@ -345,28 +362,194 @@ test("a line on the window edge is scrolled from that measurement, and a line at
   assert.deepEqual(high.scrolls, []);
 });
 
-test("fifteen pixels of padding stay inside the window", () => {
-  assert.equal(BOX_PAD, 15);
+test("the highlight is the matched ink, clamped to the window", () => {
+  assert.equal(BOX_PAD, 0);
   const word: Word = { x: 100, y: 100, w: 40, h: 18, text: "hermit", conf: 90 };
   const free = unionBox([{ words: [word] }], { start: 0, end: 0 }, BOX_PAD, { w: 800, h: 600 });
   assert.ok(free);
   if (!free) return;
-  assert.equal(free.x, 85);
-  assert.equal(free.y, 85);
-  assert.equal(free.x + free.w, 155);
-  assert.equal(free.y + free.h, 133);
+  assert.equal(free.x, 100);
+  assert.equal(free.y, 100);
+  assert.equal(free.x + free.w, 140);
+  assert.equal(free.y + free.h, 118);
 
-  const top: Word = { x: 4, y: 2, w: 40, h: 18, text: "hermit", conf: 90 };
-  const clampedTop = unionBox([{ words: [top] }], { start: 0, end: 0 }, BOX_PAD, { w: 200, h: 100 });
-  assert.ok(clampedTop);
-  if (!clampedTop) return;
-  assert.equal(clampedTop.x, 0);
-  assert.equal(clampedTop.y, 0);
+  const past: Word = { x: 180, y: 90, w: 40, h: 20, text: "hermit", conf: 90 };
+  const clamped = unionBox([{ words: [past] }], { start: 0, end: 0 }, BOX_PAD, { w: 200, h: 100 });
+  assert.ok(clamped);
+  if (!clamped) return;
+  assert.equal(clamped.x, 180);
+  assert.equal(clamped.y, 90);
+  assert.equal(clamped.x + clamped.w, 200);
+  assert.equal(clamped.y + clamped.h, 100);
+});
 
-  const bottom: Word = { x: 170, y: 88, w: 28, h: 12, text: "hermit", conf: 90 };
-  const clampedBottom = unionBox([{ words: [bottom] }], { start: 0, end: 0 }, BOX_PAD, { w: 200, h: 100 });
-  assert.ok(clampedBottom);
-  if (!clampedBottom) return;
-  assert.equal(clampedBottom.x + clampedBottom.w, 200);
-  assert.equal(clampedBottom.y + clampedBottom.h, 100);
+const passageQuery = "hooded hordes ... falling towers";
+
+function passageWords(): Word[] {
+  return glass(["hooded", "hordes", "swarming", "over", "falling", "towers"]);
+}
+
+test("a passage in the band is chased when the photograph misses the end", async () => {
+  const locateWeb = await loadLocate();
+  let shots = 0;
+  const harness = webDeps({
+    full: () => {
+      shots += 1;
+      return shots === 1 ? noise : passageWords();
+    },
+    crop: () => passageWords(),
+  });
+  const located = await locateWeb({ ...webOpts, query: passageQuery }, harness.deps);
+  assert.equal(located.ok, true);
+  assert.deepEqual(harness.scrolls, [NUDGE_PX]);
+  assert.equal(harness.finds, 1);
+  assert.equal(harness.logs.some((line) => line.includes("correcting from the measurement")), false);
+});
+
+test("a passage already at the bottom of the scroll is not chased", async () => {
+  const locateWeb = await loadLocate();
+  const harness = webDeps({
+    full: () => noise,
+    crop: () => noise,
+    ends: { atTop: false, atBottom: true },
+  });
+  const located = await locateWeb({ ...webOpts, query: passageQuery }, harness.deps);
+  assert.equal(located.ok, false);
+  if (located.ok) return;
+  assert.equal(located.error, "quote_not_found");
+  assert.deepEqual(harness.scrolls, []);
+  assert.equal(harness.finds, 1);
+  assert.equal(
+    harness.logs.some((line) => line.includes("already at the bottom")),
+    true,
+  );
+});
+
+test("a passage chase stops after five steps", async () => {
+  const locateWeb = await loadLocate();
+  const harness = webDeps({ full: () => noise, crop: () => noise });
+  const located = await locateWeb({ ...webOpts, query: passageQuery }, harness.deps);
+  assert.equal(located.ok, false);
+  if (located.ok) return;
+  assert.equal(located.error, "quote_not_found");
+  assert.equal(located.hint, "The end of the passage stayed out of the photograph.");
+  assert.deepEqual(harness.scrolls, [NUDGE_PX, NUDGE_PX, NUDGE_PX, NUDGE_PX, NUDGE_PX]);
+  assert.equal(harness.finds, 1);
+});
+
+test("a low find rectangle does not count as centered after its first step", async () => {
+  const locateWeb = await loadLocate();
+  let shots = 0;
+  const harness = webDeps({
+    full: () => {
+      shots += 1;
+      return shots === 1 ? noise : passageWords();
+    },
+    crop: () => passageWords(),
+    rect: { x: 368, y: 905, w: 141, h: 18 },
+  });
+  const located = await locateWeb({ ...webOpts, query: passageQuery }, harness.deps);
+  assert.equal(located.ok, true);
+  assert.deepEqual(harness.scrolls, [NUDGE_PX, NUDGE_PX]);
+  assert.equal(harness.finds, 1);
+});
+
+test("a single phrase already in the band is left where the find placed it", async () => {
+  const locateWeb = await loadLocate();
+  const harness = webDeps({ full: () => phrase, crop: () => phrase });
+  const located = await locateWeb(webOpts, harness.deps);
+  assert.equal(located.ok, true);
+  assert.deepEqual(harness.scrolls, []);
+  assert.equal(harness.finds, 1);
+  assert.equal(harness.logs.some((line) => line.includes("correcting from the measurement")), false);
+});
+
+test("a single phrase missed at the bottom edge is scrolled once", async () => {
+  const locateWeb = await loadLocate();
+  let shots = 0;
+  const harness = webDeps({
+    full: () => {
+      shots += 1;
+      return shots === 1 ? noise : phrase;
+    },
+    crop: () => phrase,
+    rect: { x: 224, y: 1060, w: 239, h: 18 },
+  });
+  const located = await locateWeb(webOpts, harness.deps);
+  assert.equal(located.ok, true);
+  assert.deepEqual(harness.scrolls, [NUDGE_PX]);
+  assert.equal(harness.finds, 1);
+});
+
+function rowAt(words: string[], y: number): Word[] {
+  return words.map((text, i) => ({ x: 80 + i * 70, y, w: 60, h: 18, text, conf: 90 }));
+}
+
+const damyataQuery = "datta dayadhvam ... boat responded";
+const damyataWords = [
+  ...rowAt(["datta", "dayadhvam", "damyata"], 700),
+  ...rowAt(["the", "boat", "responded"], 728),
+];
+const invited = rowAt(["gaily", "when", "invited"], 760);
+
+test("a crop that also holds the next line still highlights the matched text", async () => {
+  const locateWeb = await loadLocate();
+  const harness = webDeps({
+    full: () => [...damyataWords, ...invited],
+    crop: () => [...damyataWords, ...invited],
+  });
+  const located = await locateWeb({ ...webOpts, query: damyataQuery }, harness.deps);
+  assert.equal(located.ok, true);
+  if (!located.ok) return;
+  assert.deepEqual(harness.scrolls, []);
+  assert.equal(harness.finds, 1);
+  assert.equal(harness.logs.some((line) => line.includes("highlighting the matched text")), true);
+  const lines = prepareLines([...damyataWords, ...invited]);
+  const run = findRun(lines, damyataQuery);
+  if (run === "ambiguous" || !run) throw new Error("expected one damyata run");
+  const ink = unionBox(lines, run, 0, { w: browser.w, h: browser.h });
+  assert.ok(ink);
+  if (!ink) return;
+  assert.equal(located.evidence.screenBox.h, ink.h);
+  assert.equal(located.evidence.screenBox.y, ink.y + browser.y);
+});
+
+test("a crop that misses the phrase is not highlighted", async () => {
+  const locateWeb = await loadLocate();
+  const harness = webDeps({
+    full: () => [...damyataWords, ...invited],
+    crop: () => noise,
+  });
+  const located = await locateWeb({ ...webOpts, query: damyataQuery }, harness.deps);
+  assert.equal(located.ok, false);
+  if (located.ok) return;
+  assert.equal(located.error, "verify_failed");
+  assert.equal(located.hint.includes("does not contain the query"), true);
+  assert.deepEqual(harness.scrolls, []);
+  assert.equal(harness.finds, 1);
+});
+
+test("a passage chase does not carry its step count into the next locate", async () => {
+  const locateWeb = await loadLocate();
+  const spent = webDeps({ full: () => noise, crop: () => noise });
+  const first = await locateWeb({ ...webOpts, query: passageQuery }, spent.deps);
+  assert.equal(first.ok, false);
+  assert.equal(spent.scrolls.length, END_NUDGE_MAX);
+  assert.equal(spent.finds, 1);
+
+  let scrolled = false;
+  const again = webDeps({
+    full: () => (scrolled ? passageWords() : noise),
+    crop: () => passageWords(),
+  });
+  const scrollBy = again.deps.scrollBy;
+  again.deps.scrollBy = async (address, dy) => {
+    const moved = await scrollBy(address, dy);
+    scrolled = moved;
+    return moved;
+  };
+  const second = await locateWeb({ ...webOpts, query: passageQuery }, again.deps);
+  assert.equal(second.ok, true);
+  assert.deepEqual(again.scrolls, [NUDGE_PX]);
+  assert.equal(again.finds, 1);
 });

@@ -53,6 +53,9 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** One more find and highlight after a miss, once the centered page can be photographed. */
+export const LOCATE_RETRY_MS = 1500;
+
 function sameSentences(a: string[] | undefined, b: string[]): boolean {
   if (!a || a.length !== b.length) return false;
   return a.every((sentence, i) => sentence === b[i]);
@@ -163,6 +166,16 @@ async function generationStill(generation: number): Promise<boolean> {
 
 /** Scroll to this passage and tint it. Speech stays idle while the page moves. */
 async function placeGroup(job: CueJob, group: CueGroup, holdText: string, generation: number): Promise<"shown" | "miss" | "lost"> {
+  const first = await placeOnce(job, group, holdText, generation);
+  if (first !== "miss") return first;
+  if (!(await generationStill(generation))) return "lost";
+  log(`cue sentence ${group.sentenceIndex + 1} missed; retrying the find in 1.5s`);
+  await sleep(LOCATE_RETRY_MS);
+  if (!(await generationStill(generation))) return "lost";
+  return placeOnce(job, group, holdText, generation);
+}
+
+async function placeOnce(job: CueJob, group: CueGroup, holdText: string, generation: number): Promise<"shown" | "miss" | "lost"> {
   if (!(await generationStill(generation))) return "lost";
   const { locateRegion } = await import("./run.js");
   await concealForJump(job.presenceId);
