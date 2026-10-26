@@ -10,6 +10,7 @@ import { PolicyGate } from "./policyGate.js";
 import { PresenceDaemon } from "./daemon.js";
 import { daemonStub } from "./daemonStub.js";
 import { tryConnectDaemon } from "./daemonClient.js";
+import { BOX_PAD } from "./locate/core.js";
 import { fuseRegion, locateRegion } from "./locate/run.js";
 
 const policy = new PolicyGate();
@@ -185,7 +186,7 @@ server.registerTool(
       query: z.string().describe("Phrase, or `start ... end` for a passage"),
       uri: z.string().optional().describe("Web URL, or a local path for pdf and doc"),
       page: z.number().int().min(1).max(9999).optional().describe("PDF page, starting at 1"),
-      pad: z.number().int().min(0).max(64).optional().describe("Pixels around the matched lines. Default 12"),
+      pad: z.number().int().min(0).max(64).optional().describe("Pixels around the matched lines. Default 15"),
       timeoutS: z.number().min(1).max(120).optional().describe("Seconds to wait. Default 15"),
       noOpen: z.boolean().optional().describe("Measure a window that is already up"),
       windowClass: z.string().optional().describe("Case-insensitive regular expression on the window class"),
@@ -200,7 +201,7 @@ server.registerTool(
       query,
       uri,
       page,
-      pad: pad ?? 12,
+      pad: pad ?? BOX_PAD,
       timeoutS: timeoutS ?? 15,
       noOpen: Boolean(noOpen),
       verify: Boolean(verify),
@@ -216,7 +217,7 @@ const regionFields = {
   query: z.string().describe("Phrase, or `start ... end` for a passage"),
   uri: z.string().optional().describe("Web URL, or a local path for pdf and doc"),
   page: z.number().int().min(1).max(9999).optional().describe("PDF page, starting at 1"),
-  pad: z.number().int().min(0).max(64).optional().describe("Pixels around the matched lines. Default 12"),
+  pad: z.number().int().min(0).max(64).optional().describe("Pixels around the matched lines. Default 15"),
   timeoutS: z.number().min(1).max(120).optional().describe("Seconds to wait. Default 15"),
   noOpen: z.boolean().optional().describe("Measure a window that is already up"),
   windowClass: z.string().optional().describe("Case-insensitive regular expression on the window class"),
@@ -270,7 +271,7 @@ server.registerTool(
         query: query ?? "",
         uri,
         page,
-        pad: pad ?? 12,
+        pad: pad ?? BOX_PAD,
         timeoutS: timeoutS ?? 15,
         noOpen: Boolean(noOpen),
         verify: true,
@@ -310,7 +311,7 @@ server.registerTool(
         query,
         uri,
         page,
-        pad: pad ?? 12,
+        pad: pad ?? BOX_PAD,
         timeoutS: timeoutS ?? 15,
         noOpen: Boolean(noOpen),
         verify: true,

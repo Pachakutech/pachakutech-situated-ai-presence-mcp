@@ -30,6 +30,8 @@ const TOKEN_CAP = 40;
 const LINE_SLACK = 10;
 const COLUMN_GAP = 80;
 export const NUDGE_PX = 80;
+/** Device pixels of padding inside a box declared from the photograph. */
+export const BOX_PAD = 15;
 const NUDGE_CAP = 400;
 /** Short downward steps when the opening of a passage is on the glass and the end is not. */
 export const END_NUDGE_MAX = NUDGE_CAP / NUDGE_PX;

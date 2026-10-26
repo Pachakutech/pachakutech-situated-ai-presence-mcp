@@ -5,6 +5,7 @@ import {
   bandOf,
   coveredBy,
   cropOk,
+  END_NUDGE_MAX,
   endStep,
   fingerprint,
   findRun,
@@ -94,6 +95,8 @@ export type Deps = {
    * Null when the debugger is not listening. `found` false means the phrase is absent.
    */
   findInPage?(phrase: string): Promise<{ found: boolean; rect: Box | null } | null>;
+  /** Whether the document can still move. Absent means both ends are open. */
+  scrollEnds?(address: string): Promise<{ atTop: boolean; atBottom: boolean } | null>;
   sleep(ms: number): Promise<void>;
   now(): number;
   log(line: string): void;
@@ -143,22 +146,50 @@ export async function locateWeb(opts: WebOpts, deps: Deps): Promise<LocateResult
   let viewer: "pending" | "placed" = "pending";
   let endUsed = 0;
   let retried = false;
+  let placedRect: Box | null = null;
   const passage = /\s+\.\.\.\s+/.test(opts.query);
   const opening = openingPhrase(opts.query);
 
-  // The first photograph can land while the window, or the jump before this cue, is still moving.
-  // One more find and one more photograph. A second miss stands.
-  const photographAgain = async (why: string): Promise<boolean> => {
-    if (retried) return false;
+  const atScrollEnd = async (address: string, dy: number): Promise<boolean> => {
+    if (!deps.scrollEnds || dy === 0) return false;
+    const ends = await deps.scrollEnds(address);
+    if (!ends) return false;
+    return dy > 0 ? ends.atBottom : ends.atTop;
+  };
+
+  // The browser's find leaves a match where it already sits. A line on the
+  // edge is moved from that rectangle, and only while the scroller has room.
+  const edgeScroll = async (win: Client, measured: Box): Promise<"scrolled" | "held" | "focus"> => {
+    if (measured.w < 8 || measured.h < 8) return "held";
+    if (state.nudgePx >= NUDGE_PX * END_NUDGE_MAX) return "held";
+    const band = bandOf(measured, win.h, opts.pad);
+    const dy = band === "low" ? NUDGE_PX : band === "high" ? -NUDGE_PX : 0;
+    if (dy === 0) return "held";
+    if (await atScrollEnd(win.address, dy)) {
+      deps.log("locate: line at the edge; the page is already at that end of the scroll");
+      return "held";
+    }
+    const moved = await deps.scrollBy(win.address, dy);
+    if (!moved) return "focus";
+    state = { nudgePx: state.nudgePx + NUDGE_PX };
+    placedRect = { ...measured, y: measured.y - dy };
+    deps.log(`locate: scroll ${dy}`);
+    return "scrolled";
+  };
+
+  // One recovery. It does not call find again. A second miss stands.
+  const recover = async (
+    win: Client,
+    measured: Box | null,
+    why: string,
+  ): Promise<"again" | "focus" | "stand"> => {
+    if (retried) return "stand";
     retried = true;
-    viewer = "pending";
-    state = { nudgePx: 0 };
-    endUsed = 0;
-    lastFp = null;
-    geomRetries = 0;
-    deps.log(`locate: ${why}; waiting for the screen to settle, then photographing again`);
+    deps.log(`locate: ${why}; correcting from the measurement`);
+    const step = await edgeScroll(win, measured ?? placedRect ?? { x: 0, y: 0, w: 0, h: 0 });
+    if (step === "focus") return "focus";
     await deps.sleep(WINDOW_SETTLE_MS);
-    return true;
+    return "again";
   };
 
   frame: while (deps.now() < deadline) {
@@ -199,15 +230,17 @@ export async function locateWeb(opts: WebOpts, deps: Deps): Promise<LocateResult
       }
       viewer = "placed";
       if (hit.rect && hit.rect.w >= 8 && hit.rect.h >= 8) {
-        const band = bandOf(
-          { x: hit.rect.x, y: hit.rect.y, w: hit.rect.w, h: hit.rect.h },
-          win.h,
-          opts.pad,
-        );
+        placedRect = { x: hit.rect.x, y: hit.rect.y, w: hit.rect.w, h: hit.rect.h };
+        const band = bandOf(placedRect, win.h, opts.pad);
         deps.log(
           `locate: viewer find ${band} ${Math.round(hit.rect.w)}x${Math.round(hit.rect.h)} at ${Math.round(hit.rect.x)},${Math.round(hit.rect.y)}`,
         );
+        const step = await edgeScroll(win, placedRect);
+        if (step === "focus") {
+          return fail("focus_failed", "Could not focus the browser, so the page was not scrolled.");
+        }
       } else {
+        placedRect = null;
         deps.log("locate: viewer find");
       }
       await deps.sleep(WINDOW_SETTLE_MS);
@@ -243,7 +276,11 @@ export async function locateWeb(opts: WebOpts, deps: Deps): Promise<LocateResult
       const openingOnGlass = Boolean(openingHit && openingHit !== "ambiguous");
       if (passage && endStep(false, openingOnGlass, endUsed) === "nudge") {
         if (!pictureMoved && endUsed > 0) {
-          if (await photographAgain("the photograph missed the end of the passage")) continue;
+          const again = await recover(win, placedRect, "the photograph missed the end of the passage");
+          if (again === "again") continue;
+          if (again === "focus") {
+            return fail("focus_failed", "Could not focus the browser, so the page was not scrolled.");
+          }
           return fail("quote_not_found", "The end of the passage stayed out of the photograph.");
         }
         endUsed += 1;
@@ -254,7 +291,13 @@ export async function locateWeb(opts: WebOpts, deps: Deps): Promise<LocateResult
         await deps.sleep(WINDOW_SETTLE_MS);
         continue;
       }
-      if (painted && (await photographAgain("the photograph did not contain the phrase"))) continue;
+      if (painted) {
+        const again = await recover(win, placedRect, "the photograph did not contain the phrase");
+        if (again === "again") continue;
+        if (again === "focus") {
+          return fail("focus_failed", "Could not focus the browser, so the page was not scrolled.");
+        }
+      }
       return fail(
         "quote_not_found",
         painted
@@ -265,7 +308,11 @@ export async function locateWeb(opts: WebOpts, deps: Deps): Promise<LocateResult
 
     const box = unionBox(lines, found, opts.pad, { w: win.w, h: win.h });
     if (!box) {
-      if (await photographAgain("the photograph lost the phrase")) continue;
+      const again = await recover(win, placedRect, "the photograph lost the phrase");
+      if (again === "again") continue;
+      if (again === "focus") {
+        return fail("focus_failed", "Could not focus the browser, so the page was not scrolled.");
+      }
       return fail("quote_not_found", "The phrase left the screen before the box was settled.");
     }
     const decision = seek({ band: bandOf(box, win.h, opts.pad) }, pictureMoved, state);
@@ -303,11 +350,13 @@ export async function locateWeb(opts: WebOpts, deps: Deps): Promise<LocateResult
             }
           }
           if (!failed.ok) {
-            if (
-              failed.hint.includes("does not contain the query") &&
-              (await photographAgain("the crop did not contain the phrase"))
-            ) {
-              continue frame;
+            const why = failed.hint.includes("does not contain the query")
+              ? "the crop did not contain the phrase"
+              : "the crop includes the next line";
+            const again = await recover(win, box, why);
+            if (again === "again") continue frame;
+            if (again === "focus") {
+              return fail("focus_failed", "Could not focus the browser, so the page was not scrolled.");
             }
             return failed;
           }

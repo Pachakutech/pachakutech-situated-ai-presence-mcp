@@ -10,6 +10,7 @@ import {
   END_NUDGE_MAX,
   findRun,
   leaksLine,
+  BOX_PAD,
   NUDGE_PX,
   pageContaining,
   parseTsv,
@@ -194,6 +195,8 @@ function webDeps(opts: {
   full: () => Word[];
   crop: () => Word[];
   found?: boolean;
+  rect?: { x: number; y: number; w: number; h: number };
+  ends?: { atTop: boolean; atBottom: boolean };
 }): { deps: Deps; finds: number; scrolls: number[]; logs: string[] } {
   const logs: string[] = [];
   const scrolls: number[] = [];
@@ -217,8 +220,11 @@ function webDeps(opts: {
       finds += 1;
       return {
         found: opts.found !== false,
-        rect: opts.found === false ? null : { x: 80, y: 720, w: 200, h: 18 },
+        rect: opts.found === false ? null : (opts.rect ?? { x: 80, y: 720, w: 200, h: 18 }),
       };
+    },
+    async scrollEnds() {
+      return opts.ends ?? { atTop: false, atBottom: false };
     },
     async sleep() {},
     now: () => 1_000,
@@ -258,9 +264,9 @@ test("a photograph that misses the phrase is taken once more after the screen se
   assert.equal(located.ok, true);
   if (!located.ok) return;
   assert.equal(located.matchedText.includes("hermit"), true);
-  assert.equal(harness.finds, 2);
+  assert.equal(harness.finds, 1);
   assert.equal(harness.scrolls.length, 0);
-  assert.equal(harness.logs.filter((line) => line.includes("photographing again")).length, 1);
+  assert.equal(harness.logs.filter((line) => line.includes("correcting from the measurement")).length, 1);
 });
 
 test("a second miss stands, and a find that does not see the phrase is not photographed again", async () => {
@@ -270,8 +276,8 @@ test("a second miss stands, and a find that does not see the phrase is not photo
   assert.equal(first.ok, false);
   if (first.ok) return;
   assert.equal(first.error, "quote_not_found");
-  assert.equal(missed.finds, 2);
-  assert.equal(missed.logs.filter((line) => line.includes("photographing again")).length, 1);
+  assert.equal(missed.finds, 1);
+  assert.equal(missed.logs.filter((line) => line.includes("correcting from the measurement")).length, 1);
 
   const absent = webDeps({ full: () => phrase, crop: () => phrase, found: false });
   const second = await locateWeb(webOpts, absent.deps);
@@ -279,7 +285,7 @@ test("a second miss stands, and a find that does not see the phrase is not photo
   if (second.ok) return;
   assert.equal(second.hint, "The browser's find did not see that phrase.");
   assert.equal(absent.finds, 1);
-  assert.equal(absent.logs.some((line) => line.includes("photographing again")), false);
+  assert.equal(absent.logs.some((line) => line.includes("correcting from the measurement")), false);
 });
 
 test("a crop that does not contain the phrase is photographed once more, and a second crop miss stands", async () => {
@@ -294,7 +300,7 @@ test("a crop that does not contain the phrase is photographed once more, and a s
   });
   const located = await locateWeb(webOpts, recovered.deps);
   assert.equal(located.ok, true);
-  assert.equal(recovered.finds, 2);
+  assert.equal(recovered.finds, 1);
   assert.equal(recovered.logs.filter((line) => line.includes("crop did not contain")).length, 1);
 
   const stuck = webDeps({ full: () => phrase, crop: () => noise });
@@ -302,5 +308,65 @@ test("a crop that does not contain the phrase is photographed once more, and a s
   assert.equal(failed.ok, false);
   if (failed.ok) return;
   assert.equal(failed.error, "verify_failed");
-  assert.equal(stuck.finds, 2);
+  assert.equal(stuck.finds, 1);
+});
+
+test("a line on the window edge is scrolled from that measurement, and a line at the end of the scroll is not", async () => {
+  const locateWeb = await loadLocate();
+  const low = webDeps({
+    full: () => phrase,
+    crop: () => phrase,
+    rect: { x: 224, y: 1060, w: 239, h: 18 },
+  });
+  const moved = await locateWeb(webOpts, low.deps);
+  assert.equal(moved.ok, true);
+  assert.deepEqual(low.scrolls, [NUDGE_PX]);
+  assert.equal(low.finds, 1);
+
+  const bottom = webDeps({
+    full: () => phrase,
+    crop: () => phrase,
+    rect: { x: 224, y: 1060, w: 239, h: 18 },
+    ends: { atTop: false, atBottom: true },
+  });
+  const held = await locateWeb(webOpts, bottom.deps);
+  assert.equal(held.ok, true);
+  assert.deepEqual(bottom.scrolls, []);
+  assert.equal(bottom.logs.some((line) => line.includes("already at that end of the scroll")), true);
+
+  const high = webDeps({
+    full: () => phrase,
+    crop: () => phrase,
+    rect: { x: 40, y: 20, w: 200, h: 18 },
+    ends: { atTop: true, atBottom: false },
+  });
+  const topped = await locateWeb(webOpts, high.deps);
+  assert.equal(topped.ok, true);
+  assert.deepEqual(high.scrolls, []);
+});
+
+test("fifteen pixels of padding stay inside the window", () => {
+  assert.equal(BOX_PAD, 15);
+  const word: Word = { x: 100, y: 100, w: 40, h: 18, text: "hermit", conf: 90 };
+  const free = unionBox([{ words: [word] }], { start: 0, end: 0 }, BOX_PAD, { w: 800, h: 600 });
+  assert.ok(free);
+  if (!free) return;
+  assert.equal(free.x, 85);
+  assert.equal(free.y, 85);
+  assert.equal(free.x + free.w, 155);
+  assert.equal(free.y + free.h, 133);
+
+  const top: Word = { x: 4, y: 2, w: 40, h: 18, text: "hermit", conf: 90 };
+  const clampedTop = unionBox([{ words: [top] }], { start: 0, end: 0 }, BOX_PAD, { w: 200, h: 100 });
+  assert.ok(clampedTop);
+  if (!clampedTop) return;
+  assert.equal(clampedTop.x, 0);
+  assert.equal(clampedTop.y, 0);
+
+  const bottom: Word = { x: 170, y: 88, w: 28, h: 12, text: "hermit", conf: 90 };
+  const clampedBottom = unionBox([{ words: [bottom] }], { start: 0, end: 0 }, BOX_PAD, { w: 200, h: 100 });
+  assert.ok(clampedBottom);
+  if (!clampedBottom) return;
+  assert.equal(clampedBottom.x + clampedBottom.w, 200);
+  assert.equal(clampedBottom.y + clampedBottom.h, 100);
 });

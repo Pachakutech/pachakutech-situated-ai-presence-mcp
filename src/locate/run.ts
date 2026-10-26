@@ -7,7 +7,7 @@ import { basename, join } from "node:path";
 import { sendProposal } from "../daemonControl.js";
 import { cueReport, spawnCueFollow, type CueJob } from "./cues.js";
 import { IDE_CLASS, TERMINAL_CLASS, chooseSurface, escapeRegExp } from "./choose.js";
-import { pageContaining, parseTsv, type Box, type Word } from "./core.js";
+import { BOX_PAD, pageContaining, parseTsv, type Box, type Word } from "./core.js";
 import { cueGroups, resolveCues, speechHoldSeconds, splitSentences, type CueIn } from "./sentences.js";
 import { WINDOW_PATH, locatePdf } from "./pdf.js";
 import { locateStill, type StillDeps } from "./surface.js";
@@ -67,7 +67,7 @@ function parseFlags(args: string[]): Flags | { error: string } {
   const pad = arg(args, "--pad");
   const timeout = arg(args, "--timeout-s");
   const seconds = arg(args, "--seconds");
-  const padN = pad === undefined ? 12 : Number(pad);
+  const padN = pad === undefined ? BOX_PAD : Number(pad);
   const timeoutN = timeout === undefined ? 15 : Number(timeout);
   const secondsN = seconds === undefined ? undefined : Number(seconds);
   if (!Number.isFinite(padN) || padN < 0 || padN > 64) return { error: "--pad must be between 0 and 64." };
@@ -402,6 +402,23 @@ async function findInPage(phrase: string): Promise<{ found: boolean; rect: Box |
   return { found: row.found === true, rect: asRect(row.rect) };
 }
 
+/** True when the document cannot move further that way. Null when the debugger is down. */
+async function scrollEnds(): Promise<{ atTop: boolean; atBottom: boolean } | null> {
+  ensureCdpPort();
+  if (!cdpPort) return null;
+  const reply = await cdpCall(`(() => {
+    const el = document.scrollingElement || document.documentElement;
+    if (!el) return null;
+    const top = el.scrollTop;
+    const roomBelow = el.scrollHeight - el.clientHeight - top;
+    return { atTop: top <= 2, atBottom: roomBelow <= 2 };
+  })()`);
+  if (!reply.ok || !reply.value || typeof reply.value !== "object") return null;
+  const row = reply.value as { atTop?: unknown; atBottom?: unknown };
+  if (typeof row.atTop !== "boolean" || typeof row.atBottom !== "boolean") return null;
+  return { atTop: row.atTop, atBottom: row.atBottom };
+}
+
 async function findPdfPage(path: string, query: string): Promise<number | null> {
   const result = await run("pdftotext", ["-q", "-layout", path, "-"]);
   if (result.code !== 0) {
@@ -611,6 +628,7 @@ export async function locateRegion(flags: Flags): Promise<LocateResult | LocateE
         scrollBy,
         open: openBrowser,
         findInPage,
+        scrollEnds: () => scrollEnds(),
         sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
         now: () => Date.now(),
         log,
