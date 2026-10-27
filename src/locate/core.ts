@@ -37,6 +37,10 @@ const NUDGE_CAP = 400;
 export const END_NUDGE_MAX = NUDGE_CAP / NUDGE_PX;
 const BAND_LOW = 0.82;
 const BAND_HIGH = 0.62;
+/** One text line. The seat tolerates this much, and a margin mark needs a gap at least this wide. */
+export const LINE_PX = 24;
+/** Lines of verse drawn under a find when the end phrase is not in the photograph. */
+export const VERSE_LINES = 8;
 /** OCR tokens a contiguous phrase may skip between two query tokens. */
 const PHRASE_SKIP = 4;
 /** Lines a `...` passage may span, including the anchor lines. */
@@ -82,6 +86,43 @@ export function groupLines(words: Word[], slack = LINE_SLACK): Line[] {
   return lines;
 }
 
+function isLineNumber(text: string): boolean {
+  return /^\d{2,4}$/.test(text);
+}
+
+function isSingleCapital(text: string): boolean {
+  return /^[A-Z]$/.test(text);
+}
+
+function isPunctuation(text: string): boolean {
+  return /^[\p{P}\p{S}]+$/u.test(text);
+}
+
+/** A line number, and a capital beside it, set off from the verse by a line-wide gap. */
+function dropRightMargin(sorted: Word[]): Word[] {
+  let start = sorted.length;
+  for (let i = sorted.length - 1; i >= 1; i--) {
+    const word = sorted[i];
+    if (!isLineNumber(word.text) && !isSingleCapital(word.text)) break;
+    start = i;
+    const prev = sorted[i - 1];
+    if (word.x - (prev.x + prev.w) >= LINE_PX) break;
+  }
+  if (start === sorted.length || start === 0) return sorted;
+  if (!sorted.slice(start).some((word) => isLineNumber(word.text))) return sorted;
+  const prev = sorted[start - 1];
+  if (sorted[start].x - (prev.x + prev.w) < LINE_PX) return sorted;
+  return sorted.slice(0, start);
+}
+
+/** A punctuation mark standing a line-wide gap to the left of the verse. */
+function dropLeftPunct(sorted: Word[]): Word[] {
+  if (sorted.length < 2 || !isPunctuation(sorted[0].text)) return sorted;
+  const gap = sorted[1].x - (sorted[0].x + sorted[0].w);
+  if (gap < LINE_PX) return sorted;
+  return sorted.slice(1);
+}
+
 /** Drop a side of the line that is only a margin mark or a floating icon. */
 export function pageWords(words: Word[]): Word[] {
   if (words.length < 2) return words;
@@ -95,11 +136,14 @@ export function pageWords(words: Word[]): Word[] {
       cut = i;
     }
   }
-  if (biggest < COLUMN_GAP) return sorted;
-  const left = sorted.slice(0, cut);
-  const right = sorted.slice(cut);
-  const width = (side: Word[]) => side.reduce((sum, w) => sum + w.w, 0);
-  return width(left) >= width(right) ? left : right;
+  let kept = sorted;
+  if (biggest >= COLUMN_GAP) {
+    const left = sorted.slice(0, cut);
+    const right = sorted.slice(cut);
+    const width = (side: Word[]) => side.reduce((sum, word) => sum + word.w, 0);
+    kept = width(left) >= width(right) ? left : right;
+  }
+  return dropLeftPunct(dropRightMargin(kept));
 }
 
 export function prepareLines(words: Word[]): Line[] {
@@ -196,6 +240,12 @@ function allPhrases(seq: Seq[], phrase: string[]): Array<{ start: number; end: n
 /** The words the viewer's find is asked for. A passage uses the opening phrase. */
 export function openingPhrase(query: string): string {
   return query.split(/\s+\.\.\.\s+/)[0]?.trim() ?? "";
+}
+
+/** The phrase after `...`. Empty when the query is a single phrase. */
+export function endingPhrase(query: string): string {
+  const parts = query.split(/\s+\.\.\.\s+/);
+  return parts.length === 2 ? (parts[1]?.trim() ?? "") : "";
 }
 
 /**
@@ -304,13 +354,74 @@ export function toUv(box: Box, screen: { w: number; h: number }): { u: number; v
   };
 }
 
-/** `low` is glued to the bottom. `high` is at or above the middle. The band between is the seat. */
+/** `low` is glued to the bottom or more than a line below the seat. `high` is more than a line above it. The band between, with one line of slack, is the seat. */
 export function bandOf(box: Box, windowH: number, pad: number): "ok" | "low" | "high" {
-  const center = (box.y + box.h / 2) / windowH;
-  const line = 24;
-  if (box.y + box.h > windowH - (pad + line) || center > BAND_LOW) return "low";
-  if (center < BAND_HIGH) return "high";
+  const center = box.y + box.h / 2;
+  const seatTop = BAND_HIGH * windowH;
+  const seatBottom = BAND_LOW * windowH;
+  if (box.y + box.h > windowH - (pad + LINE_PX) || center > seatBottom + LINE_PX) return "low";
+  if (center < seatTop - LINE_PX) return "high";
   return "ok";
+}
+
+function lineTop(line: Line): number {
+  return Math.min(...line.words.map((word) => word.y));
+}
+
+function lineBottom(line: Line): number {
+  return Math.max(...line.words.map((word) => word.y + word.h));
+}
+
+function overlaps(a0: number, a1: number, b0: number, b1: number): boolean {
+  return a0 < b1 && b0 < a1;
+}
+
+function sharesColumn(line: Line, rect: Box): boolean {
+  return line.words.some((word) => overlaps(word.x, word.x + word.w, rect.x, rect.x + rect.w));
+}
+
+/** The line whose ink meets the find rectangle. */
+export function lineOverlapping(lines: Line[], rect: Box): number | null {
+  const index = lines.findIndex(
+    (line) => overlaps(lineTop(line), lineBottom(line), rect.y, rect.y + rect.h) && sharesColumn(line, rect),
+  );
+  return index >= 0 ? index : null;
+}
+
+/**
+ * Opening through end, when the end phrase is in the photograph and the full
+ * passage query is not. The find rectangle supplies the opening line when OCR
+ * did not read it. A span of `PASSAGE_LINES` or an end above the opening is refused.
+ */
+export function passageSpan(lines: Line[], query: string, placed: Box | null): Run | null {
+  const endPhrase = endingPhrase(query);
+  if (!endPhrase) return null;
+  const endHit = findRun(lines, endPhrase);
+  if (!endHit || endHit === "ambiguous") return null;
+  const openHit = findRun(lines, openingPhrase(query));
+  const start =
+    openHit && openHit !== "ambiguous" ? openHit.start : placed ? lineOverlapping(lines, placed) : null;
+  if (start === null) return null;
+  if (endHit.end < start || endHit.end - start >= PASSAGE_LINES) return null;
+  return { start, end: endHit.end };
+}
+
+/**
+ * The verse under a find whose end phrase is not in the photograph.
+ * A gap wider than two line-heights stops the walk, and so does `VERSE_LINES`.
+ */
+export function verseUnder(lines: Line[], rect: Box): Run | null {
+  const start = lineOverlapping(lines, rect);
+  if (start === null) return null;
+  const height = Math.max(LINE_PX, lineBottom(lines[start]) - lineTop(lines[start]));
+  let end = start;
+  while (end + 1 < lines.length && end - start + 1 < VERSE_LINES) {
+    const next = lines[end + 1];
+    if (!sharesColumn(next, rect)) break;
+    if (lineTop(next) - lineBottom(lines[end]) > height * 2) break;
+    end += 1;
+  }
+  return { start, end };
 }
 
 export function neighborTexts(lines: Line[], run: Run): string[] {

@@ -115,3 +115,11 @@ The shore’s find at `822` is already in the seat. A photograph that contains `
 Damyata still matches. `420` is removed before the union, so the right edge stays with the verse, beside the other boxes, and the tint is still drawn when the crop also holds the next line.
 
 The sentence splitter, the cue binding, the daemon binary, the disc, `aim.rs`, the default pad of `0`, and one `window.find` per locate stay as they are.
+
+## Shipped
+
+Landed in `src/locate/core.ts` and `src/locate/web.ts`. `tsc` is clean. `node --test test/*.test.ts` passed, 42 tests. The daemon binary was not rebuilt.
+
+`bandOf` treats a center within 24 pixels of the seat as `ok`. A passage whose end phrase is in the photograph is the span from the opening line through that end, and that span is not chased. A low find whose end is missing still steps 80 pixels, at most five steps, and stops at the bottom of the scroll. A find in the seat or high, whose end is missing, is the verse under that line, at most eight lines. `pageWords` drops a right-edge line number, and a single capital in that cluster, when the gap before it is at least 24 pixels, and a left-edge punctuation mark with the same gap after it.
+
+The web crop is wider than the sentence in section 2. Any accepted box whose crop says the query is absent is drawn, including a single phrase and the verse under the find. An OCR failure of the crop still recovers once and then fails. `surface.ts` still returns failure when its crop does not contain the query.

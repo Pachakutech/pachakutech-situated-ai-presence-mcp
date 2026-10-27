@@ -15,12 +15,14 @@ import {
   NUDGE_PX,
   openingKnown,
   openingPhrase,
+  passageSpan,
   prepareLines,
   queryInBlob,
   seek,
   shiftBox,
   toUv,
   unionBox,
+  verseUnder,
   type Box,
   type SeekState,
   type Word,
@@ -262,16 +264,27 @@ export async function locateWeb(opts: WebOpts, deps: Deps): Promise<LocateResult
 
     const fp = fingerprint(lines);
     const pictureMoved = lastFp === null || fp !== lastFp;
-    const found = findRun(lines, opts.query);
+    let found = findRun(lines, opts.query);
+    let holdStill = false;
     if (found === "ambiguous") {
       return fail("ambiguous_query", "That phrase is on screen more than once. Pass a longer query.");
+    }
+
+    if (!found && passage) {
+      const span = passageSpan(lines, opts.query, placedRect);
+      if (span) {
+        found = span;
+        holdStill = true;
+        deps.log("locate: the end is on the glass; highlighting the passage");
+      }
     }
 
     if (!found) {
       const openingHit = passage ? findRun(lines, opening) : null;
       const openingOnGlass = openingKnown(placedRect, Boolean(openingHit && openingHit !== "ambiguous"));
       const spent = Math.round(state.nudgePx / NUDGE_PX) + endUsed;
-      if (passage && endStep(false, openingOnGlass, spent) === "nudge") {
+      const endMayBeBelow = placedRect !== null && bandOf(placedRect, win.h, opts.pad) === "low";
+      if (passage && endMayBeBelow && endStep(false, openingOnGlass, spent) === "nudge") {
         if (await atScrollEnd(win.address, NUDGE_PX)) {
           deps.log("locate: the passage continues past the photograph; the page is already at the bottom");
         } else {
@@ -284,21 +297,33 @@ export async function locateWeb(opts: WebOpts, deps: Deps): Promise<LocateResult
           continue;
         }
       }
-      if (painted) {
-        const again = await recover(
-          passage ? "the photograph missed the rest of the passage" : "the photograph did not contain the phrase",
-        );
-        if (again === "again") continue;
+      if (passage && placedRect && !endMayBeBelow) {
+        const verse = verseUnder(lines, placedRect);
+        if (verse) {
+          found = verse;
+          holdStill = true;
+          deps.log("locate: the end is not in the photograph; highlighting the verse under the find");
+        }
       }
-      return fail(
-        "quote_not_found",
-        passage && endUsed > 0
-          ? "The end of the passage stayed out of the photograph."
-          : painted
-            ? "The phrase was not on screen after the browser's find."
-            : "The page never painted any text.",
-      );
+      if (!found) {
+        if (painted) {
+          const again = await recover(
+            passage ? "the photograph missed the rest of the passage" : "the photograph did not contain the phrase",
+          );
+          if (again === "again") continue;
+        }
+        return fail(
+          "quote_not_found",
+          passage && endUsed > 0
+            ? "The end of the passage stayed out of the photograph."
+            : painted
+              ? "The phrase was not on screen after the browser's find."
+              : "The page never painted any text.",
+        );
+      }
     }
+
+    if (passage) holdStill = true;
 
     const box = unionBox(lines, found, opts.pad, { w: win.w, h: win.h });
     if (!box) {
@@ -306,13 +331,26 @@ export async function locateWeb(opts: WebOpts, deps: Deps): Promise<LocateResult
       if (again === "again") continue;
       return fail("quote_not_found", "The phrase left the screen before the box was settled.");
     }
-    const decision = seek({ band: bandOf(box, win.h, opts.pad) }, pictureMoved, state);
+    if (!holdStill) {
+      const decision = seek({ band: bandOf(box, win.h, opts.pad) }, pictureMoved, state);
 
-    if (decision.action.type === "fail") {
-      return fail("quote_not_found", "The phrase was not on screen after the browser's find.");
+      if (decision.action.type === "fail") {
+        return fail("quote_not_found", "The phrase was not on screen after the browser's find.");
+      }
+
+      if (decision.action.type !== "accept") {
+        lastFp = fp;
+        state = decision.state;
+        const moved = await deps.scrollBy(win.address, decision.action.dy);
+        if (!moved) return fail("focus_failed", "Could not focus the browser, so the page was not scrolled.");
+        deps.log(`locate: scroll ${decision.action.dy}`);
+        await deps.sleep(WINDOW_SETTLE_MS);
+        continue;
+      }
+      state = decision.state;
     }
 
-    if (decision.action.type === "accept") {
+    {
       const again = chooseWindow(await deps.clients(), opts);
       if (!again || !sameWindow(again, win)) {
         if (geomRetries++ < 1) {
@@ -329,13 +367,14 @@ export async function locateWeb(opts: WebOpts, deps: Deps): Promise<LocateResult
         const checked = await verifyBox(screenBox, opts, neighbors, deps);
         if (!checked.ok && checked.hint.includes("includes the next line")) {
           deps.log("locate: the crop also holds the next line; highlighting the matched text");
+        } else if (!checked.ok && checked.hint.includes("does not contain the query")) {
+          deps.log("locate: the crop did not read the phrase back; highlighting the matched text");
         } else if (!checked.ok) {
           const again = await recover("the crop did not contain the phrase");
           if (again === "again") continue frame;
           return checked;
         }
       }
-      state = decision.state;
       const screen = await deps.screen();
       const uv = toUv(screenBox, screen);
       const text = matchedText(lines, found);
@@ -353,12 +392,6 @@ export async function locateWeb(opts: WebOpts, deps: Deps): Promise<LocateResult
       };
     }
 
-    lastFp = fp;
-    state = decision.state;
-    const moved = await deps.scrollBy(win.address, decision.action.dy);
-    if (!moved) return fail("focus_failed", "Could not focus the browser, so the page was not scrolled.");
-    deps.log(`locate: scroll ${decision.action.dy}`);
-    await deps.sleep(WINDOW_SETTLE_MS);
   }
 
   return fail("timeout", `No settled box within ${Math.round(opts.timeoutMs / 1000)}s.`);
