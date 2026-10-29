@@ -326,6 +326,32 @@ server.registerTool(
 );
 
 server.registerTool(
+  "listPhraseFlags",
+  {
+    title: "Read the phrase ledger",
+    description:
+      "Reads the daemon's phrase ledger, the list of phrases and the user's answers. " +
+      "The ledger is empty when the daemon starts and is not kept across a restart. " +
+      "acknowledged and decisions come from the user's hands; filter them with decidedBy T0. " +
+      "mismatch and notFound mean the find failed. A client that lost its context reads this again. " +
+      "It may propose a new phrase. It does not rebuild the list from memory.",
+    inputSchema: {
+      since: z.number().int().nonnegative().optional().describe("Exclusive event seq. Rows and events after this seq."),
+      taskId: z.string().optional(),
+      docKey: z.string().optional(),
+      decidedBy: z.enum(["T0", "T1", "T2", "T3"]).optional().describe("Keep phrases whose decision was stamped by this tier. T0 is the user."),
+      limit: z.number().int().nonnegative().optional().describe("Default 50. Values above 200 are clamped."),
+      events: z.boolean().optional().describe("Return the event log instead of the derived rows."),
+    },
+  },
+  async (query) => {
+    policy.assertAllowed("listPhraseFlags");
+    const detail = await (await getDaemon()).listPhraseFlags(query);
+    return { content: [{ type: "text", text: JSON.stringify(detail) }] };
+  },
+);
+
+server.registerTool(
   "retirePresence",
   {
     title: "End a presence",

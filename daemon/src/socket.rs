@@ -3,6 +3,7 @@
 //! `sidecar.sock` is T3. A connection cannot claim a different tier.
 
 use crate::gate::Tier;
+use crate::ledger::SubPoll;
 use crate::pipeline::SplatPipeline;
 use crate::protocol::{AvatarCommand, Proposal, ProposalResult};
 use crate::registry::Registry;
@@ -21,7 +22,18 @@ struct Client {
     stream: UnixStream,
     buf: Vec<u8>,
     tier: Tier,
+    /// Last seq delivered to a subscriber. `None` means this connection is not subscribed.
+    subscribed_through: Option<u64>,
+    last_observe: Option<Instant>,
 }
+
+/// Lines drained from one client before the overlay draws again.
+const LINES_PER_FRAME: usize = 32;
+/// Ledger events pushed to one subscriber before the overlay draws again.
+const SUBSCRIBE_FLUSH: usize = 32;
+/// `observePhrase` only. Enforced here, not in the ledger, so a burst of
+/// direct appends in tests is still a burst.
+const OBSERVE_GAP: std::time::Duration = std::time::Duration::from_millis(50);
 
 struct Endpoint {
     listener: UnixListener,
@@ -158,7 +170,13 @@ impl SocketServer {
                 };
                 let Some(stream) = accepted else { break };
                 stream.set_nonblocking(true)?;
-                self.clients.push(Client { stream, buf: Vec::new(), tier });
+                self.clients.push(Client {
+                    stream,
+                    buf: Vec::new(),
+                    tier,
+                    subscribed_through: None,
+                    last_observe: None,
+                });
             }
         }
 
@@ -175,6 +193,7 @@ impl SocketServer {
                 }
             }
         }
+        flush_subscribers(&mut self.clients, &self.registry);
         Ok(false)
     }
 }
@@ -225,18 +244,31 @@ fn read_client(
         }
     }
     let mut shutdown = false;
-    while let Some(pos) = client.buf.iter().position(|&b| b == b'\n') {
+    let mut taken = 0;
+    while taken < LINES_PER_FRAME {
+        let Some(pos) = client.buf.iter().position(|&b| b == b'\n') else { break };
+        taken += 1;
         let line = client.buf.drain(..=pos).collect::<Vec<_>>();
         let line = String::from_utf8_lossy(&line);
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
+        let mut subscribe_since: Option<u64> = None;
         let (result, stop) = match serde_json::from_str::<Proposal>(line) {
-            Ok(proposal) => match crate::gate::check(client.tier, &proposal) {
-                Err(rejected) => (rejected, false),
-                Ok(()) => dispatch(proposal, pipeline, registry, avatar_commands, text, speech),
-            },
+            Ok(proposal) => {
+                subscribe_since = match &proposal {
+                    Proposal::SubscribeLedger(body) => Some(body.since.unwrap_or(0)),
+                    _ => None,
+                };
+                match crate::gate::check(client.tier, &proposal) {
+                    Err(rejected) => (rejected, false),
+                    Ok(()) if matches!(proposal, Proposal::ObservePhrase(_)) && !observe_slot_open(client) => {
+                        (ProposalResult::err(proposal.proposal_id(), "rate: observePhrase"), false)
+                    }
+                    Ok(()) => dispatch(proposal, pipeline, registry, avatar_commands, text, speech, client.tier),
+                }
+            }
             Err(e) => {
                 eprintln!("[socket] malformed proposal: {e}");
                 (ProposalResult::err("unknown", format!("malformed proposal: {e}")), false)
@@ -247,6 +279,11 @@ fn read_client(
         });
         if writeln!(client.stream, "{response}").is_err() || client.stream.flush().is_err() {
             return Ok(ClientRead::Closed);
+        }
+        if result.status == "ok" {
+            if let Some(since) = subscribe_since {
+                client.subscribed_through = Some(since);
+            }
         }
         if stop {
             shutdown = true;
@@ -261,6 +298,114 @@ fn read_client(
 }
 
 /// Second value is true when the overlay loop should exit after this reply.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn observe_slot_open(client: &mut Client) -> bool {
+    let now = Instant::now();
+    if client.last_observe.is_some_and(|prev| now.duration_since(prev) < OBSERVE_GAP) {
+        return false;
+    }
+    client.last_observe = Some(now);
+    true
+}
+
+enum LineWrite {
+    Done,
+    Blocked,
+    Broken,
+}
+
+/// One `write` of the whole line. A short write has already mixed bytes onto the socket.
+fn write_line(stream: &mut UnixStream, bytes: &[u8]) -> LineWrite {
+    match stream.write(bytes) {
+        Ok(n) if n == bytes.len() => LineWrite::Done,
+        Ok(_) => LineWrite::Broken,
+        Err(e) if e.kind() == io::ErrorKind::Interrupted => match stream.write(bytes) {
+            Ok(n) if n == bytes.len() => LineWrite::Done,
+            Ok(_) => LineWrite::Broken,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => LineWrite::Blocked,
+            Err(_) => LineWrite::Broken,
+        },
+        Err(e) if e.kind() == io::ErrorKind::WouldBlock => LineWrite::Blocked,
+        Err(_) => LineWrite::Broken,
+    }
+}
+
+fn event_seq(line: &str) -> Option<u64> {
+    serde_json::from_str::<serde_json::Value>(line).ok()?.get("ledgerEvent")?.get("seq")?.as_u64()
+}
+
+/// `true` means the client socket is no longer usable.
+fn unsubscribe_or_drop(client: &mut Client, floor: u64) -> bool {
+    let line = format!("{}\n", json!({ "ledgerOverflow": { "floor": floor } }));
+    match write_line(&mut client.stream, line.as_bytes()) {
+        LineWrite::Done => {
+            client.subscribed_through = None;
+            false
+        }
+        LineWrite::Blocked | LineWrite::Broken => true,
+    }
+}
+
+/// Copy the pending lines, drop the registry lock, then write. A blocked subscriber
+/// is unsubscribed or dropped. It does not stall the frame.
+fn flush_subscribers(clients: &mut Vec<Client>, registry: &Mutex<Registry>) {
+    let mut i = 0;
+    while i < clients.len() {
+        let Some(cursor) = clients[i].subscribed_through else {
+            i += 1;
+            continue;
+        };
+        let polled = registry.lock().expect("registry mutex poisoned").ledger().poll_subscriber(cursor, SUBSCRIBE_FLUSH);
+        let drop_client = match polled {
+            SubPoll::Overflow { floor } => unsubscribe_or_drop(&mut clients[i], floor),
+            SubPoll::Lines { lines, through } => {
+                let mut delivered = cursor;
+                let mut blocked_at: Option<u64> = None;
+                let mut broken = false;
+                for line in &lines {
+                    let payload = format!("{line}\n");
+                    match write_line(&mut clients[i].stream, payload.as_bytes()) {
+                        LineWrite::Done => match event_seq(line) {
+                            Some(seq) => delivered = seq,
+                            None => {
+                                broken = true;
+                                break;
+                            }
+                        },
+                        LineWrite::Blocked => {
+                            blocked_at = Some(delivered);
+                            break;
+                        }
+                        LineWrite::Broken => {
+                            broken = true;
+                            break;
+                        }
+                    }
+                }
+                if broken {
+                    true
+                } else if let Some(floor) = blocked_at {
+                    unsubscribe_or_drop(&mut clients[i], floor)
+                } else {
+                    clients[i].subscribed_through = Some(through);
+                    false
+                }
+            }
+        };
+        if drop_client {
+            clients.remove(i);
+        } else {
+            i += 1;
+        }
+    }
+}
+
 fn dispatch(
     proposal: Proposal,
     pipeline: &SplatPipeline,
@@ -268,6 +413,7 @@ fn dispatch(
     avatar_commands: &mut Vec<AvatarCommand>,
     text: &TextMemory,
     speech: &SpeechBoard,
+    tier: Tier,
 ) -> (ProposalResult, bool) {
     let proposal_id = proposal.proposal_id().to_string();
     if matches!(proposal, Proposal::Shutdown { .. }) {
@@ -311,6 +457,10 @@ fn dispatch(
         _ => {}
     }
     let mut reg = registry.lock().expect("registry mutex poisoned");
+
+    if let Some(result) = crate::ledger::route_ledger(&proposal, tier, reg.ledger_mut(), now_ms()) {
+        return (result, false);
+    }
 
     if let Some(result) = route_presence(&proposal, &mut reg, avatar_commands) {
         return (result, false);
@@ -364,6 +514,9 @@ fn dispatch(
         | Proposal::AvatarWalk { .. }
         | Proposal::QueryScreenText { .. }
         | Proposal::QuerySpeech { .. } => ProposalResult::ok(&proposal_id, None),
+        Proposal::ListPhraseFlags(_) | Proposal::SubscribeLedger(_) | Proposal::ObservePhrase(_) => {
+            ProposalResult::err(&proposal_id, "unrouted ledger proposal")
+        }
     };
     (result, false)
 }

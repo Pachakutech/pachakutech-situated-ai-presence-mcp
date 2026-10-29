@@ -27,9 +27,10 @@ impl Tier {
     }
 }
 
-/// Every kind that exists today is T2 only. Give a new variant its own arm.
-/// Do not add it to the T2 arm, and do not write a wildcard. C2's
-/// `observePhrase` is T3 only.
+/// Kinds that predate the ledger share one T2 arm. Ledger reads are a
+/// separate arm. `observePhrase` is its own arm and is T3 only. Do not fold
+/// a new kind into an existing arm, and do not write a wildcard. T0 has no
+/// socket, so it is allowed nothing here.
 pub fn allowed(tier: Tier, proposal: &Proposal) -> bool {
     match proposal {
         Proposal::HighlightRegion { .. }
@@ -48,6 +49,10 @@ pub fn allowed(tier: Tier, proposal: &Proposal) -> bool {
         | Proposal::QueryScreenText { .. }
         | Proposal::QuerySpeech { .. }
         | Proposal::ConcealHighlight { .. } => matches!(tier, Tier::T2Client),
+        Proposal::ListPhraseFlags(_) | Proposal::SubscribeLedger(_) => {
+            matches!(tier, Tier::T1User | Tier::T2Client | Tier::T3Sidecar)
+        }
+        Proposal::ObservePhrase(_) => matches!(tier, Tier::T3Sidecar),
     }
 }
 
@@ -142,9 +147,28 @@ mod tests {
         }
     }
 
+    fn ledger_samples() -> Vec<(Proposal, &'static str)> {
+        const LINES: &[(&str, &str)] = &[
+            (
+                r#"{"kind":"observePhrase","proposalId":"o","match":{"status":"located","conf":0.9}}"#,
+                "observePhrase",
+            ),
+            (r#"{"kind":"listPhraseFlags","proposalId":"l"}"#, "listPhraseFlags"),
+            (r#"{"kind":"subscribeLedger","proposalId":"s"}"#, "subscribeLedger"),
+        ];
+        LINES
+            .iter()
+            .map(|(json, kind)| {
+                let proposal: Proposal = serde_json::from_str(json).unwrap_or_else(|e| panic!("{kind}: {e}"));
+                assert_eq!(proposal.kind_name(), *kind);
+                (proposal, *kind)
+            })
+            .collect()
+    }
+
     #[test]
     fn t0_has_no_socket_kinds() {
-        for (proposal, kind) in samples() {
+        for (proposal, kind) in samples().into_iter().chain(ledger_samples()) {
             assert!(!allowed(Tier::T0Physical, &proposal), "{kind}");
             let message = check(Tier::T0Physical, &proposal).unwrap_err().error.expect("error string");
             assert!(message.starts_with("not_allowed_for_tier:"), "{message}");
@@ -188,6 +212,16 @@ mod tests {
             assert_eq!(allowed(Tier::T1User, &proposal), false, "{kind}");
             assert_eq!(allowed(Tier::T3Sidecar, &proposal), false, "{kind}");
         }
+        for (proposal, kind) in ledger_samples() {
+            let t1 = allowed(Tier::T1User, &proposal);
+            let t2 = allowed(Tier::T2Client, &proposal);
+            let t3 = allowed(Tier::T3Sidecar, &proposal);
+            match kind {
+                "listPhraseFlags" | "subscribeLedger" => assert!(t1 && t2 && t3, "{kind}"),
+                "observePhrase" => assert!(!t1 && !t2 && t3, "{kind}"),
+                other => panic!("unexpected ledger kind {other}"),
+            }
+        }
     }
 
     #[test]
@@ -205,9 +239,12 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "enabled by C2"]
     fn observe_phrase_rejected_on_mcp() {
-        panic!("C2 enables observe_phrase_rejected_on_mcp");
+        let (proposal, _) = ledger_samples().into_iter().find(|(_, kind)| *kind == "observePhrase").unwrap();
+        assert!(!allowed(Tier::T2Client, &proposal));
+        let rejected = check(Tier::T2Client, &proposal).unwrap_err();
+        assert_eq!(rejected.error.as_deref(), Some("not_allowed_for_tier:observePhrase"));
+        assert!(check(Tier::T3Sidecar, &proposal).is_ok());
     }
 
     #[test]

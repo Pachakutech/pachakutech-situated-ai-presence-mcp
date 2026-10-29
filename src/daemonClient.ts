@@ -2,11 +2,13 @@
 // out — matches daemon/src/protocol.rs field-for-field. Nothing dense crosses
 // this boundary.
 //
-// Does not own GPU work and does not care whether the dispatch/pipeline loop
-// exists yet: the registry on the other end already accepts these six kinds.
+// Does not own GPU work. This connection is one proposal, one reply, in order.
+// `subscribeLedger` is not this socket: a pushed ledger line would be parsed
+// as the next reply. A subscriber opens its own connection. `listPhraseFlags`
+// is a normal request on this one.
 
 import { createConnection, type Socket } from "node:net";
-import { PresenceDaemon, HighlightResult } from "./daemon.js";
+import { PresenceDaemon, HighlightResult, PhraseFlagList, PhraseFlagQuery } from "./daemon.js";
 
 export function socketPath(): string {
   if (process.env.PRESENCE_DAEMON_SOCKET) return process.env.PRESENCE_DAEMON_SOCKET;
@@ -172,6 +174,18 @@ export class DaemonClient implements PresenceDaemon {
 
   async retireArtifact(artifactId: string): Promise<void> {
     await this.rpc("retireArtifact", { artifactId });
+  }
+
+  async listPhraseFlags(query: PhraseFlagQuery): Promise<PhraseFlagList> {
+    const result = await this.rpc("listPhraseFlags", { ...query });
+    const detail = result.detail ?? {};
+    return {
+      seq: typeof detail.seq === "number" ? detail.seq : 0,
+      rows: Array.isArray(detail.rows) ? detail.rows : undefined,
+      events: Array.isArray(detail.events) ? detail.events : undefined,
+      compacted: detail.compacted === true ? true : undefined,
+      floor: typeof detail.floor === "number" ? detail.floor : undefined,
+    };
   }
 }
 

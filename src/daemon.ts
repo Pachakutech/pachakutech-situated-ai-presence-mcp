@@ -9,6 +9,23 @@ export type HighlightResult = {
   resolvedBounds: [number, number, number, number] | null;
 };
 
+export type PhraseFlagQuery = {
+  since?: number;
+  taskId?: string;
+  docKey?: string;
+  decidedBy?: "T0" | "T1" | "T2" | "T3";
+  limit?: number;
+  events?: boolean;
+};
+
+export type PhraseFlagList = {
+  seq: number;
+  rows?: unknown[];
+  events?: unknown[];
+  compacted?: boolean;
+  floor?: number;
+};
+
 export interface PresenceDaemon {
   highlightRegion(
     presenceId: string,
@@ -29,4 +46,5 @@ export interface PresenceDaemon {
   retirePresence(presenceId: string): Promise<void>;
   addArtifact(artifactId: string, description: string, sourceUri?: string): Promise<void>;
   retireArtifact(artifactId: string): Promise<void>;
+  listPhraseFlags(query: PhraseFlagQuery): Promise<PhraseFlagList>;
 }

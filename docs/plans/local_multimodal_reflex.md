@@ -217,13 +217,13 @@ The sockets are mode `0600` in this user's runtime directory. Any process of thi
 
 ### The ledger is the glass session
 
-C2's ledger is in memory, empty when the daemon starts, fifty distinct phrases, OCR snippets cut at two hundred characters. That cut is for the snippet on a glass observation. The quotation a citation stores belongs in the C7 project store, which is the record that survives retire and a restart. A project locus can be longer than two hundred characters, and there can be hundreds of them. The fifty-phrase cap counts live ledger phrases. It does not count the project.
+C2's ledger is in memory, empty when the daemon starts, fifty distinct phrases, OCR snippets cut at two hundred characters. That cut is for the snippet on a glass observation. The quotation a citation stores belongs in the C7 project store, which is the record that survives retire and a restart. A project locus can be longer than two hundred characters, and there can be hundreds of them. The fifty-phrase cap counts live ledger phrases. It does not count the project. The client LLM's context is not this list. Compaction of that context leaves the phrases and the user's decisions where they are. The client reads `listPhraseFlags` when it returns, and it may propose a new phrase.
 
 Accept a phrase id the project already chose. Mint `ph-n` only when an `observePhrase` arrives without one. The research locus id and the ledger phrase id are the same string when a tour shows that locus.
 
 `DaemonClient` (`src/daemonClient.ts`) keeps one connection and treats each incoming line as the reply to the next proposal in a FIFO. A ledger line pushed on that connection is parsed as the answer to the next highlight or speak, and the client loses its place. `subscribeLedger` gets its own connection. The MCP read is `listPhraseFlags`. The shared client stays one reply per proposal.
 
-Because `read_client` drains the buffer on the overlay thread, a sidecar that writes a pile of `observePhrase` lines stalls the discs for the time those lines take to parse. Cap how many ledger messages one frame will handle, and leave the rest in the buffer. The reply write today is a blocking `writeln`. A `subscribeLedger` push has to give up when the socket would block, record the overflow the plan already names, and return to the frame. A slow subscriber must not hold the overlay thread.
+Because `read_client` drains the buffer on the overlay thread, a sidecar that writes a pile of `observePhrase` lines stalls the discs for the time those lines take to parse. One frame handles 32 lines from a connection and leaves the rest in the buffer. `observePhrase` is accepted at most once per 50 ms on that connection, in `read_client` only. The reply write today is a blocking `writeln`. A `subscribeLedger` push has to give up when the socket would block, record the overflow the plan already names, and return to the frame. A slow subscriber must not hold the overlay thread.
 
 ### Controls, on the surfaces that exist
 

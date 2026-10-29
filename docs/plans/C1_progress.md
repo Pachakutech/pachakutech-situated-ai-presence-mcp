@@ -22,4 +22,4 @@ The daemon socket stays unlimited. The 1.5 s limit remains in `src/policyGate.ts
 
 ## Left for later
 
-No ledger, no new proposal kinds, no overlay hit-testing, no daemon scroll, no token handshake. Do not ship or restart the live daemon unless asked.
+The phrase ledger landed in C2. No overlay hit-testing, no daemon scroll, no token handshake. Do not ship or restart the live daemon unless asked.

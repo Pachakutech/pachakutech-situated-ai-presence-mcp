@@ -75,12 +75,27 @@ channel (`PRESENCE_COMMAND_SOCKET`). `sidecar.sock` is the model sidecar
 Tier belongs to the listener that accepted the connection. A message body
 cannot name one. `presence.sock` is T2, `command.sock` is T1, and
 `sidecar.sock` is T3. T0 is physical input on the overlay and has no socket.
-Every kind that exists today is allowed only on T2. T1 and T3 answer those
-kinds with `not_allowed_for_tier:<kind>`. If `command.sock` or `sidecar.sock`
+The kinds that predate the ledger are allowed only on T2. T1 and T3 answer
+those kinds with `not_allowed_for_tier:<kind>`. `listPhraseFlags` and
+`subscribeLedger` are allowed on T1, T2, and T3. `observePhrase` is allowed
+only on T3. If `command.sock` or `sidecar.sock`
 cannot be bound, the daemon logs the error and keeps the sockets that did
 bind. `presence.sock` failing is still fatal.
 
 The Node policy gate does not decide tier. It rate-limits MCP tool calls.
+
+## Phrase ledger
+
+The ledger is in memory. It is empty when the daemon starts and is not kept
+across a restart. `observePhrase` on `sidecar.sock` records a find.
+`listPhraseFlags` and `subscribeLedger` read it. `subscribeLedger` is its own
+connection. The MCP client reads with `listPhraseFlags` on the shared socket.
+An acknowledgement or a decision is written only from physical input, tier
+T0. The client LLM's context is not this list. When that context is
+compacted, the client reads `listPhraseFlags` again and uses that cursor as
+the phrases and the user's answers. It may propose a new phrase. Event-log
+compaction drops old events and keeps the derived view, so that read still
+shows the phrases and the decisions.
 
 ## Ingress
 
