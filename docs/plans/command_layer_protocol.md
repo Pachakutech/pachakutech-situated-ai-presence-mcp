@@ -183,6 +183,7 @@ Only `Registry::apply_ui_event` can append `Viewed(Acknowledged)`, `Approved`, `
 | `startProjectTour` | yes (needs T0 start) | yes | no |
 | `queryProject` | yes | yes | yes (read) |
 | `exportProject` | yes | yes | no |
+| `addNote`, `deleteNote` | no | yes | no |
 | `ViewerMove`, `OpenSource` | internal only | internal only | internal only |
 
 Anything not listed for a tier is rejected with `error: "not_allowed_for_tier"`.
@@ -195,7 +196,7 @@ Anything not listed for a tier is rejected with `error: "not_allowed_for_tier"`.
 
 Reuse `ProposalResult`. Stable machine-readable codes go in `detail.code` or the `error` string:
 
-`not_allowed_for_tier`, `schema`, `path_not_in_granted_root`, `url_not_allowed`, `source_not_in_project`, `source_failed`, `rate_limited`, `quota`, `queue_full`, `no_such_task`, `no_such_presence`, `select_requires_controls`, `approve_takes_no_controls`, `region_denied`, `task_not_active`, `needs_start_confirm`.
+`not_allowed_for_tier`, `schema`, `no_armed_note`, `empty_note`, `quota:notes`, `path_not_in_granted_root`, `url_not_allowed`, `source_not_in_project`, `source_failed`, `rate_limited`, `quota`, `queue_full`, `no_such_task`, `no_such_presence`, `select_requires_controls`, `approve_takes_no_controls`, `region_denied`, `task_not_active`, `needs_start_confirm`.
 
 `createTask` success detail:
 ```json
@@ -419,6 +420,10 @@ Daemon socket tests follow the existing style (spawn the daemon in test mode, co
 | N11 | `citation_check.csv` row per cited source with `matchKind` and page status | Pass |
 | N12 | Rebuild is deterministic | Same input, byte-identical files |
 
+### O. Notes
+
+See ticket C7b for the full list (O1–O23): tier isolation, clicked-item arming, sanitation (control, bidi, zero-width, tag characters; whitespace; caps), keyboard-mash hold with Keep/Drop, persistence, no gate effect, CSV formula-injection guard.
+
 ### K. Regression and performance
 
 | ID | Test | Expect |
@@ -437,5 +442,5 @@ Daemon socket tests follow the existing style (spawn the daemon in test mode, co
 4. Scroll capability and tour runner (G).
 5. Sidecar endpoint and `observePhrase`, `draftTask` (H).
 6. Doc map (I) and reporting (J).
-7. Projects and intake (L), then `openSource` and multi-source tours (M), then exports (N). See `research_tours.md` section 12.
+7. Notes (O) after the project store. Projects and intake (L), then `openSource` and multi-source tours (M), then exports (N). See `research_tours.md` section 12.
 8. K throughout, with performance numbers recorded at steps 3, 4 and 5.
