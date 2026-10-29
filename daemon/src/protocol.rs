@@ -148,6 +148,15 @@ pub enum Proposal {
         #[serde(rename = "presenceId")]
         presence_id: String,
     },
+    /// Read the derived phrase view, or the event log when `events` is set.
+    #[serde(rename = "listPhraseFlags")]
+    ListPhraseFlags(ListPhraseFlagsBody),
+    /// Own connection. Later lines on it are ledger events, not proposal replies.
+    #[serde(rename = "subscribeLedger")]
+    SubscribeLedger(SubscribeLedgerBody),
+    /// Sidecar observation. Cannot carry an acknowledgement or a decision.
+    #[serde(rename = "observePhrase")]
+    ObservePhrase(ObservePhraseBody),
 }
 
 /// Applied on the overlay thread after the socket pump. Not a GPU command.
@@ -184,6 +193,9 @@ impl Proposal {
             | Proposal::QueryScreenText { proposal_id }
             | Proposal::QuerySpeech { proposal_id }
             | Proposal::ConcealHighlight { proposal_id, .. } => proposal_id,
+            Proposal::ListPhraseFlags(body) => &body.proposal_id,
+            Proposal::SubscribeLedger(body) => &body.proposal_id,
+            Proposal::ObservePhrase(body) => &body.proposal_id,
         }
     }
 
@@ -205,8 +217,103 @@ impl Proposal {
             Proposal::QueryScreenText { .. } => "queryScreenText",
             Proposal::QuerySpeech { .. } => "querySpeech",
             Proposal::ConcealHighlight { .. } => "concealHighlight",
+            Proposal::ListPhraseFlags(_) => "listPhraseFlags",
+            Proposal::SubscribeLedger(_) => "subscribeLedger",
+            Proposal::ObservePhrase(_) => "observePhrase",
         }
     }
+}
+
+/// `notFound` is camelCase on the wire. The other statuses are single words.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum MatchStatus {
+    #[serde(rename = "located")]
+    Located,
+    #[serde(rename = "ambiguous")]
+    Ambiguous,
+    #[serde(rename = "notFound")]
+    NotFound,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MatchInfo {
+    pub status: MatchStatus,
+    pub conf: f32,
+    #[serde(rename = "ocrSnippet", default)]
+    pub ocr_snippet: Option<String>,
+}
+
+/// What a socket observer may say. `acknowledged` is not a variant.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum ObservedViewed {
+    #[serde(rename = "shown")]
+    Shown,
+    #[serde(rename = "dwelled")]
+    Dwelled,
+}
+
+/// Closed body. `kind` is accepted so the enum tag is not a schema error.
+/// Any other unknown field, including a decision, fails the parse.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObservePhraseBody {
+    #[serde(rename = "proposalId")]
+    pub proposal_id: String,
+    #[serde(rename = "phraseId", default)]
+    pub phrase_id: Option<String>,
+    #[serde(default)]
+    pub query: Option<String>,
+    #[serde(rename = "docKey", default)]
+    pub doc_key: Option<String>,
+    #[serde(rename = "taskId", default)]
+    pub task_id: Option<String>,
+    #[serde(rename = "match")]
+    pub match_info: MatchInfo,
+    #[serde(default)]
+    pub u: Option<f32>,
+    #[serde(default)]
+    pub v: Option<f32>,
+    #[serde(default)]
+    pub w: Option<f32>,
+    #[serde(default)]
+    pub h: Option<f32>,
+    #[serde(default)]
+    pub viewed: Option<ObservedViewed>,
+    #[serde(default, rename = "kind")]
+    pub wire_kind: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListPhraseFlagsBody {
+    #[serde(rename = "proposalId")]
+    pub proposal_id: String,
+    #[serde(default)]
+    pub since: Option<u64>,
+    #[serde(rename = "taskId", default)]
+    pub task_id: Option<String>,
+    #[serde(rename = "docKey", default)]
+    pub doc_key: Option<String>,
+    #[serde(rename = "decidedBy", default)]
+    pub decided_by: Option<String>,
+    #[serde(default)]
+    pub limit: Option<u32>,
+    #[serde(default)]
+    pub events: bool,
+    #[serde(default, rename = "kind")]
+    pub wire_kind: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubscribeLedgerBody {
+    #[serde(rename = "proposalId")]
+    pub proposal_id: String,
+    #[serde(default)]
+    pub since: Option<u64>,
+    #[serde(default, rename = "kind")]
+    pub wire_kind: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

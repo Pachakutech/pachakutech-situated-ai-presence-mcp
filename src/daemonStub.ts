@@ -13,7 +13,7 @@ import { spawnSync } from "node:child_process";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { PresenceDaemon, HighlightResult } from "./daemon.js";
+import { PresenceDaemon, HighlightResult, PhraseFlagList, PhraseFlagQuery } from "./daemon.js";
 
 const STATE_DIR = join(homedir(), ".local", "state", "pachakutech-presence");
 const LOG_PATH = join(STATE_DIR, "log.jsonl");
@@ -91,5 +91,10 @@ export const daemonStub: PresenceDaemon = {
 
   async retireArtifact(artifactId: string) {
     record({ kind: "retireArtifact", artifactId });
+  },
+
+  async listPhraseFlags(query: PhraseFlagQuery): Promise<PhraseFlagList> {
+    record({ kind: "listPhraseFlags", ...query });
+    return { seq: 0, rows: [] };
   },
 };

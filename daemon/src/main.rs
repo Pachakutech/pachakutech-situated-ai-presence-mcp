@@ -10,6 +10,8 @@ mod pipeline;
 mod avatar_expand;
 mod protocol;
 mod gate;
+mod ledger;
+mod ui_input;
 mod registry;
 mod socket;
 mod speech;

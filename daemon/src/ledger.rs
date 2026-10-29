@@ -1,0 +1,1108 @@
+//! In-memory phrase ledger for one daemon run. Empty at start. Not kept
+//! across a restart. The quotation a citation stores lives in the project
+//! store (C7); this log is the glass session, capped at 50 phrases and
+//! 200-character snippets.
+
+use crate::gate::Tier;
+use crate::highlight::UvBox;
+use crate::protocol::{
+    ListPhraseFlagsBody, MatchInfo, MatchStatus, ObservePhraseBody, ObservedViewed, Proposal, ProposalResult,
+};
+use serde_json::{json, Value};
+use std::collections::HashSet;
+
+pub const PHRASE_CAP: usize = 50;
+pub const EVENT_CAP: usize = 5000;
+pub const TEXT_CAP: usize = 200;
+pub const DEFAULT_LIMIT: usize = 50;
+pub const MAX_LIMIT: usize = 200;
+pub const SUBSCRIBE_LAG: usize = 1000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LedgerKind {
+    Located,
+    Viewed,
+    Approved,
+    Discarded,
+    Cleared,
+    Mismatch,
+    Tour,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewedTier {
+    Shown,
+    Dwelled,
+    Acknowledged,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LedgerEvent {
+    pub seq: u64,
+    pub ts_ms: u64,
+    pub phrase_id: String,
+    pub task_id: Option<String>,
+    pub kind: LedgerKind,
+    pub viewed: Option<ViewedTier>,
+    pub matched: Option<MatchInfo>,
+    pub uv: Option<UvBox>,
+    pub query: Option<String>,
+    pub doc_key: Option<String>,
+    pub by: Tier,
+}
+
+/// Socket-visible observations. This enum cannot represent an acknowledgement,
+/// an approval, a discard, or a clear.
+#[derive(Debug, Clone)]
+pub enum ObservedAppend {
+    Located {
+        phrase_id: String,
+        task_id: Option<String>,
+        query: Option<String>,
+        doc_key: Option<String>,
+        matched: MatchInfo,
+        uv: Option<UvBox>,
+    },
+    Viewed {
+        phrase_id: String,
+        task_id: Option<String>,
+        viewed: ObservedViewed,
+        uv: Option<UvBox>,
+    },
+    Mismatch {
+        phrase_id: String,
+        task_id: Option<String>,
+        matched: MatchInfo,
+    },
+    Tour {
+        phrase_id: String,
+        task_id: Option<String>,
+        query: Option<String>,
+    },
+}
+
+/// Physical-input records. `append_user` is the only writer, and it stamps `T0`.
+#[derive(Debug, Clone)]
+pub enum UserAppend {
+    Acknowledged { phrase_id: String },
+    Approved { phrase_id: String },
+    Discarded { phrase_id: String },
+    Cleared { phrase_id: String },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum LedgerError {
+    Quota,
+    Schema,
+}
+
+#[derive(Debug)]
+pub enum SubPoll {
+    Lines { lines: Vec<String>, through: u64 },
+    Overflow { floor: u64 },
+}
+
+pub struct Ledger {
+    events: Vec<LedgerEvent>,
+    next_seq: u64,
+    next_mint: u64,
+    /// Highest seq removed by compaction. A `since` below this is not a
+    /// complete event stream.
+    compacted_below: u64,
+}
+
+impl Ledger {
+    pub fn new() -> Self {
+        Self { events: Vec::new(), next_seq: 1, next_mint: 1, compacted_below: 0 }
+    }
+
+    pub fn events(&self) -> &[LedgerEvent] {
+        &self.events
+    }
+
+    pub fn latest_seq(&self) -> u64 {
+        self.next_seq.saturating_sub(1)
+    }
+
+    pub fn compacted_below(&self) -> u64 {
+        self.compacted_below
+    }
+
+    pub fn append_observed(&mut self, by: Tier, ev: ObservedAppend, now_ms: u64) -> Result<u64, LedgerError> {
+        let (phrase_id, task_id, query, doc_key, kind, viewed, matched, uv) = match ev {
+            ObservedAppend::Located { phrase_id, task_id, query, doc_key, matched, uv } => {
+                (phrase_id, task_id, query, doc_key, LedgerKind::Located, None, Some(matched), uv)
+            }
+            ObservedAppend::Viewed { phrase_id, task_id, viewed, uv } => {
+                let tier = match viewed {
+                    ObservedViewed::Shown => ViewedTier::Shown,
+                    ObservedViewed::Dwelled => ViewedTier::Dwelled,
+                };
+                (phrase_id, task_id, None, None, LedgerKind::Viewed, Some(tier), None, uv)
+            }
+            ObservedAppend::Mismatch { phrase_id, task_id, matched } => {
+                (phrase_id, task_id, None, None, LedgerKind::Mismatch, None, Some(matched), None)
+            }
+            ObservedAppend::Tour { phrase_id, task_id, query } => {
+                (phrase_id, task_id, query, None, LedgerKind::Tour, None, None, None)
+            }
+        };
+        self.push(phrase_id, task_id, query, doc_key, kind, viewed, matched, uv, by, now_ms)
+    }
+
+    /// Only `ui_input::apply_ui_event` can build the witness this requires.
+    pub fn append_user(
+        &mut self,
+        _witness: crate::ui_input::T0Witness,
+        ev: UserAppend,
+        now_ms: u64,
+    ) -> Result<u64, LedgerError> {
+        let (phrase_id, kind, viewed) = match ev {
+            UserAppend::Acknowledged { phrase_id } => (phrase_id, LedgerKind::Viewed, Some(ViewedTier::Acknowledged)),
+            UserAppend::Approved { phrase_id } => (phrase_id, LedgerKind::Approved, None),
+            UserAppend::Discarded { phrase_id } => (phrase_id, LedgerKind::Discarded, None),
+            UserAppend::Cleared { phrase_id } => (phrase_id, LedgerKind::Cleared, Some(ViewedTier::Acknowledged)),
+        };
+        self.push(phrase_id, None, None, None, kind, viewed, None, None, Tier::T0Physical, now_ms)
+    }
+
+    pub fn list_value(&self, body: &ListPhraseFlagsBody) -> Result<Value, LedgerError> {
+        let decided = match &body.decided_by {
+            None => None,
+            Some(raw) => Some(parse_tier(raw).ok_or(LedgerError::Schema)?),
+        };
+        let limit = match body.limit {
+            None => DEFAULT_LIMIT,
+            Some(n) => (n as usize).min(MAX_LIMIT),
+        };
+        let since = body.since.unwrap_or(0);
+        let behind = self.compacted_below > 0 && since < self.compacted_below;
+        let mut rows = self.derived();
+        rows.retain(|row| row_matches(row, body, decided) && row.seq > since);
+        rows.truncate(limit);
+        let row_json = rows.iter().map(Derived::wire).collect::<Vec<_>>();
+        // The derived view keeps each phrase's latest seq, so `since` still
+        // selects rows after compaction. The event stream does not: a `since`
+        // under the floor is answered with the rows and the floor.
+        if body.events && behind {
+            return Ok(json!({
+                "seq": self.latest_seq(),
+                "rows": row_json,
+                "compacted": true,
+                "floor": self.compacted_below,
+            }));
+        }
+        if body.events {
+            let mut events: Vec<&LedgerEvent> = self
+                .events
+                .iter()
+                .filter(|ev| ev.seq > since && event_visible(ev, &self.derived_index(), body, decided))
+                .collect();
+            events.truncate(limit);
+            return Ok(json!({
+                "seq": self.latest_seq(),
+                "events": events.iter().map(|ev| ev.wire()).collect::<Vec<_>>(),
+            }));
+        }
+        Ok(json!({
+            "seq": self.latest_seq(),
+            "rows": row_json,
+        }))
+    }
+
+    pub fn poll_subscriber(&self, through: u64, max_lines: usize) -> SubPoll {
+        if self.compacted_below > 0 && through < self.compacted_below {
+            return SubPoll::Overflow { floor: self.compacted_below };
+        }
+        let pending: Vec<&LedgerEvent> = self.events.iter().filter(|ev| ev.seq > through).collect();
+        if pending.len() > SUBSCRIBE_LAG {
+            return SubPoll::Overflow { floor: self.latest_seq() };
+        }
+        let mut lines = Vec::new();
+        let mut cursor = through;
+        for ev in pending.into_iter().take(max_lines) {
+            lines.push(json!({ "ledgerEvent": ev.wire() }).to_string());
+            cursor = ev.seq;
+        }
+        SubPoll::Lines { lines, through: cursor }
+    }
+
+    fn push(
+        &mut self,
+        phrase_id: String,
+        task_id: Option<String>,
+        query: Option<String>,
+        doc_key: Option<String>,
+        kind: LedgerKind,
+        viewed: Option<ViewedTier>,
+        matched: Option<MatchInfo>,
+        uv: Option<UvBox>,
+        by: Tier,
+        now_ms: u64,
+    ) -> Result<u64, LedgerError> {
+        let phrase_id = cut(phrase_id);
+        if phrase_id.trim().is_empty() {
+            return Err(LedgerError::Schema);
+        }
+        if !self.known(&phrase_id) && self.distinct_phrases() >= PHRASE_CAP {
+            return Err(LedgerError::Quota);
+        }
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        let mut matched = matched;
+        if let Some(info) = matched.as_mut() {
+            info.ocr_snippet = info.ocr_snippet.take().map(cut);
+        }
+        self.events.push(LedgerEvent {
+            seq,
+            ts_ms: now_ms,
+            phrase_id,
+            task_id: task_id.map(cut),
+            kind,
+            viewed,
+            matched,
+            uv,
+            query: query.map(cut),
+            doc_key: doc_key.map(cut),
+            by,
+        });
+        if self.events.len() > EVENT_CAP {
+            self.compact();
+        }
+        Ok(seq)
+    }
+
+    fn compact(&mut self) {
+        let mut keep: HashSet<u64> = HashSet::new();
+        let ids = self.phrase_ids();
+        for id in &ids {
+            let mine: Vec<&LedgerEvent> = self.events.iter().filter(|ev| &ev.phrase_id == id).collect();
+            keep.extend(seqs_to_keep(&mine));
+        }
+        let mut dropped_max = 0u64;
+        for ev in &self.events {
+            if !keep.contains(&ev.seq) {
+                dropped_max = dropped_max.max(ev.seq);
+            }
+        }
+        if dropped_max == 0 {
+            return;
+        }
+        self.compacted_below = self.compacted_below.max(dropped_max);
+        self.events.retain(|ev| keep.contains(&ev.seq));
+    }
+
+    fn phrase_ids(&self) -> Vec<String> {
+        let mut ids = Vec::new();
+        for ev in &self.events {
+            if !ids.iter().any(|id| id == &ev.phrase_id) {
+                ids.push(ev.phrase_id.clone());
+            }
+        }
+        ids
+    }
+
+    fn distinct_phrases(&self) -> usize {
+        self.phrase_ids().len()
+    }
+
+    fn known(&self, id: &str) -> bool {
+        self.events.iter().any(|ev| ev.phrase_id == id)
+    }
+
+    fn allocate_mint(&mut self) -> String {
+        loop {
+            let id = format!("ph-{}", self.next_mint);
+            self.next_mint += 1;
+            if !self.known(&id) {
+                return id;
+            }
+        }
+    }
+
+    fn accept_phrase_id(&mut self, requested: Option<String>) -> Result<String, LedgerError> {
+        let id = match requested {
+            Some(raw) if !raw.trim().is_empty() => cut(raw),
+            _ => {
+                if self.distinct_phrases() >= PHRASE_CAP {
+                    return Err(LedgerError::Quota);
+                }
+                self.allocate_mint()
+            }
+        };
+        if !self.known(&id) && self.distinct_phrases() >= PHRASE_CAP {
+            return Err(LedgerError::Quota);
+        }
+        Ok(id)
+    }
+
+    fn derived(&self) -> Vec<Derived> {
+        let mut rows = Vec::new();
+        for id in self.phrase_ids() {
+            let mine: Vec<&LedgerEvent> = self.events.iter().filter(|ev| ev.phrase_id == id).collect();
+            rows.push(derive_phrase(&mine));
+        }
+        rows.sort_by_key(|row| row.seq);
+        rows
+    }
+
+    fn derived_index(&self) -> Vec<Derived> {
+        self.derived()
+    }
+}
+
+impl Default for Ledger {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Clone)]
+struct Derived {
+    phrase_id: String,
+    query: Option<String>,
+    matched: Option<MatchInfo>,
+    viewed: Option<ViewedTier>,
+    decision: Option<&'static str>,
+    decision_by: Option<Tier>,
+    uv: Option<UvBox>,
+    doc_key: Option<String>,
+    task_id: Option<String>,
+    seq: u64,
+}
+
+impl Derived {
+    fn wire(&self) -> Value {
+        json!({
+            "phraseId": self.phrase_id,
+            "query": self.query,
+            "match": self.matched.as_ref().map(MatchInfo::wire),
+            "viewed": viewed_wire(self.viewed),
+            "decision": self.decision,
+            "decisionBy": self.decision_by.map(Tier::wire_name),
+            "u": self.uv.map(|b| b.u),
+            "v": self.uv.map(|b| b.v),
+            "w": self.uv.map(|b| b.w),
+            "h": self.uv.map(|b| b.h),
+            "source": { "docKey": self.doc_key },
+            "taskId": self.task_id,
+            "seq": self.seq,
+        })
+    }
+}
+
+impl LedgerEvent {
+    fn wire(&self) -> Value {
+        json!({
+            "seq": self.seq,
+            "ts": self.ts_ms,
+            "phraseId": self.phrase_id,
+            "taskId": self.task_id,
+            "kind": kind_wire(self.kind),
+            "viewed": viewed_wire(self.viewed),
+            "match": self.matched.as_ref().map(MatchInfo::wire),
+            "uv": self.uv.map(|b| json!({"u": b.u, "v": b.v, "w": b.w, "h": b.h})),
+            "query": self.query,
+            "docKey": self.doc_key,
+            "by": self.by.wire_name(),
+        })
+    }
+}
+
+impl MatchInfo {
+    fn wire(&self) -> Value {
+        json!({
+            "status": match self.status {
+                MatchStatus::Located => "located",
+                MatchStatus::Ambiguous => "ambiguous",
+                MatchStatus::NotFound => "notFound",
+            },
+            "conf": self.conf,
+            "ocrSnippet": self.ocr_snippet,
+        })
+    }
+}
+
+pub fn route_ledger(proposal: &Proposal, tier: Tier, ledger: &mut Ledger, now_ms: u64) -> Option<ProposalResult> {
+    match proposal {
+        Proposal::ListPhraseFlags(body) => Some(route_list(tier, ledger, body)),
+        Proposal::SubscribeLedger(body) => Some(route_subscribe(tier, ledger, body)),
+        Proposal::ObservePhrase(body) => Some(route_observe(tier, ledger, body, now_ms)),
+        _ => None,
+    }
+}
+
+fn route_list(tier: Tier, ledger: &Ledger, body: &ListPhraseFlagsBody) -> ProposalResult {
+    if !tier_reads(tier) {
+        return ProposalResult::err(&body.proposal_id, "not_allowed_for_tier:listPhraseFlags");
+    }
+    match ledger.list_value(body) {
+        Ok(detail) => ProposalResult::ok(&body.proposal_id, Some(detail)),
+        Err(LedgerError::Schema) => ProposalResult::err(&body.proposal_id, "schema"),
+        Err(LedgerError::Quota) => ProposalResult::err(&body.proposal_id, "quota: phrase cap"),
+    }
+}
+
+fn route_subscribe(tier: Tier, ledger: &Ledger, body: &crate::protocol::SubscribeLedgerBody) -> ProposalResult {
+    if !tier_reads(tier) {
+        return ProposalResult::err(&body.proposal_id, "not_allowed_for_tier:subscribeLedger");
+    }
+    ProposalResult::ok(&body.proposal_id, Some(json!({ "seq": ledger.latest_seq() })))
+}
+
+fn route_observe(tier: Tier, ledger: &mut Ledger, body: &ObservePhraseBody, now_ms: u64) -> ProposalResult {
+    if tier != Tier::T3Sidecar {
+        return ProposalResult::err(&body.proposal_id, "not_allowed_for_tier:observePhrase");
+    }
+    let uv = match checked_uv(body.u, body.v, body.w, body.h) {
+        Ok(uv) => uv,
+        Err(()) => return ProposalResult::err(&body.proposal_id, "schema"),
+    };
+    let phrase_id = match ledger.accept_phrase_id(body.phrase_id.clone()) {
+        Ok(id) => id,
+        Err(LedgerError::Quota) => return ProposalResult::err(&body.proposal_id, "quota: phrase cap"),
+        Err(LedgerError::Schema) => return ProposalResult::err(&body.proposal_id, "schema"),
+    };
+    let located = ObservedAppend::Located {
+        phrase_id: phrase_id.clone(),
+        task_id: body.task_id.clone(),
+        query: body.query.clone(),
+        doc_key: body.doc_key.clone(),
+        matched: body.match_info.clone(),
+        uv,
+    };
+    if let Err(err) = ledger.append_observed(tier, located, now_ms) {
+        return ProposalResult::err(&body.proposal_id, err_wire(err));
+    }
+    let seq = if let Some(viewed) = body.viewed {
+        match ledger.append_observed(
+            tier,
+            ObservedAppend::Viewed { phrase_id: phrase_id.clone(), task_id: body.task_id.clone(), viewed, uv },
+            now_ms,
+        ) {
+            Ok(seq) => seq,
+            Err(err) => return ProposalResult::err(&body.proposal_id, err_wire(err)),
+        }
+    } else {
+        ledger.latest_seq()
+    };
+    ProposalResult::ok(&body.proposal_id, Some(json!({ "phraseId": phrase_id, "seq": seq })))
+}
+
+fn tier_reads(tier: Tier) -> bool {
+    matches!(tier, Tier::T1User | Tier::T2Client | Tier::T3Sidecar)
+}
+
+fn err_wire(err: LedgerError) -> &'static str {
+    match err {
+        LedgerError::Quota => "quota: phrase cap",
+        LedgerError::Schema => "schema",
+    }
+}
+
+fn checked_uv(u: Option<f32>, v: Option<f32>, w: Option<f32>, h: Option<f32>) -> Result<Option<UvBox>, ()> {
+    let parts = [u, v, w, h];
+    let n = parts.iter().filter(|part| part.is_some()).count();
+    if n == 0 {
+        return Ok(None);
+    }
+    if n != 4 {
+        return Err(());
+    }
+    let box_ = UvBox { u: u.unwrap(), v: v.unwrap(), w: w.unwrap(), h: h.unwrap() };
+    let finite = [box_.u, box_.v, box_.w, box_.h].iter().all(|n| n.is_finite() && (0.0..=1.0).contains(n));
+    if finite { Ok(Some(box_)) } else { Err(()) }
+}
+
+fn parse_tier(raw: &str) -> Option<Tier> {
+    Some(match raw {
+        "T0" => Tier::T0Physical,
+        "T1" => Tier::T1User,
+        "T2" => Tier::T2Client,
+        "T3" => Tier::T3Sidecar,
+        _ => return None,
+    })
+}
+
+fn cut(text: String) -> String {
+    text.chars().take(TEXT_CAP).collect()
+}
+
+fn kind_wire(kind: LedgerKind) -> &'static str {
+    match kind {
+        LedgerKind::Located => "located",
+        LedgerKind::Viewed => "viewed",
+        LedgerKind::Approved => "approved",
+        LedgerKind::Discarded => "discarded",
+        LedgerKind::Cleared => "cleared",
+        LedgerKind::Mismatch => "mismatch",
+        LedgerKind::Tour => "tour",
+    }
+}
+
+fn viewed_wire(viewed: Option<ViewedTier>) -> &'static str {
+    match viewed {
+        None => "none",
+        Some(ViewedTier::Shown) => "shown",
+        Some(ViewedTier::Dwelled) => "dwelled",
+        Some(ViewedTier::Acknowledged) => "acknowledged",
+    }
+}
+
+fn viewed_rank(viewed: ViewedTier) -> u8 {
+    match viewed {
+        ViewedTier::Shown => 1,
+        ViewedTier::Dwelled => 2,
+        ViewedTier::Acknowledged => 3,
+    }
+}
+
+fn max_viewed(left: Option<ViewedTier>, right: ViewedTier) -> Option<ViewedTier> {
+    match left {
+        Some(current) if viewed_rank(current) >= viewed_rank(right) => Some(current),
+        _ => Some(right),
+    }
+}
+
+fn derive_phrase(events: &[&LedgerEvent]) -> Derived {
+    let mut row = Derived {
+        phrase_id: events.first().map(|ev| ev.phrase_id.clone()).unwrap_or_default(),
+        query: None,
+        matched: None,
+        viewed: None,
+        decision: None,
+        decision_by: None,
+        uv: None,
+        doc_key: None,
+        task_id: None,
+        seq: 0,
+    };
+    let mut non_ack: Option<ViewedTier> = None;
+    for ev in events {
+        row.seq = ev.seq;
+        if ev.query.is_some() {
+            row.query = ev.query.clone();
+        }
+        if ev.matched.is_some() {
+            row.matched = ev.matched.clone();
+        }
+        if ev.uv.is_some() {
+            row.uv = ev.uv;
+        }
+        if ev.doc_key.is_some() {
+            row.doc_key = ev.doc_key.clone();
+        }
+        if ev.task_id.is_some() {
+            row.task_id = ev.task_id.clone();
+        }
+        match ev.kind {
+            LedgerKind::Viewed => match ev.viewed {
+                Some(ViewedTier::Acknowledged) => row.viewed = Some(ViewedTier::Acknowledged),
+                Some(tier @ (ViewedTier::Shown | ViewedTier::Dwelled)) => {
+                    non_ack = max_viewed(non_ack, tier);
+                    if row.viewed != Some(ViewedTier::Acknowledged) {
+                        row.viewed = max_viewed(row.viewed, tier);
+                    }
+                }
+                None => {}
+            },
+            LedgerKind::Cleared => {
+                if ev.viewed == Some(ViewedTier::Acknowledged) {
+                    row.viewed = non_ack;
+                }
+            }
+            LedgerKind::Approved => {
+                row.decision = Some("approved");
+                row.decision_by = Some(ev.by);
+            }
+            LedgerKind::Discarded => {
+                row.decision = Some("discarded");
+                row.decision_by = Some(ev.by);
+            }
+            LedgerKind::Located | LedgerKind::Mismatch | LedgerKind::Tour => {}
+        }
+    }
+    row
+}
+
+fn seqs_to_keep(events: &[&LedgerEvent]) -> HashSet<u64> {
+    let mut keep = HashSet::new();
+    if let Some(last) = events.last() {
+        keep.insert(last.seq);
+    }
+    for pick in [
+        |ev: &&LedgerEvent| ev.query.is_some(),
+        |ev: &&LedgerEvent| ev.matched.is_some(),
+        |ev: &&LedgerEvent| ev.uv.is_some(),
+        |ev: &&LedgerEvent| ev.doc_key.is_some(),
+        |ev: &&LedgerEvent| ev.task_id.is_some(),
+    ] {
+        if let Some(ev) = events.iter().rev().find(|ev| pick(ev)) {
+            keep.insert(ev.seq);
+        }
+    }
+    if let Some(ev) = events.iter().rev().find(|ev| matches!(ev.kind, LedgerKind::Approved | LedgerKind::Discarded)) {
+        keep.insert(ev.seq);
+    }
+    let derived = derive_phrase(events);
+    let non_ack = highest_non_ack(events);
+    if let Some(tier) = non_ack {
+        if let Some(ev) = events.iter().rev().find(|ev| ev.kind == LedgerKind::Viewed && ev.viewed == Some(tier)) {
+            keep.insert(ev.seq);
+        }
+    }
+    if derived.viewed == Some(ViewedTier::Acknowledged) {
+        if let Some(ev) = events
+            .iter()
+            .rev()
+            .find(|ev| ev.kind == LedgerKind::Viewed && ev.viewed == Some(ViewedTier::Acknowledged))
+        {
+            keep.insert(ev.seq);
+        }
+    }
+    keep
+}
+
+fn highest_non_ack(events: &[&LedgerEvent]) -> Option<ViewedTier> {
+    let mut best: Option<ViewedTier> = None;
+    for ev in events {
+        if ev.kind == LedgerKind::Viewed {
+            if let Some(tier @ (ViewedTier::Shown | ViewedTier::Dwelled)) = ev.viewed {
+                best = max_viewed(best, tier);
+            }
+        }
+    }
+    best
+}
+
+fn row_matches(row: &Derived, body: &ListPhraseFlagsBody, decided: Option<Tier>) -> bool {
+    if let Some(task) = &body.task_id {
+        if row.task_id.as_deref() != Some(task.as_str()) {
+            return false;
+        }
+    }
+    if let Some(doc) = &body.doc_key {
+        if row.doc_key.as_deref() != Some(doc.as_str()) {
+            return false;
+        }
+    }
+    if let Some(tier) = decided {
+        if row.decision_by != Some(tier) {
+            return false;
+        }
+    }
+    true
+}
+
+fn event_visible(ev: &LedgerEvent, rows: &[Derived], body: &ListPhraseFlagsBody, decided: Option<Tier>) -> bool {
+    rows.iter().any(|row| row.phrase_id == ev.phrase_id && row_matches(row, body, decided))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::SubscribeLedgerBody;
+    use crate::ui_input::{apply_ui_event, UiEvent};
+
+    fn located(id: &str, conf: f32, snippet: Option<&str>) -> ObservedAppend {
+        ObservedAppend::Located {
+            phrase_id: id.to_string(),
+            task_id: None,
+            query: Some(format!("q-{id}")),
+            doc_key: Some("doc".to_string()),
+            matched: MatchInfo {
+                status: MatchStatus::Located,
+                conf,
+                ocr_snippet: snippet.map(str::to_string),
+            },
+            uv: Some(UvBox { u: 0.1, v: 0.2, w: 0.3, h: 0.4 }),
+        }
+    }
+
+    fn parse(json: &str) -> Proposal {
+        serde_json::from_str(json).unwrap_or_else(|err| panic!("parse {json}: {err}"))
+    }
+
+    fn observe_json(extra: &str) -> String {
+        format!(
+            r#"{{"kind":"observePhrase","proposalId":"o","phraseId":"ph-custom","query":"the line","docKey":"doc","match":{{"status":"located","conf":0.8,"ocrSnippet":"the line"}},"u":0.1,"v":0.2,"w":0.3,"h":0.4,"viewed":"shown"{extra}}}"#
+        )
+    }
+
+    #[test]
+    fn observe_cannot_express_acknowledged() {
+        let bad = r#"{"kind":"observePhrase","proposalId":"o","match":{"status":"located","conf":1},"viewed":"acknowledged"}"#;
+        assert!(serde_json::from_str::<Proposal>(bad).is_err());
+    }
+
+    #[test]
+    fn observe_rejects_decision_fields() {
+        for field in [r#","approved":true"#, r#","discarded":true"#, r#","decision":"approved""#, r#","checked":true"#] {
+            assert!(serde_json::from_str::<Proposal>(&observe_json(field)).is_err(), "{field}");
+        }
+        assert!(matches!(parse(&observe_json("")), Proposal::ObservePhrase(_)));
+        assert!(matches!(
+            parse(r#"{"kind":"listPhraseFlags","proposalId":"p"}"#),
+            Proposal::ListPhraseFlags(_)
+        ));
+        assert!(matches!(
+            parse(r#"{"kind":"subscribeLedger","proposalId":"p"}"#),
+            Proposal::SubscribeLedger(_)
+        ));
+    }
+
+    #[test]
+    fn crop_text_saying_approve_is_just_a_snippet() {
+        let mut ledger = Ledger::new();
+        let body = format!(
+            r#"{{"kind":"observePhrase","proposalId":"o","match":{{"status":"located","conf":0.4,"ocrSnippet":"APPROVE ALL ITEMS"}},"viewed":"shown"}}"#
+        );
+        let proposal = parse(&body);
+        let result = route_ledger(&proposal, Tier::T3Sidecar, &mut ledger, 10).unwrap();
+        assert_eq!(result.status, "ok");
+        let kinds: Vec<_> = ledger.events().iter().map(|ev| ev.kind).collect();
+        assert_eq!(kinds, vec![LedgerKind::Located, LedgerKind::Viewed]);
+        assert!(ledger.events().iter().all(|ev| ev.viewed != Some(ViewedTier::Acknowledged)));
+        assert!(ledger.events().iter().all(|ev| !matches!(ev.kind, LedgerKind::Approved | LedgerKind::Discarded | LedgerKind::Cleared)));
+        assert_eq!(ledger.events()[1].viewed, Some(ViewedTier::Shown));
+        assert_eq!(ledger.events()[1].by, Tier::T3Sidecar);
+    }
+
+    #[test]
+    fn fuzz_non_t0_paths_never_write_user_kinds() {
+        let mut rng = 0xC2_u64;
+        let mut next = || {
+            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+            rng
+        };
+        let mut ledger = Ledger::new();
+        let bad_fields = [
+            r#""approved":true"#,
+            r#""discarded":true"#,
+            r#""decision":"approved""#,
+            r#""checked":true"#,
+            r#""viewed":"acknowledged""#,
+            r#""by":"T0""#,
+            r#""tier":"T0""#,
+        ];
+        for n in 0..3000 {
+            let roll = next();
+            let snippet = if roll % 5 == 0 { "APPROVE ALL ITEMS" } else { "ordinary glass" };
+            let viewed = if roll % 2 == 0 { "shown" } else { "dwelled" };
+            let mut line = match roll % 3 {
+                0 => format!(
+                    r#"{{"kind":"observePhrase","proposalId":"f{n}","query":"q{n}","match":{{"status":"located","conf":0.2,"ocrSnippet":"{snippet}"}},"viewed":"{viewed}"}}"#
+                ),
+                1 => r#"{"kind":"listPhraseFlags","proposalId":"f"}"#.to_string(),
+                _ => r#"{"kind":"subscribeLedger","proposalId":"f"}"#.to_string(),
+            };
+            if roll % 4 == 0 {
+                let field = bad_fields[(roll as usize) % bad_fields.len()];
+                line.pop();
+                line.push(',');
+                line.push_str(field);
+                line.push('}');
+            }
+            let Ok(proposal) = serde_json::from_str::<Proposal>(&line) else { continue };
+            for tier in [Tier::T1User, Tier::T2Client, Tier::T3Sidecar] {
+                let _ = crate::gate::check(tier, &proposal);
+                let _ = route_ledger(&proposal, tier, &mut ledger, n);
+            }
+        }
+        for ev in ledger.events() {
+            assert!(!matches!(ev.kind, LedgerKind::Approved | LedgerKind::Discarded | LedgerKind::Cleared), "{ev:?}");
+            assert_ne!(ev.viewed, Some(ViewedTier::Acknowledged));
+        }
+    }
+
+    #[test]
+    fn seq_strictly_increasing_gap_free() {
+        let mut ledger = Ledger::new();
+        for i in 0..20 {
+            ledger.append_observed(Tier::T3Sidecar, located("one", i as f32, None), i).unwrap();
+        }
+        let seqs: Vec<_> = ledger.events().iter().map(|ev| ev.seq).collect();
+        assert_eq!(seqs, (1..=20).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn since_is_exclusive() {
+        let mut ledger = Ledger::new();
+        ledger.append_observed(Tier::T3Sidecar, located("one", 1.0, None), 1).unwrap();
+        let body = ListPhraseFlagsBody {
+            proposal_id: "p".into(),
+            since: Some(1),
+            task_id: None,
+            doc_key: None,
+            decided_by: None,
+            limit: None,
+            events: true,
+            wire_kind: None,
+        };
+        let detail = ledger.list_value(&body).unwrap();
+        assert!(detail["events"].as_array().unwrap().is_empty());
+        ledger.append_observed(Tier::T3Sidecar, located("one", 2.0, None), 2).unwrap();
+        let detail = ledger.list_value(&body).unwrap();
+        let events = detail["events"].as_array().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["seq"], 2);
+    }
+
+    #[test]
+    fn decided_by_filter() {
+        let mut ledger = Ledger::new();
+        ledger.append_observed(Tier::T3Sidecar, located("one", 1.0, None), 1).unwrap();
+        apply_ui_event(&mut ledger, UiEvent::Approve { phrase_id: "one".into() }, 2).unwrap();
+        ledger.append_observed(Tier::T3Sidecar, located("two", 1.0, None), 3).unwrap();
+        let t0 = list_decided(&ledger, "T0");
+        assert_eq!(t0["rows"].as_array().unwrap().len(), 1);
+        assert_eq!(t0["rows"][0]["phraseId"], "one");
+        assert_eq!(t0["rows"][0]["decisionBy"], "T0");
+        let t3 = list_decided(&ledger, "T3");
+        assert!(t3["rows"].as_array().unwrap().is_empty());
+    }
+
+    fn list_decided(ledger: &Ledger, who: &str) -> Value {
+        ledger
+            .list_value(&ListPhraseFlagsBody {
+                proposal_id: "p".into(),
+                since: None,
+                task_id: None,
+                doc_key: None,
+                decided_by: Some(who.into()),
+                limit: None,
+                events: false,
+                wire_kind: None,
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn two_clients_same_ledger() {
+        let mut ledger = Ledger::new();
+        let observe = parse(&observe_json(""));
+        route_ledger(&observe, Tier::T3Sidecar, &mut ledger, 5).unwrap();
+        let list = parse(r#"{"kind":"listPhraseFlags","proposalId":"l"}"#);
+        let t2 = route_ledger(&list, Tier::T2Client, &mut ledger, 6).unwrap();
+        let t3 = route_ledger(&list, Tier::T3Sidecar, &mut ledger, 6).unwrap();
+        assert_eq!(t2.detail, t3.detail);
+        assert_eq!(t2.detail.as_ref().unwrap()["seq"], t3.detail.as_ref().unwrap()["seq"]);
+    }
+
+    #[test]
+    fn limit_default_and_cap() {
+        let mut ledger = Ledger::new();
+        for i in 0..250 {
+            ledger.append_observed(Tier::T3Sidecar, located("one", i as f32, None), i).unwrap();
+        }
+        let default_rows = ledger
+            .list_value(&ListPhraseFlagsBody {
+                proposal_id: "p".into(),
+                since: None,
+                task_id: None,
+                doc_key: None,
+                decided_by: None,
+                limit: None,
+                events: true,
+                wire_kind: None,
+            })
+            .unwrap();
+        assert_eq!(default_rows["events"].as_array().unwrap().len(), 50);
+        let capped = ledger
+            .list_value(&ListPhraseFlagsBody {
+                proposal_id: "p".into(),
+                since: None,
+                task_id: None,
+                doc_key: None,
+                decided_by: None,
+                limit: Some(201),
+                events: true,
+                wire_kind: None,
+            })
+            .unwrap();
+        assert_eq!(capped["events"].as_array().unwrap().len(), 200);
+        assert_eq!(capped["seq"], 250);
+    }
+
+    #[test]
+    fn phrase_cap_quota() {
+        let mut ledger = Ledger::new();
+        for i in 0..PHRASE_CAP {
+            ledger.append_observed(Tier::T3Sidecar, located(&format!("id-{i}"), 1.0, None), i as u64).unwrap();
+        }
+        let err = ledger.append_observed(Tier::T3Sidecar, located("id-new", 1.0, None), 99).unwrap_err();
+        assert_eq!(err, LedgerError::Quota);
+        let proposal = parse(
+            r#"{"kind":"observePhrase","proposalId":"o","phraseId":"id-extra","match":{"status":"located","conf":1}}"#,
+        );
+        let result = route_ledger(&proposal, Tier::T3Sidecar, &mut ledger, 100).unwrap();
+        assert_eq!(result.error.as_deref(), Some("quota: phrase cap"));
+        ledger.append_observed(Tier::T3Sidecar, located("id-0", 2.0, None), 101).unwrap();
+    }
+
+    #[test]
+    fn compaction_preserves_view() {
+        let mut ledger = Ledger::new();
+        for i in 0..30 {
+            ledger
+                .append_observed(Tier::T3Sidecar, located("one", i as f32, Some("glass")), i)
+                .unwrap();
+        }
+        ledger
+            .append_observed(
+                Tier::T3Sidecar,
+                ObservedAppend::Viewed {
+                    phrase_id: "one".into(),
+                    task_id: None,
+                    viewed: ObservedViewed::Dwelled,
+                    uv: None,
+                },
+                40,
+            )
+            .unwrap();
+        apply_ui_event(&mut ledger, UiEvent::Approve { phrase_id: "one".into() }, 41).unwrap();
+        apply_ui_event(&mut ledger, UiEvent::Discard { phrase_id: "one".into() }, 42).unwrap();
+        let before = ledger.list_value(&bare_list(false)).unwrap();
+        let before_len = ledger.events().len();
+        ledger.compact();
+        let after = ledger.list_value(&bare_list(false)).unwrap();
+        assert_eq!(before, after);
+        assert!(ledger.events().len() < before_len);
+        assert!(ledger.compacted_below() > 0);
+        let old = ledger.list_value(&bare_list(true)).unwrap();
+        assert_eq!(old["compacted"], true);
+        assert!(old["floor"].as_u64().unwrap() >= 1);
+        assert!(old.get("rows").is_some());
+
+        let mut flooded = Ledger::new();
+        for i in 0..=EVENT_CAP {
+            flooded.append_observed(Tier::T3Sidecar, located("one", 1.0, None), i as u64).unwrap();
+        }
+        assert!(flooded.events().len() <= EVENT_CAP);
+        assert!(flooded.compacted_below() > 0);
+    }
+
+    fn bare_list(events: bool) -> ListPhraseFlagsBody {
+        ListPhraseFlagsBody {
+            proposal_id: "p".into(),
+            since: Some(0),
+            task_id: None,
+            doc_key: None,
+            decided_by: None,
+            limit: Some(200),
+            events,
+            wire_kind: None,
+        }
+    }
+
+    #[test]
+    fn subscribe_streams_in_order_and_resumes() {
+        let mut ledger = Ledger::new();
+        for i in 0..3 {
+            ledger.append_observed(Tier::T3Sidecar, located("one", i as f32, None), i).unwrap();
+        }
+        let SubPoll::Lines { lines, through } = ledger.poll_subscriber(0, 100) else {
+            panic!("expected lines");
+        };
+        assert_eq!(lines.len(), 3);
+        let seqs: Vec<u64> = lines
+            .iter()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap()["ledgerEvent"]["seq"].as_u64().unwrap())
+            .collect();
+        assert_eq!(seqs, vec![1, 2, 3]);
+        assert_eq!(through, 3);
+        let SubPoll::Lines { lines, .. } = ledger.poll_subscriber(through, 100) else {
+            panic!("expected lines");
+        };
+        assert!(lines.is_empty());
+        ledger.append_observed(Tier::T3Sidecar, located("one", 4.0, None), 4).unwrap();
+        let SubPoll::Lines { lines, through } = ledger.poll_subscriber(3, 100) else {
+            panic!("expected lines");
+        };
+        assert_eq!(lines.len(), 1);
+        assert_eq!(through, 4);
+        for i in 0..1001 {
+            ledger.append_observed(Tier::T3Sidecar, located("one", i as f32, None), 10 + i).unwrap();
+        }
+        let behind = ledger.poll_subscriber(4, usize::MAX);
+        assert!(matches!(behind, SubPoll::Overflow { .. }));
+    }
+
+    #[test]
+    fn snippets_truncated() {
+        let mut snippet = "x".repeat(500);
+        snippet.push_str("TAIL");
+        let mut ledger = Ledger::new();
+        ledger
+            .append_observed(Tier::T3Sidecar, located("one", 1.0, Some(&snippet)), 1)
+            .unwrap();
+        let stored = ledger.events()[0].matched.as_ref().unwrap().ocr_snippet.as_ref().unwrap();
+        assert_eq!(stored.chars().count(), TEXT_CAP);
+        assert!(!stored.contains("TAIL"));
+    }
+
+    #[test]
+    fn mismatch_never_sets_decision() {
+        let mut ledger = Ledger::new();
+        ledger.append_observed(Tier::T3Sidecar, located("one", 1.0, None), 1).unwrap();
+        apply_ui_event(&mut ledger, UiEvent::Approve { phrase_id: "one".into() }, 2).unwrap();
+        ledger
+            .append_observed(
+                Tier::T3Sidecar,
+                ObservedAppend::Mismatch {
+                    phrase_id: "one".into(),
+                    task_id: None,
+                    matched: MatchInfo { status: MatchStatus::NotFound, conf: 0.1, ocr_snippet: Some("nope".into()) },
+                },
+                3,
+            )
+            .unwrap();
+        let detail = ledger.list_value(&bare_list(false)).unwrap();
+        assert_eq!(detail["rows"][0]["decision"], "approved");
+        assert_eq!(detail["rows"][0]["decisionBy"], "T0");
+        assert_eq!(detail["rows"][0]["match"]["status"], "notFound");
+    }
+
+    #[test]
+    fn uv_all_or_none_and_bounded() {
+        let mut ledger = Ledger::new();
+        let partial = parse(
+            r#"{"kind":"observePhrase","proposalId":"o","match":{"status":"located","conf":1},"u":0.2}"#,
+        );
+        let result = route_ledger(&partial, Tier::T3Sidecar, &mut ledger, 1).unwrap();
+        assert_eq!(result.error.as_deref(), Some("schema"));
+        assert!(ledger.events().is_empty());
+        let high = parse(
+            r#"{"kind":"observePhrase","proposalId":"o","match":{"status":"located","conf":1},"u":0.1,"v":1.5,"w":0.1,"h":0.1}"#,
+        );
+        let result = route_ledger(&high, Tier::T3Sidecar, &mut ledger, 1).unwrap();
+        assert_eq!(result.error.as_deref(), Some("schema"));
+        let ok = parse(
+            r#"{"kind":"observePhrase","proposalId":"o","match":{"status":"ambiguous","conf":0.3},"u":0,"v":0,"w":1,"h":1,"viewed":"dwelled"}"#,
+        );
+        let result = route_ledger(&ok, Tier::T3Sidecar, &mut ledger, 2).unwrap();
+        assert_eq!(result.status, "ok");
+        assert_eq!(result.detail.as_ref().unwrap()["phraseId"], "ph-1");
+    }
+
+    #[test]
+    fn supplied_phrase_id_is_kept() {
+        let mut ledger = Ledger::new();
+        let proposal = parse(&observe_json(""));
+        let result = route_ledger(&proposal, Tier::T3Sidecar, &mut ledger, 1).unwrap();
+        assert_eq!(result.detail.as_ref().unwrap()["phraseId"], "ph-custom");
+    }
+
+    #[test]
+    fn subscribe_reply_carries_latest_seq() {
+        let mut ledger = Ledger::new();
+        ledger.append_observed(Tier::T3Sidecar, located("one", 1.0, None), 1).unwrap();
+        let proposal = parse(r#"{"kind":"subscribeLedger","proposalId":"s","since":0}"#);
+        let result = route_ledger(&proposal, Tier::T1User, &mut ledger, 2).unwrap();
+        assert_eq!(result.detail.as_ref().unwrap()["seq"], 1);
+        let _: SubscribeLedgerBody = match proposal {
+            Proposal::SubscribeLedger(body) => body,
+            _ => unreachable!(),
+        };
+    }
+}

@@ -5,6 +5,7 @@
 use crate::actors::gpu_layout::to_gpu_splat;
 use crate::actors::{ControlActor, PresenceActor, SceneMemory};
 use crate::highlight::{InterestBook, UvBox, MAX_SECS};
+use crate::ledger::Ledger;
 use crate::pipeline::{SplatPipeline, INACTIVE_SPLAT};
 use std::collections::HashMap;
 use std::time::Instant;
@@ -28,6 +29,8 @@ pub struct Registry {
     avatar_owner: Option<String>,
     /// One screen box per presence. The mark fades; the box stays until retire.
     interests: InterestBook,
+    /// Glass-session phrase log. Retiring a presence does not clear it.
+    ledger: Ledger,
 }
 
 impl Registry {
@@ -43,7 +46,16 @@ impl Registry {
             avatar_available: false,
             avatar_owner: None,
             interests: InterestBook::new(),
+            ledger: Ledger::new(),
         }
+    }
+
+    pub fn ledger(&self) -> &Ledger {
+        &self.ledger
+    }
+
+    pub fn ledger_mut(&mut self) -> &mut Ledger {
+        &mut self.ledger
     }
 
     /// The presence must already be in the daemon map. It does not need the body.
