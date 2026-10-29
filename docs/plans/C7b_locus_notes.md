@@ -1,6 +1,15 @@
 # Task C7b — Free-text notes on a highlight, with input sanitation
 
-Paste this whole file into your coding agent. It is self-contained. **Requires C1, C2 and C7 merged.** The overlay note button needs the controls from C3; until C3 lands, the note hotkey is the only way to arm (see step 4).
+Implementation brief. **Requires C7 merged.** C3 has landed, so the note control is in scope now.
+
+Landed constraints, which override step 4 where they differ:
+
+- The word mark stays click-through. The note control is a small layer beside the word, with the same rules as the checkbox: `KeyboardInteractivity::None`, no `get_keyboard`, exclusive zone `-1`. Arming is `UiEvent`, unit-tested. No key grab is installed.
+- `presence note` opens `command.sock` only. It does not fall back to `presence.sock`.
+- `samples()` stays the sixteen pre-C2 kinds. Note kinds go in their own samples list, chained beside `task_samples()`.
+- The skill gains the notes paragraph below, in both copies, and the Task book paragraph stays as it is. Do not merge the rest of the skill files.
+- The live daemon is not restarted. The viseme failure `GLB lacks viseme_aa` is left in place. Tracked `dist` is restored and is not committed.
+- Project persistence uses the C7 store. A note on a phrase with no project is session-only and dies with the ledger.
 
 ## Context
 
