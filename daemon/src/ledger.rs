@@ -10,6 +10,10 @@ use crate::protocol::{
 };
 use serde_json::{json, Value};
 use std::collections::HashSet;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::Path;
 
 pub const PHRASE_CAP: usize = 50;
 pub const EVENT_CAP: usize = 5000;
@@ -116,11 +120,53 @@ pub struct Ledger {
     /// Phrase ids a task holds before any event is written. They count
     /// toward the session cap so two creates cannot pass 50.
     reserved: HashSet<String>,
+    /// Copy of each appended event. Absent unless `attach_watch` opened one.
+    /// Not opened from `new`, so tests that build a ledger do not touch a file.
+    watch: Option<std::fs::File>,
 }
 
 impl Ledger {
     pub fn new() -> Self {
-        Self { events: Vec::new(), next_seq: 1, next_mint: 1, compacted_below: 0, reserved: HashSet::new() }
+        Self {
+            events: Vec::new(),
+            next_seq: 1,
+            next_mint: 1,
+            compacted_below: 0,
+            reserved: HashSet::new(),
+            watch: None,
+        }
+    }
+
+    /// Open an absolute watch path. A relative path is logged and left closed.
+    /// The parent is created mode `0700` when it is missing. The file is mode `0600`.
+    /// A failed open is logged. The ledger itself is unchanged.
+    pub fn attach_watch(&mut self, raw: &str) {
+        self.watch = None;
+        let path = Path::new(raw);
+        if !path.is_absolute() {
+            eprintln!("[ledger] watch path is not absolute: {raw}");
+            return;
+        }
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() && !parent.exists() {
+                if let Err(err) = fs::create_dir_all(parent) {
+                    eprintln!("[ledger] watch parent: {err}");
+                    return;
+                }
+                let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
+            }
+        }
+        match OpenOptions::new().create(true).append(true).mode(0o600).open(path) {
+            Ok(file) => {
+                let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+                self.watch = Some(file);
+            }
+            Err(err) => eprintln!("[ledger] watch open failed: {err}"),
+        }
+    }
+
+    pub fn watch_attached(&self) -> bool {
+        self.watch.is_some()
     }
 
     /// Ledger phrases plus task ids that have no event yet.
@@ -317,7 +363,19 @@ impl Ledger {
         if self.events.len() > EVENT_CAP {
             self.compact();
         }
+        self.append_watch(seq);
         Ok(seq)
+    }
+
+    fn append_watch(&mut self, seq: u64) {
+        let line = {
+            let Some(ev) = self.events.iter().rev().find(|ev| ev.seq == seq) else { return };
+            ev.wire().to_string()
+        };
+        let Some(file) = self.watch.as_mut() else { return };
+        if let Err(err) = writeln!(file, "{line}").and_then(|()| file.flush()) {
+            eprintln!("[ledger] watch append failed: {err}");
+        }
     }
 
     fn compact(&mut self) {
@@ -755,6 +813,8 @@ mod tests {
     use super::*;
     use crate::protocol::SubscribeLedgerBody;
     use crate::ui_input::{apply_ui_event, UiEvent};
+    use std::fs;
+    use std::path::Path;
 
     fn located(id: &str, conf: f32, snippet: Option<&str>) -> ObservedAppend {
         ObservedAppend::Located {
@@ -1185,5 +1245,63 @@ mod tests {
             Proposal::SubscribeLedger(body) => body,
             _ => unreachable!(),
         };
+    }
+
+    #[test]
+    fn export_ledger_is_not_a_proposal() {
+        assert!(serde_json::from_str::<Proposal>(r#"{"kind":"exportLedger"}"#).is_err());
+        assert!(serde_json::from_str::<Proposal>(r#"{"kind":"clearLedger"}"#).is_err());
+    }
+
+    #[test]
+    fn relative_watch_path_is_refused() {
+        let name = "presence-ledger-relative-refused.jsonl";
+        let _ = fs::remove_file(name);
+        let mut ledger = Ledger::new();
+        ledger.attach_watch(name);
+        assert!(!ledger.watch_attached());
+        assert!(!Path::new(name).exists());
+    }
+
+    #[test]
+    fn unopenable_watch_leaves_the_event() {
+        let dir = std::env::temp_dir().join(format!("presence-ledger-j6-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let blocker = dir.join("not-a-directory");
+        fs::write(&blocker, b"x").unwrap();
+        let mut ledger = Ledger::new();
+        ledger.attach_watch(blocker.join("ledger.jsonl").to_str().unwrap());
+        assert!(!ledger.watch_attached());
+        ledger.append_observed(Tier::T3Sidecar, located("ph-1", 0.5, None), 1).unwrap();
+        assert_eq!(ledger.events().len(), 1);
+        assert_eq!(ledger.events()[0].phrase_id, "ph-1");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dismiss_does_not_truncate_the_watch_file() {
+        use crate::registry::Registry;
+        let dir = std::env::temp_dir().join(format!("presence-ledger-j7-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let watch = dir.join("nested").join("ledger.jsonl");
+        let mut reg = Registry::new();
+        reg.ledger_mut().attach_watch(watch.to_str().unwrap());
+        assert!(reg.ledger().watch_attached());
+        let parent_mode = fs::metadata(watch.parent().unwrap()).unwrap().permissions().mode() & 0o777;
+        let file_mode = fs::metadata(&watch).unwrap().permissions().mode() & 0o777;
+        assert_eq!(parent_mode, 0o700);
+        assert_eq!(file_mode, 0o600);
+        reg.spawn_presence("p-1", "ctx", None, None);
+        reg.ledger_mut().append_observed(Tier::T3Sidecar, located("ph-1", 0.9, None), 10).unwrap();
+        let before = fs::read(&watch).unwrap();
+        let line: serde_json::Value = serde_json::from_str(std::str::from_utf8(&before).unwrap().trim()).unwrap();
+        assert_eq!(line["phraseId"], "ph-1");
+        assert_eq!(line["seq"], 1);
+        reg.retire_presence("p-1").unwrap();
+        let after = fs::read(&watch).unwrap();
+        assert_eq!(before, after);
+        assert!(watch.is_file());
+        let _ = fs::remove_dir_all(&dir);
     }
 }
