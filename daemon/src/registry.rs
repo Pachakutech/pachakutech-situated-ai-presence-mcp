@@ -5,6 +5,7 @@
 use crate::actors::gpu_layout::to_gpu_splat;
 use crate::actors::{ControlActor, PresenceActor, SceneMemory};
 use crate::highlight::{InterestBook, UvBox, MAX_SECS};
+use crate::docmap::DocMap;
 use crate::ledger::Ledger;
 use crate::task::TaskBook;
 use crate::pipeline::{SplatPipeline, INACTIVE_SPLAT};
@@ -34,6 +35,8 @@ pub struct Registry {
     ledger: Ledger,
     /// Task queue for this run. Retire dismisses that presence's tasks.
     tasks: TaskBook,
+    /// Passage index. The directory is created on a successful build, not here.
+    docmap: DocMap,
 }
 
 impl Registry {
@@ -51,7 +54,12 @@ impl Registry {
             interests: InterestBook::new(),
             ledger: Ledger::new(),
             tasks: TaskBook::new(),
+            docmap: DocMap::new(crate::docmap::docmap_root_from_env()),
         }
+    }
+
+    pub fn docmap_mut(&mut self) -> &mut DocMap {
+        &mut self.docmap
     }
 
     pub fn ledger(&self) -> &Ledger {

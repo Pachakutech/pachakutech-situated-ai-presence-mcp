@@ -57,6 +57,8 @@ pub fn allowed(tier: Tier, proposal: &Proposal) -> bool {
         Proposal::DraftTask(_) => matches!(tier, Tier::T3Sidecar),
         Proposal::CancelTask(_) | Proposal::QueryTask(_) => matches!(tier, Tier::T1User | Tier::T2Client),
         Proposal::ResolveItem(_) | Proposal::TourSignal(_) => matches!(tier, Tier::T1User | Tier::T2Client),
+        Proposal::BuildDocMap(_) => matches!(tier, Tier::T1User | Tier::T2Client),
+        Proposal::QueryDocMap(_) => matches!(tier, Tier::T1User | Tier::T2Client | Tier::T3Sidecar),
     }
 }
 
@@ -203,7 +205,7 @@ mod tests {
 
     #[test]
     fn t0_has_no_socket_kinds() {
-        for (proposal, kind) in samples().into_iter().chain(ledger_samples()).chain(task_samples()) {
+        for (proposal, kind) in samples().into_iter().chain(ledger_samples()).chain(task_samples()).chain(docmap_samples()) {
             assert!(!allowed(Tier::T0Physical, &proposal), "{kind}");
             let message = check(Tier::T0Physical, &proposal).unwrap_err().error.expect("error string");
             assert!(message.starts_with("not_allowed_for_tier:"), "{message}");
@@ -269,6 +271,37 @@ mod tests {
                 other => panic!("unexpected task kind {other}"),
             }
         }
+        for (proposal, kind) in docmap_samples() {
+            let t1 = allowed(Tier::T1User, &proposal);
+            let t2 = allowed(Tier::T2Client, &proposal);
+            let t3 = allowed(Tier::T3Sidecar, &proposal);
+            match kind {
+                "buildDocMap" => assert!(t1 && t2 && !t3, "{kind}"),
+                "queryDocMap" => assert!(t1 && t2 && t3, "{kind}"),
+                other => panic!("unexpected docmap kind {other}"),
+            }
+        }
+    }
+
+    fn docmap_samples() -> Vec<(Proposal, &'static str)> {
+        const LINES: &[(&str, &str)] = &[
+            (
+                r#"{"kind":"buildDocMap","proposalId":"b","source":{"kind":"file","path":"/tmp/a.txt"}}"#,
+                "buildDocMap",
+            ),
+            (
+                r#"{"kind":"queryDocMap","proposalId":"q","docKey":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","query":"refund"}"#,
+                "queryDocMap",
+            ),
+        ];
+        LINES
+            .iter()
+            .map(|(json, kind)| {
+                let proposal: Proposal = serde_json::from_str(json).unwrap_or_else(|e| panic!("{kind}: {e}"));
+                assert_eq!(proposal.kind_name(), *kind);
+                (proposal, *kind)
+            })
+            .collect()
     }
 
     #[test]

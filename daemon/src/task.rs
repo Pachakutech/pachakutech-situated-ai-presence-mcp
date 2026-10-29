@@ -1302,6 +1302,10 @@ fn route_query(tier: Tier, book: &TaskBook, body: &crate::protocol::QueryTaskBod
 }
 
 impl TaskBook {
+    pub fn task_len(&self) -> usize {
+        self.tasks.len()
+    }
+
     pub fn query_value(&self, task_id: &str) -> Option<Value> {
         let task = self.task(task_id)?;
         let current = task.index;

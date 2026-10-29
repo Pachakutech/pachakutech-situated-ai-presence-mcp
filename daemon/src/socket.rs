@@ -481,6 +481,10 @@ fn dispatch(
         return (result, false);
     }
 
+    if let Some(result) = crate::docmap::route_docmap(&proposal, tier, reg.docmap_mut()) {
+        return (result, false);
+    }
+
     if let Some(result) = route_presence(&proposal, &mut reg, avatar_commands) {
         return (result, false);
     }
@@ -544,6 +548,7 @@ fn dispatch(
         | Proposal::QueryTask(_)
         | Proposal::ResolveItem(_)
         | Proposal::TourSignal(_) => ProposalResult::err(&proposal_id, "unrouted task proposal"),
+        Proposal::BuildDocMap(_) | Proposal::QueryDocMap(_) => ProposalResult::err(&proposal_id, "unrouted docmap proposal"),
     };
     (result, false)
 }

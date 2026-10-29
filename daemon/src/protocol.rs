@@ -174,6 +174,12 @@ pub enum Proposal {
     /// took the page. None of these is a phrase decision.
     #[serde(rename = "tourSignal")]
     TourSignal(TourSignalBody),
+    /// Index one file. The client does not send `docKey`; the daemon hashes the bytes.
+    #[serde(rename = "buildDocMap")]
+    BuildDocMap(BuildDocMapBody),
+    /// Passages from a map. This is not a move and not a decision.
+    #[serde(rename = "queryDocMap")]
+    QueryDocMap(QueryDocMapBody),
 }
 
 /// Applied on the overlay thread after the socket pump. Not a GPU command.
@@ -218,6 +224,8 @@ impl Proposal {
             Proposal::QueryTask(body) => &body.proposal_id,
             Proposal::ResolveItem(body) => &body.proposal_id,
             Proposal::TourSignal(body) => &body.proposal_id,
+            Proposal::BuildDocMap(body) => &body.proposal_id,
+            Proposal::QueryDocMap(body) => &body.proposal_id,
         }
     }
 
@@ -248,6 +256,8 @@ impl Proposal {
             Proposal::QueryTask(_) => "queryTask",
             Proposal::ResolveItem(_) => "resolveItem",
             Proposal::TourSignal(_) => "tourSignal",
+            Proposal::BuildDocMap(_) => "buildDocMap",
+            Proposal::QueryDocMap(_) => "queryDocMap",
         }
     }
 }
@@ -480,6 +490,50 @@ pub struct TourSignalBody {
     /// Why the viewer took the page. Absent on begin and narrationDone.
     #[serde(default)]
     pub reason: Option<PreemptReason>,
+    #[serde(default, rename = "kind")]
+    pub wire_kind: Option<String>,
+}
+
+/// A file the user named. `url` parses so the handler can answer `schema`.
+/// Any other kind, including a window class, does not parse.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "kind")]
+pub enum DocSource {
+    #[serde(rename = "file")]
+    File { path: String },
+    #[serde(rename = "html")]
+    Html { path: String },
+    #[serde(rename = "pdf")]
+    Pdf { path: String },
+    #[serde(rename = "url")]
+    Url {
+        #[serde(default)]
+        path: Option<String>,
+        #[serde(default)]
+        url: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BuildDocMapBody {
+    #[serde(rename = "proposalId")]
+    pub proposal_id: String,
+    pub source: DocSource,
+    #[serde(default, rename = "kind")]
+    pub wire_kind: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QueryDocMapBody {
+    #[serde(rename = "proposalId")]
+    pub proposal_id: String,
+    #[serde(rename = "docKey")]
+    pub doc_key: String,
+    pub query: String,
+    #[serde(default)]
+    pub k: Option<u32>,
     #[serde(default, rename = "kind")]
     pub wire_kind: Option<String>,
 }

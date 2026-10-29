@@ -13,6 +13,7 @@ import { dirname, join } from "node:path";
 import { getBundledDaemonPath } from "./daemonBinary.js";
 import { socketPath } from "./daemonClient.js";
 import { askCommand } from "./command/ask.js";
+import { docmapProposal } from "./command/docmap.js";
 import { runLedger } from "./command/ledger.js";
 import { commandSocketPath, connectCommand, openCommand } from "./command/socket.js";
 import { sendProposal, socketReachable, startDaemon, statusDaemon, stopDaemon } from "./daemonControl.js";
@@ -73,6 +74,10 @@ function usage(): never {
       "                       MCP name: manifestHighlightFromQuery.",
       "  screen-text          Print the daemon's latest screen-text message as JSON.",
       "                       Columns from one capture. Fresh is false when it is quiet.",
+      "  docmap build --kind file|html|pdf --path <file>",
+      "  docmap query --doc <docKey> --query <text> [--k N]",
+      "                       Index a file on command.sock, or read passages from that index.",
+      "                       The map does not move a page and it does not decide.",
       "  ledger [--format jsonl|csv|md] [--events] [--decided-by T0] [--doc <docKey>]",
       "                       [--since <seq>] [--follow] [--out <path>]",
       "                       Read the phrase ledger on command.sock. The table and --out",
@@ -396,6 +401,28 @@ switch (command) {
   case "screen-text":
     process.exit(await screenTextCommand());
     break;
+  case "docmap": {
+    const commandPath = commandSocketPath(socketPath());
+    const body = docmapProposal(process.argv.slice(3));
+    if (!body) {
+      console.error("presence docmap build --kind file|html|pdf --path <file>");
+      console.error("presence docmap query --doc <docKey> --query <text> [--k N]");
+      process.exit(1);
+    }
+    try {
+      const reply = await connectCommand(commandPath, body);
+      if (reply.status !== "ok") {
+        console.error(reply.error ?? "error");
+        process.exit(1);
+      }
+      console.log(JSON.stringify(reply.detail ?? {}));
+      process.exit(0);
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : error);
+      process.exit(1);
+    }
+    break;
+  }
   case "ledger": {
     const commandPath = commandSocketPath(socketPath());
     const session = openCommand(commandPath);
