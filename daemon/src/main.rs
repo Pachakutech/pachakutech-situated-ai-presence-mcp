@@ -12,6 +12,7 @@ mod protocol;
 mod gate;
 mod ledger;
 mod ui_input;
+mod task;
 mod registry;
 mod socket;
 mod speech;

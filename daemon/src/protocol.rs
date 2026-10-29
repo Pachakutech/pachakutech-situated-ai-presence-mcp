@@ -157,6 +157,16 @@ pub enum Proposal {
     /// Sidecar observation. Cannot carry an acknowledgement or a decision.
     #[serde(rename = "observePhrase")]
     ObservePhrase(ObservePhraseBody),
+    /// Open a task. T1 stores origin `user`. T2 stores origin `agent`.
+    #[serde(rename = "createTask")]
+    CreateTask(CreateTaskBody),
+    /// Sidecar draft. Draws nothing and moves nothing until the user confirms.
+    #[serde(rename = "draftTask")]
+    DraftTask(CreateTaskBody),
+    #[serde(rename = "cancelTask")]
+    CancelTask(CancelTaskBody),
+    #[serde(rename = "queryTask")]
+    QueryTask(QueryTaskBody),
 }
 
 /// Applied on the overlay thread after the socket pump. Not a GPU command.
@@ -196,6 +206,9 @@ impl Proposal {
             Proposal::ListPhraseFlags(body) => &body.proposal_id,
             Proposal::SubscribeLedger(body) => &body.proposal_id,
             Proposal::ObservePhrase(body) => &body.proposal_id,
+            Proposal::CreateTask(body) | Proposal::DraftTask(body) => &body.proposal_id,
+            Proposal::CancelTask(body) => &body.proposal_id,
+            Proposal::QueryTask(body) => &body.proposal_id,
         }
     }
 
@@ -220,6 +233,10 @@ impl Proposal {
             Proposal::ListPhraseFlags(_) => "listPhraseFlags",
             Proposal::SubscribeLedger(_) => "subscribeLedger",
             Proposal::ObservePhrase(_) => "observePhrase",
+            Proposal::CreateTask(_) => "createTask",
+            Proposal::DraftTask(_) => "draftTask",
+            Proposal::CancelTask(_) => "cancelTask",
+            Proposal::QueryTask(_) => "queryTask",
         }
     }
 }
@@ -312,6 +329,97 @@ pub struct SubscribeLedgerBody {
     pub proposal_id: String,
     #[serde(default)]
     pub since: Option<u64>,
+    #[serde(default, rename = "kind")]
+    pub wire_kind: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TaskMode {
+    #[serde(rename = "explain")]
+    Explain,
+    #[serde(rename = "select")]
+    Select,
+    #[serde(rename = "approve")]
+    Approve,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TaskPace {
+    #[serde(rename = "flow")]
+    Flow,
+    #[serde(rename = "wait")]
+    Wait,
+}
+
+/// What the client may ask to draw. Approve ignores this field: any value is rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ClientControls {
+    #[serde(rename = "none")]
+    None,
+    #[serde(rename = "check")]
+    Check,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskItemBody {
+    #[serde(rename = "phraseId", default)]
+    pub phrase_id: Option<String>,
+    #[serde(default)]
+    pub query: Option<String>,
+    #[serde(default)]
+    pub narration: Option<String>,
+    #[serde(default)]
+    pub scroll: bool,
+    #[serde(default)]
+    pub page: Option<u32>,
+}
+
+/// Closed body for `createTask` and `draftTask`. `kind` is accepted so the
+/// enum tag is not a schema error. A decision field fails the parse.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateTaskBody {
+    #[serde(rename = "proposalId")]
+    pub proposal_id: String,
+    #[serde(rename = "presenceId")]
+    pub presence_id: String,
+    pub mode: TaskMode,
+    #[serde(default)]
+    pub pace: Option<TaskPace>,
+    #[serde(default)]
+    pub controls: Option<ClientControls>,
+    #[serde(default)]
+    pub prompt: Option<String>,
+    #[serde(rename = "ttlSeconds", default)]
+    pub ttl_seconds: Option<u32>,
+    #[serde(rename = "itemTimeoutSeconds", default)]
+    pub item_timeout_seconds: Option<u32>,
+    #[serde(rename = "docKey", default)]
+    pub doc_key: Option<String>,
+    pub items: Vec<TaskItemBody>,
+    #[serde(default, rename = "kind")]
+    pub wire_kind: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CancelTaskBody {
+    #[serde(rename = "proposalId")]
+    pub proposal_id: String,
+    #[serde(rename = "taskId")]
+    pub task_id: String,
+    #[serde(default, rename = "kind")]
+    pub wire_kind: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QueryTaskBody {
+    #[serde(rename = "proposalId")]
+    pub proposal_id: String,
+    #[serde(rename = "taskId")]
+    pub task_id: String,
     #[serde(default, rename = "kind")]
     pub wire_kind: Option<String>,
 }

@@ -52,3 +52,5 @@ Speech is a local voice on that presence. The mesh has `viseme_*` morph targets,
 The presences and artifacts live in a shared substrate, not in your context window. Another agent can act on the same live state through these tools. You are one actor beside whatever else reads and writes that substrate.
 
 **Phrase ledger.** The daemon keeps an in-memory ledger of phrases on the glass. It is empty when the daemon starts and is not kept across a restart. Read it with `listPhraseFlags`. `acknowledged` and a decision come only from the user's hands. Filter those with `decidedBy: "T0"`. `mismatch` and `notFound` mean the find failed. They are not a rejection. Do not write flags yourself. This server is the list. A client whose context was compacted reads `listPhraseFlags` again and treats that cursor as the phrases and the user's answers. The client may propose a new phrase. It does not rebuild the list from what it still remembers.
+
+**Task book.** A task is a list the daemon holds. Read it with `queryTask`. The checkbox and the yes/no pair are the user's. A client does not write those answers. After a compaction, read the task again.

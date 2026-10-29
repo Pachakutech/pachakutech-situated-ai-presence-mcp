@@ -13,7 +13,7 @@ import { spawnSync } from "node:child_process";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { PresenceDaemon, HighlightResult, PhraseFlagList, PhraseFlagQuery } from "./daemon.js";
+import { PresenceDaemon, HighlightResult, PhraseFlagList, PhraseFlagQuery, CreateTaskInput, TaskView } from "./daemon.js";
 
 const STATE_DIR = join(homedir(), ".local", "state", "pachakutech-presence");
 const LOG_PATH = join(STATE_DIR, "log.jsonl");
@@ -96,5 +96,20 @@ export const daemonStub: PresenceDaemon = {
   async listPhraseFlags(query: PhraseFlagQuery): Promise<PhraseFlagList> {
     record({ kind: "listPhraseFlags", ...query });
     return { seq: 0, rows: [] };
+  },
+
+  async createTask(input: CreateTaskInput): Promise<TaskView> {
+    record({ kind: "createTask", ...input });
+    return { taskId: "tk-stub", state: "pending", items: input.items };
+  },
+
+  async cancelTask(taskId: string): Promise<TaskView> {
+    record({ kind: "cancelTask", taskId });
+    return { taskId, state: "dismissed" };
+  },
+
+  async queryTask(taskId: string): Promise<TaskView> {
+    record({ kind: "queryTask", taskId });
+    return { taskId, state: "pending", items: [] };
   },
 };

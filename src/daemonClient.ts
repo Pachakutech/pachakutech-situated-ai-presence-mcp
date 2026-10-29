@@ -8,7 +8,7 @@
 // is a normal request on this one.
 
 import { createConnection, type Socket } from "node:net";
-import { PresenceDaemon, HighlightResult, PhraseFlagList, PhraseFlagQuery } from "./daemon.js";
+import { PresenceDaemon, HighlightResult, PhraseFlagList, PhraseFlagQuery, CreateTaskInput, TaskView } from "./daemon.js";
 
 export function socketPath(): string {
   if (process.env.PRESENCE_DAEMON_SOCKET) return process.env.PRESENCE_DAEMON_SOCKET;
@@ -174,6 +174,21 @@ export class DaemonClient implements PresenceDaemon {
 
   async retireArtifact(artifactId: string): Promise<void> {
     await this.rpc("retireArtifact", { artifactId });
+  }
+
+  async createTask(input: CreateTaskInput): Promise<TaskView> {
+    const result = await this.rpc("createTask", { ...input });
+    return (result.detail ?? {}) as TaskView;
+  }
+
+  async cancelTask(taskId: string): Promise<TaskView> {
+    const result = await this.rpc("cancelTask", { taskId });
+    return (result.detail ?? {}) as TaskView;
+  }
+
+  async queryTask(taskId: string): Promise<TaskView> {
+    const result = await this.rpc("queryTask", { taskId });
+    return (result.detail ?? {}) as TaskView;
   }
 
   async listPhraseFlags(query: PhraseFlagQuery): Promise<PhraseFlagList> {
