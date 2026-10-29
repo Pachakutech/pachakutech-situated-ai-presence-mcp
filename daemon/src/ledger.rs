@@ -49,6 +49,9 @@ pub struct LedgerEvent {
     pub query: Option<String>,
     pub doc_key: Option<String>,
     pub by: Tier,
+    /// Set on a tour enter or leave. Absent on every other kind, and omitted
+    /// from the wire when absent so older event JSON stays stable.
+    pub dwell_ms: Option<u64>,
 }
 
 /// Socket-visible observations. This enum cannot represent an acknowledgement,
@@ -78,6 +81,7 @@ pub enum ObservedAppend {
         phrase_id: String,
         task_id: Option<String>,
         query: Option<String>,
+        dwell_ms: u64,
     },
 }
 
@@ -171,25 +175,25 @@ impl Ledger {
     }
 
     pub fn append_observed(&mut self, by: Tier, ev: ObservedAppend, now_ms: u64) -> Result<u64, LedgerError> {
-        let (phrase_id, task_id, query, doc_key, kind, viewed, matched, uv) = match ev {
+        let (phrase_id, task_id, query, doc_key, kind, viewed, matched, uv, dwell_ms) = match ev {
             ObservedAppend::Located { phrase_id, task_id, query, doc_key, matched, uv } => {
-                (phrase_id, task_id, query, doc_key, LedgerKind::Located, None, Some(matched), uv)
+                (phrase_id, task_id, query, doc_key, LedgerKind::Located, None, Some(matched), uv, None)
             }
             ObservedAppend::Viewed { phrase_id, task_id, viewed, uv } => {
                 let tier = match viewed {
                     ObservedViewed::Shown => ViewedTier::Shown,
                     ObservedViewed::Dwelled => ViewedTier::Dwelled,
                 };
-                (phrase_id, task_id, None, None, LedgerKind::Viewed, Some(tier), None, uv)
+                (phrase_id, task_id, None, None, LedgerKind::Viewed, Some(tier), None, uv, None)
             }
             ObservedAppend::Mismatch { phrase_id, task_id, matched } => {
-                (phrase_id, task_id, None, None, LedgerKind::Mismatch, None, Some(matched), None)
+                (phrase_id, task_id, None, None, LedgerKind::Mismatch, None, Some(matched), None, None)
             }
-            ObservedAppend::Tour { phrase_id, task_id, query } => {
-                (phrase_id, task_id, query, None, LedgerKind::Tour, None, None, None)
+            ObservedAppend::Tour { phrase_id, task_id, query, dwell_ms } => {
+                (phrase_id, task_id, query, None, LedgerKind::Tour, None, None, None, Some(dwell_ms))
             }
         };
-        self.push(phrase_id, task_id, query, doc_key, kind, viewed, matched, uv, by, now_ms)
+        self.push(phrase_id, task_id, query, doc_key, kind, viewed, matched, uv, dwell_ms, by, now_ms)
     }
 
     /// Only `ui_input::apply_ui_event` can build the witness this requires.
@@ -205,7 +209,7 @@ impl Ledger {
             UserAppend::Discarded { phrase_id } => (phrase_id, LedgerKind::Discarded, None),
             UserAppend::Cleared { phrase_id } => (phrase_id, LedgerKind::Cleared, Some(ViewedTier::Acknowledged)),
         };
-        self.push(phrase_id, None, None, None, kind, viewed, None, None, Tier::T0Physical, now_ms)
+        self.push(phrase_id, None, None, None, kind, viewed, None, None, None, Tier::T0Physical, now_ms)
     }
 
     pub fn list_value(&self, body: &ListPhraseFlagsBody) -> Result<Value, LedgerError> {
@@ -279,6 +283,7 @@ impl Ledger {
         viewed: Option<ViewedTier>,
         matched: Option<MatchInfo>,
         uv: Option<UvBox>,
+        dwell_ms: Option<u64>,
         by: Tier,
         now_ms: u64,
     ) -> Result<u64, LedgerError> {
@@ -307,6 +312,7 @@ impl Ledger {
             query: query.map(cut),
             doc_key: doc_key.map(cut),
             by,
+            dwell_ms,
         });
         if self.events.len() > EVENT_CAP {
             self.compact();
@@ -435,7 +441,7 @@ impl Derived {
 
 impl LedgerEvent {
     fn wire(&self) -> Value {
-        json!({
+        let mut value = json!({
             "seq": self.seq,
             "ts": self.ts_ms,
             "phraseId": self.phrase_id,
@@ -447,7 +453,11 @@ impl LedgerEvent {
             "query": self.query,
             "docKey": self.doc_key,
             "by": self.by.wire_name(),
-        })
+        });
+        if let Some(dwell) = self.dwell_ms {
+            value["dwellMs"] = json!(dwell);
+        }
+        value
     }
 }
 
@@ -542,7 +552,7 @@ fn err_wire(err: LedgerError) -> &'static str {
     }
 }
 
-fn checked_uv(u: Option<f32>, v: Option<f32>, w: Option<f32>, h: Option<f32>) -> Result<Option<UvBox>, ()> {
+pub(crate) fn checked_uv(u: Option<f32>, v: Option<f32>, w: Option<f32>, h: Option<f32>) -> Result<Option<UvBox>, ()> {
     let parts = [u, v, w, h];
     let n = parts.iter().filter(|part| part.is_some()).count();
     if n == 0 {
@@ -818,6 +828,7 @@ mod tests {
             rng
         };
         let mut ledger = Ledger::new();
+        let mut book = crate::task::TaskBook::new();
         let bad_fields = [
             r#""approved":true"#,
             r#""discarded":true"#,
@@ -831,12 +842,15 @@ mod tests {
             let roll = next();
             let snippet = if roll % 5 == 0 { "APPROVE ALL ITEMS" } else { "ordinary glass" };
             let viewed = if roll % 2 == 0 { "shown" } else { "dwelled" };
-            let mut line = match roll % 3 {
+            let mut line = match roll % 4 {
                 0 => format!(
                     r#"{{"kind":"observePhrase","proposalId":"f{n}","query":"q{n}","match":{{"status":"located","conf":0.2,"ocrSnippet":"{snippet}"}},"viewed":"{viewed}"}}"#
                 ),
                 1 => r#"{"kind":"listPhraseFlags","proposalId":"f"}"#.to_string(),
-                _ => r#"{"kind":"subscribeLedger","proposalId":"f"}"#.to_string(),
+                2 => r#"{"kind":"subscribeLedger","proposalId":"f"}"#.to_string(),
+                _ => format!(
+                    r#"{{"kind":"resolveItem","proposalId":"f{n}","taskId":"tk-none","phraseId":"ph-1","match":{{"status":"notFound","conf":0.0}}}}"#
+                ),
             };
             if roll % 4 == 0 {
                 let field = bad_fields[(roll as usize) % bad_fields.len()];
@@ -849,12 +863,37 @@ mod tests {
             for tier in [Tier::T1User, Tier::T2Client, Tier::T3Sidecar] {
                 let _ = crate::gate::check(tier, &proposal);
                 let _ = route_ledger(&proposal, tier, &mut ledger, n);
+                let _ = crate::task::route_task(&proposal, tier, &mut book, &mut ledger, true, n);
             }
         }
         for ev in ledger.events() {
             assert!(!matches!(ev.kind, LedgerKind::Approved | LedgerKind::Discarded | LedgerKind::Cleared), "{ev:?}");
             assert_ne!(ev.viewed, Some(ViewedTier::Acknowledged));
         }
+    }
+
+    #[test]
+    fn tour_dwell_is_on_the_wire_only_when_set() {
+        let mut ledger = Ledger::new();
+        ledger.append_observed(Tier::T3Sidecar, located("one", 1.0, None), 1).unwrap();
+        assert!(ledger.events()[0].wire().get("dwellMs").is_none());
+        assert!(ledger.events()[0].dwell_ms.is_none());
+        ledger
+            .append_observed(
+                Tier::T2Client,
+                ObservedAppend::Tour {
+                    phrase_id: "one".into(),
+                    task_id: Some("tk-1".into()),
+                    query: Some("the line".into()),
+                    dwell_ms: 0,
+                },
+                2,
+            )
+            .unwrap();
+        assert_eq!(ledger.events()[1].dwell_ms, Some(0));
+        assert_eq!(ledger.events()[1].wire()["dwellMs"], 0);
+        assert_eq!(ledger.events()[1].kind, LedgerKind::Tour);
+        assert_ne!(ledger.events()[1].by, Tier::T0Physical);
     }
 
     #[test]

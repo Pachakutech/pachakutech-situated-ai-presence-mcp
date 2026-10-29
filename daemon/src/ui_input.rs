@@ -28,6 +28,11 @@ pub enum ClickTarget {
 pub enum Hotkey {
     Ack,
     Stop,
+    Skip,
+    Back,
+    Pause,
+    Resume,
+    Start,
 }
 
 pub enum UiEvent {

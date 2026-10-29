@@ -78,8 +78,11 @@ cannot name one. `presence.sock` is T2, `command.sock` is T1, and
 The kinds that predate the ledger are allowed only on T2. T1 and T3 answer
 those kinds with `not_allowed_for_tier:<kind>`. `listPhraseFlags` and
 `subscribeLedger` are allowed on T1, T2, and T3. `observePhrase` is allowed
-only on T3. `createTask`, `cancelTask`, and `queryTask` are allowed on T1 and
-T2. `draftTask` is allowed only on T3. If `command.sock` or `sidecar.sock`
+only on T3. `createTask`, `cancelTask`, `queryTask`, `resolveItem`, and
+`tourSignal` are allowed on T1 and T2. `draftTask` is allowed only on T3.
+A tour move is not a socket kind. The daemon permits `WebFind`, `PdfPage`,
+or an 80px `Nudge`, and the locator performs it.
+If `command.sock` or `sidecar.sock`
 cannot be bound, the daemon logs the error and keeps the sockets that did
 bind. `presence.sock` failing is still fatal.
 

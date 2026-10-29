@@ -6,8 +6,8 @@
 use crate::gate::Tier;
 use crate::ledger::{Ledger, LedgerError, ObservedAppend, PHRASE_CAP};
 use crate::protocol::{
-    ClientControls, CreateTaskBody, ListPhraseFlagsBody, ObservedViewed, Proposal, ProposalResult, TaskItemBody, TaskMode,
-    TaskPace,
+    ClientControls, CreateTaskBody, ListPhraseFlagsBody, MatchInfo, MatchStatus, ObservedViewed, Proposal, ProposalResult,
+    ResolveItemBody, TaskItemBody, TaskMode, TaskPace, TourSignalBody, TourSignalKind,
 };
 use crate::ui_input::{apply_ui_event, ClickTarget, Hotkey, UiEvent};
 use serde_json::{json, Value};
@@ -17,6 +17,11 @@ pub const ITEM_CAP: usize = 12;
 pub const DEFAULT_TTL_S: u32 = 120;
 pub const DEFAULT_ITEM_TIMEOUT_S: u32 = 20;
 pub const DWELL_MS: u64 = 1200;
+pub const GRACE_MS: u64 = 1500;
+pub const DOUBLE_CLICK_MS: u64 = 250;
+pub const MOVE_WAIT_MS: u64 = 1500;
+pub const MOVE_ATTEMPTS: u8 = 3;
+pub const NUDGE_PX: i32 = 80;
 pub const CONTROL_PX: i32 = 28;
 pub const CONTROL_GAP: i32 = 8;
 pub const PAIR_GAP: i32 = 4;
@@ -84,6 +89,7 @@ struct Item {
     scroll: bool,
     page: Option<u32>,
     matched: ItemMatch,
+    attempts: u8,
 }
 
 struct Task {
@@ -101,6 +107,38 @@ struct Task {
     doc_key: Option<String>,
     items: Vec<Item>,
     index: usize,
+    entered_ms: Option<u64>,
+    narration_done: bool,
+    last_move_ms: Option<u64>,
+}
+
+/// The only moves a tour may ask the locator to perform. This enum is not
+/// deserialized from a socket.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ViewerMove {
+    WebFind { doc_key: String, opening_phrase: String },
+    PdfPage { doc_key: String, page: u32 },
+    Nudge { dy_px: i32 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoveError {
+    NoActiveTour,
+    DocMismatch,
+    OffGlass,
+    TooSoon,
+    AttemptsExhausted,
+    NeedsStartConfirm,
+}
+
+struct Surface {
+    phrase_id: String,
+    task_id: String,
+    target: ClickTarget,
+    rect: PxRect,
+    z: u64,
+    /// `None` while this is the current control. `Some` is the grace deadline.
+    until_ms: Option<u64>,
 }
 
 struct ShownMark {
@@ -114,11 +152,116 @@ pub struct TaskBook {
     next_task: u64,
     shown: Option<ShownMark>,
     last_click: Option<(u64, String, ClickTarget)>,
+    surfaces: Vec<Surface>,
+    next_z: u64,
+    utterance_stops: u64,
+    stop_pending: bool,
+    moves_issued: u64,
 }
 
 impl TaskBook {
     pub fn new() -> Self {
-        Self { tasks: Vec::new(), next_task: 1, shown: None, last_click: None }
+        Self {
+            tasks: Vec::new(),
+            next_task: 1,
+            shown: None,
+            last_click: None,
+            surfaces: Vec::new(),
+            next_z: 1,
+            utterance_stops: 0,
+            stop_pending: false,
+            moves_issued: 0,
+        }
+    }
+
+    pub fn utterance_stops(&self) -> u64 {
+        self.utterance_stops
+    }
+
+    pub fn moves_issued(&self) -> u64 {
+        self.moves_issued
+    }
+
+    /// The move the active item may take. Does not issue it.
+    pub fn planned_move(&self, task_id: &str) -> Result<ViewerMove, MoveError> {
+        let task = self.task(task_id).ok_or(MoveError::NoActiveTour)?;
+        let item = current_item(task)?;
+        Ok(planned_for(task, item))
+    }
+
+    /// Permit `mv` for the active item. A rejected move is not issued.
+    pub fn authorize(
+        &mut self,
+        task_id: &str,
+        mv: &ViewerMove,
+        on_glass: bool,
+        ledger: &mut Ledger,
+        now_ms: u64,
+    ) -> Result<(), MoveError> {
+        let pos = self.tasks.iter().position(|task| task.id == task_id).ok_or(MoveError::NoActiveTour)?;
+        let item_index = {
+            let task = &self.tasks[pos];
+            let item = current_item(task)?;
+            if !move_fits(task, item, mv, on_glass)? {
+                return Err(MoveError::DocMismatch);
+            }
+            task.index
+        };
+        if let Some(last) = self.tasks[pos].last_move_ms {
+            if now_ms < last.saturating_add(MOVE_WAIT_MS) {
+                return Err(MoveError::TooSoon);
+            }
+        }
+        if self.tasks[pos].items[item_index].attempts >= MOVE_ATTEMPTS {
+            let phrase = self.tasks[pos].items[item_index].phrase_id.clone();
+            self.record_miss(task_id, &phrase, ledger, now_ms);
+            return Err(MoveError::AttemptsExhausted);
+        }
+        self.tasks[pos].items[item_index].attempts += 1;
+        self.tasks[pos].last_move_ms = Some(now_ms);
+        self.moves_issued += 1;
+        Ok(())
+    }
+
+    fn confirm_start(&mut self) -> bool {
+        if let Some(pos) = self.tasks.iter().position(|task| task.state == TaskState::AwaitingStart) {
+            self.tasks[pos].state = TaskState::Pending;
+        } else if let Some(pos) = self.tasks.iter().position(|task| task.state == TaskState::Draft) {
+            if self.runnable_count() < QUEUE_CAP {
+                self.tasks[pos].state = TaskState::Pending;
+            }
+        }
+        self.admit().is_some()
+    }
+
+    fn record_miss(&mut self, task_id: &str, phrase_id: &str, ledger: &mut Ledger, now_ms: u64) {
+        let already = self.task(task_id).and_then(|task| {
+            task.items.iter().find(|item| item.phrase_id == phrase_id).map(|item| item.matched)
+        });
+        if already == Some(ItemMatch::NotFound) {
+            return;
+        }
+        let (query, doc_key) = self
+            .task(task_id)
+            .map(|task| {
+                let query = task.items.iter().find(|item| item.phrase_id == phrase_id).and_then(|item| item.query.clone());
+                (query, task.doc_key.clone())
+            })
+            .unwrap_or((None, None));
+        let _ = ledger.append_observed(
+            Tier::T2Client,
+            ObservedAppend::Located {
+                phrase_id: phrase_id.to_string(),
+                task_id: Some(task_id.to_string()),
+                query,
+                doc_key,
+                matched: MatchInfo { status: MatchStatus::NotFound, conf: 0.0, ocr_snippet: None },
+                uv: None,
+            },
+            now_ms,
+        );
+        let _ = self.note_match(task_id, phrase_id, ItemMatch::NotFound);
+        self.consider(ledger, now_ms);
     }
 
     pub fn len(&self) -> usize {
@@ -188,6 +331,11 @@ impl TaskBook {
             UiEvent::Click { phrase_id, target, ts_ms } => self.on_click(ledger, &phrase_id, target, ts_ms, now_ms),
             UiEvent::Hotkey(Hotkey::Ack) => self.hotkey_ack(ledger, now_ms),
             UiEvent::Hotkey(Hotkey::Stop) => self.stop_active(),
+            UiEvent::Hotkey(Hotkey::Skip) => self.skip(ledger, now_ms),
+            UiEvent::Hotkey(Hotkey::Back) => self.back(ledger, now_ms),
+            UiEvent::Hotkey(Hotkey::Pause) => self.pause_active(),
+            UiEvent::Hotkey(Hotkey::Resume) => self.resume_active(ledger, now_ms),
+            UiEvent::Hotkey(Hotkey::Start) => self.confirm_start(),
             UiEvent::Acknowledge { .. } | UiEvent::Uncheck { .. } | UiEvent::Approve { .. } | UiEvent::Discard { .. } => false,
         }
     }
@@ -289,6 +437,7 @@ impl TaskBook {
         for id in ended {
             self.clear_shown_for(&id);
         }
+        self.consider(ledger, now_ms);
     }
 
     pub fn control_rects(&self, task_id: &str, word: PxRect, out_w: i32, out_h: i32) -> Vec<(ClickTarget, PxRect)> {
@@ -307,13 +456,84 @@ impl TaskBook {
         viewed_name(ledger, phrase_id) == "acknowledged"
     }
 
+    /// Enter the current item of an active task. A second call writes nothing.
+    pub fn begin_task(&mut self, task_id: &str, ledger: &mut Ledger, now_ms: u64) -> Result<(), TaskError> {
+        let pos = self.tasks.iter().position(|task| task.id == task_id).ok_or(TaskError::NoSuchTask)?;
+        if self.tasks[pos].state != TaskState::Active {
+            return Err(TaskError::TaskNotActive);
+        }
+        if self.tasks[pos].entered_ms.is_some() {
+            return Ok(());
+        }
+        self.enter_at(pos, ledger, now_ms);
+        Ok(())
+    }
+
+    pub fn show_controls(&mut self, task_id: &str, word: PxRect, out_w: i32, out_h: i32, now_ms: u64) {
+        self.drop_expired(now_ms);
+        self.surfaces.retain(|surface| !(surface.task_id == task_id && surface.until_ms.is_none()));
+        let Some(task) = self.task(task_id) else { return };
+        if !live(task.state) {
+            return;
+        }
+        let Some(item) = task.items.get(task.index) else { return };
+        if hides_control(item.matched) || task.drawn == DrawnControls::None {
+            return;
+        }
+        let phrase_id = item.phrase_id.clone();
+        let drawn = task.drawn;
+        for (target, rect) in place_controls(word, out_w, out_h, drawn) {
+            let z = self.next_z;
+            self.next_z += 1;
+            self.surfaces.push(Surface {
+                phrase_id: phrase_id.clone(),
+                task_id: task_id.to_string(),
+                target,
+                rect,
+                z,
+                until_ms: None,
+            });
+        }
+        // The previous control stays above the one just placed for the grace window.
+        let raised: Vec<usize> = self
+            .surfaces
+            .iter()
+            .enumerate()
+            .filter(|(_, surface)| surface.task_id == task_id && surface.until_ms.is_some())
+            .map(|(index, _)| index)
+            .collect();
+        for index in raised {
+            self.surfaces[index].z = self.next_z;
+            self.next_z += 1;
+        }
+    }
+
+    /// Phrase id of the topmost live control under the pointer.
+    pub fn hit(&mut self, x: i32, y: i32, now_ms: u64) -> Option<(String, ClickTarget)> {
+        self.drop_expired(now_ms);
+        let mut best: Option<usize> = None;
+        for index in 0..self.surfaces.len() {
+            let (alive, rect, z) = {
+                let surface = &self.surfaces[index];
+                (surface_alive(surface, now_ms), surface.rect, surface.z)
+            };
+            if !alive || x < rect.x || y < rect.y || x >= rect.x + rect.w || y >= rect.y + rect.h {
+                continue;
+            }
+            if best.is_none_or(|prev| z >= self.surfaces[prev].z) {
+                best = Some(index);
+            }
+        }
+        best.map(|index| (self.surfaces[index].phrase_id.clone(), self.surfaces[index].target))
+    }
+
     fn on_click(&mut self, ledger: &mut Ledger, phrase_id: &str, target: ClickTarget, ts_ms: u64, now_ms: u64) -> bool {
-        let key = (ts_ms, phrase_id.to_string(), target);
-        if self.last_click.as_ref().is_some_and(|prev| prev.0 == key.0 && prev.1 == key.1 && prev.2 == key.2) {
+        if self.last_click.as_ref().is_some_and(|prev| {
+            prev.1 == phrase_id && prev.2 == target && ts_ms.saturating_sub(prev.0) < DOUBLE_CLICK_MS
+        }) {
             return false;
         }
-        let Some(task_id) = self.accepts_click(phrase_id, target) else { return false };
-        let _ = task_id;
+        let Some(_task_id) = self.accepts_click(phrase_id, target, now_ms) else { return false };
         let event = match target {
             ClickTarget::Check if viewed_name(ledger, phrase_id) == "acknowledged" => {
                 UiEvent::Uncheck { phrase_id: phrase_id.to_string() }
@@ -325,20 +545,192 @@ impl TaskBook {
         if apply_ui_event(ledger, event, now_ms).is_err() {
             return false;
         }
-        self.last_click = Some(key);
+        self.last_click = Some((ts_ms, phrase_id.to_string(), target));
+        self.consider(ledger, now_ms);
         true
     }
 
-    fn accepts_click(&self, phrase_id: &str, target: ClickTarget) -> Option<String> {
-        let task = self.tasks.iter().find(|task| {
-            live(task.state) && task.items.iter().any(|item| item.phrase_id == phrase_id && !hides_control(item.matched))
-        })?;
+    fn accepts_click(&mut self, phrase_id: &str, target: ClickTarget, now_ms: u64) -> Option<String> {
+        self.drop_expired(now_ms);
+        if let Some(surface) = self.surfaces.iter().rev().find(|surface| {
+            surface_alive(surface, now_ms) && surface.phrase_id == phrase_id && surface.target == target
+        }) {
+            return Some(surface.task_id.clone());
+        }
+        if self.surfaces.iter().any(|surface| surface.phrase_id == phrase_id) {
+            return None;
+        }
+        let task = self.tasks.iter().find(|task| live(task.state))?;
+        let item = task.items.get(task.index)?;
+        if item.phrase_id != phrase_id || hides_control(item.matched) {
+            return None;
+        }
         let drawn_ok = match (task.drawn, target) {
             (DrawnControls::Check, ClickTarget::Check) => true,
             (DrawnControls::YesNo, ClickTarget::Yes | ClickTarget::No) => true,
             _ => false,
         };
         if drawn_ok { Some(task.id.clone()) } else { None }
+    }
+
+    fn skip(&mut self, ledger: &mut Ledger, now_ms: u64) -> bool {
+        if !self.tasks.iter().any(|task| task.state == TaskState::Active) {
+            return false;
+        }
+        self.utterance_stops += 1;
+        self.stop_pending = true;
+        self.advance_active(ledger, now_ms);
+        true
+    }
+
+    fn back(&mut self, ledger: &mut Ledger, now_ms: u64) -> bool {
+        let Some(pos) = self.tasks.iter().position(|task| task.state == TaskState::Active) else {
+            return false;
+        };
+        if self.tasks[pos].index == 0 {
+            return true;
+        }
+        let task_id = self.tasks[pos].id.clone();
+        let dwell = now_ms.saturating_sub(self.tasks[pos].entered_ms.unwrap_or(now_ms));
+        let current = self.tasks[pos].items.get(self.tasks[pos].index).map(|item| (item.phrase_id.clone(), item.query.clone()));
+        if let Some((phrase, query)) = current {
+            self.append_tour(ledger, &phrase, &task_id, query, dwell, now_ms);
+        }
+        self.freeze_current(&task_id, now_ms);
+        self.tasks[pos].index -= 1;
+        self.enter_at(pos, ledger, now_ms);
+        true
+    }
+
+    fn pause_active(&mut self) -> bool {
+        let Some(task) = self.tasks.iter_mut().find(|task| task.state == TaskState::Active) else {
+            return false;
+        };
+        task.state = TaskState::Paused;
+        true
+    }
+
+    fn resume_active(&mut self, ledger: &mut Ledger, now_ms: u64) -> bool {
+        let Some(pos) = self.tasks.iter().position(|task| task.state == TaskState::Paused) else {
+            return false;
+        };
+        self.tasks[pos].state = TaskState::Active;
+        self.consider(ledger, now_ms);
+        true
+    }
+
+    fn consider(&mut self, ledger: &mut Ledger, now_ms: u64) {
+        let snapshot = {
+            let Some(task) = self.tasks.iter().find(|task| task.state == TaskState::Active) else { return };
+            let Some(entered) = task.entered_ms else { return };
+            let Some(item) = task.items.get(task.index) else { return };
+            (task.pace, task.mode, entered, task.narration_done, task.item_timeout_seconds, item.phrase_id.clone(), item.matched)
+        };
+        let (pace, mode, entered, narration_done, timeout_s, phrase, matched) = snapshot;
+        let timed_out = now_ms >= entered.saturating_add(u64::from(timeout_s) * 1000);
+        let miss = hides_control(matched);
+        let advance = match pace {
+            TaskPace::Wait => timed_out || (!miss && item_answered(ledger, mode, &phrase)),
+            TaskPace::Flow => miss || (narration_done && self.dwell_floor_met(&phrase, entered, now_ms)),
+        };
+        if advance {
+            self.advance_active(ledger, now_ms);
+        }
+    }
+
+    fn dwell_floor_met(&self, phrase: &str, entered: u64, now_ms: u64) -> bool {
+        if let Some(shown) = &self.shown {
+            if shown.phrase_id == phrase {
+                return shown.dwelled || now_ms.saturating_sub(shown.at_ms) >= DWELL_MS;
+            }
+        }
+        now_ms.saturating_sub(entered) >= DWELL_MS
+    }
+
+    fn advance_active(&mut self, ledger: &mut Ledger, now_ms: u64) {
+        let Some(pos) = self.tasks.iter().position(|task| task.state == TaskState::Active) else { return };
+        let task_id = self.tasks[pos].id.clone();
+        let dwell = now_ms.saturating_sub(self.tasks[pos].entered_ms.unwrap_or(now_ms));
+        let current = self.tasks[pos].items.get(self.tasks[pos].index).map(|item| (item.phrase_id.clone(), item.query.clone()));
+        if let Some((phrase, query)) = current {
+            self.append_tour(ledger, &phrase, &task_id, query, dwell, now_ms);
+        }
+        self.freeze_current(&task_id, now_ms);
+        if self.tasks[pos].index + 1 >= self.tasks[pos].items.len() {
+            self.tasks[pos].state = TaskState::Done;
+            self.tasks[pos].entered_ms = None;
+            self.tasks[pos].narration_done = false;
+            self.clear_shown_for(&task_id);
+            return;
+        }
+        self.tasks[pos].index += 1;
+        self.enter_at(pos, ledger, now_ms);
+    }
+
+    fn enter_at(&mut self, pos: usize, ledger: &mut Ledger, now_ms: u64) {
+        self.tasks[pos].entered_ms = Some(now_ms);
+        self.tasks[pos].narration_done = false;
+        let task_id = self.tasks[pos].id.clone();
+        let current = self.tasks[pos].items.get(self.tasks[pos].index).map(|item| (item.phrase_id.clone(), item.query.clone()));
+        if let Some((phrase, query)) = current {
+            self.append_tour(ledger, &phrase, &task_id, query, 0, now_ms);
+        }
+    }
+
+    fn append_tour(
+        &mut self,
+        ledger: &mut Ledger,
+        phrase_id: &str,
+        task_id: &str,
+        query: Option<String>,
+        dwell_ms: u64,
+        now_ms: u64,
+    ) {
+        let _ = ledger.append_observed(
+            Tier::T2Client,
+            ObservedAppend::Tour {
+                phrase_id: phrase_id.to_string(),
+                task_id: Some(task_id.to_string()),
+                query,
+                dwell_ms,
+            },
+            now_ms,
+        );
+    }
+
+    fn freeze_current(&mut self, task_id: &str, now_ms: u64) {
+        let until = now_ms.saturating_add(GRACE_MS);
+        for surface in &mut self.surfaces {
+            if surface.task_id == task_id && surface.until_ms.is_none() {
+                surface.until_ms = Some(until);
+            }
+        }
+    }
+
+    fn drop_expired(&mut self, now_ms: u64) {
+        self.surfaces.retain(|surface| surface_alive(surface, now_ms));
+    }
+
+    fn mark_narration(&mut self, task_id: &str, ledger: &mut Ledger, now_ms: u64) -> Result<(), TaskError> {
+        let pos = self.tasks.iter().position(|task| task.id == task_id).ok_or(TaskError::NoSuchTask)?;
+        if !live(self.tasks[pos].state) {
+            return Err(TaskError::TaskNotActive);
+        }
+        self.tasks[pos].narration_done = true;
+        self.stop_pending = false;
+        if self.tasks[pos].state == TaskState::Active {
+            self.consider(ledger, now_ms);
+        }
+        Ok(())
+    }
+
+    fn preempt_task(&mut self, task_id: &str) -> Result<(), TaskError> {
+        let task = self.task_mut(task_id).ok_or(TaskError::NoSuchTask)?;
+        if task.state != TaskState::Active {
+            return Err(TaskError::TaskNotActive);
+        }
+        task.state = TaskState::Paused;
+        Ok(())
     }
 
     fn hotkey_ack(&mut self, ledger: &mut Ledger, now_ms: u64) -> bool {
@@ -350,7 +742,11 @@ impl TaskBook {
         if hides_control(self.item_match(&phrase).unwrap_or(ItemMatch::Pending)) {
             return false;
         }
-        apply_ui_event(ledger, UiEvent::Acknowledge { phrase_id: phrase }, now_ms).is_ok()
+        if apply_ui_event(ledger, UiEvent::Acknowledge { phrase_id: phrase }, now_ms).is_err() {
+            return false;
+        }
+        self.consider(ledger, now_ms);
+        true
     }
 
     fn stop_active(&mut self) -> bool {
@@ -442,8 +838,66 @@ fn open_for_end(state: TaskState) -> bool {
     )
 }
 
+fn current_item(task: &Task) -> Result<&Item, MoveError> {
+    match task.state {
+        TaskState::AwaitingStart => Err(MoveError::NeedsStartConfirm),
+        TaskState::Active => task.items.get(task.index).ok_or(MoveError::NoActiveTour),
+        _ => Err(MoveError::NoActiveTour),
+    }
+}
+
+fn planned_for(task: &Task, item: &Item) -> ViewerMove {
+    let doc_key = task.doc_key.clone().unwrap_or_default();
+    if let Some(page) = item.page {
+        ViewerMove::PdfPage { doc_key, page }
+    } else {
+        ViewerMove::WebFind { doc_key, opening_phrase: item.query.clone().unwrap_or_default() }
+    }
+}
+
+fn move_fits(task: &Task, item: &Item, mv: &ViewerMove, on_glass: bool) -> Result<bool, MoveError> {
+    match mv {
+        ViewerMove::Nudge { dy_px } => {
+            if !on_glass || dy_px.abs() != NUDGE_PX {
+                return Err(MoveError::OffGlass);
+            }
+            Ok(true)
+        }
+        ViewerMove::WebFind { doc_key, opening_phrase } => {
+            Ok(task.doc_key.as_deref() == Some(doc_key.as_str()) && item.query.as_deref() == Some(opening_phrase.as_str()))
+        }
+        ViewerMove::PdfPage { doc_key, page } => {
+            Ok(task.doc_key.as_deref() == Some(doc_key.as_str()) && item.page == Some(*page))
+        }
+    }
+}
+
+/// Type-level hold: a new variant fails to compile here.
+pub fn viewer_move_slot(mv: &ViewerMove) -> u8 {
+    match mv {
+        ViewerMove::WebFind { .. } => 0,
+        ViewerMove::PdfPage { .. } => 1,
+        ViewerMove::Nudge { .. } => 2,
+    }
+}
+
+pub fn keyboard_grab_installed() -> bool {
+    false
+}
+
 fn hides_control(matched: ItemMatch) -> bool {
     matches!(matched, ItemMatch::NotFound | ItemMatch::Ambiguous)
+}
+
+fn surface_alive(surface: &Surface, now_ms: u64) -> bool {
+    surface.until_ms.is_none_or(|until| now_ms < until)
+}
+
+fn item_answered(ledger: &Ledger, mode: TaskMode, phrase_id: &str) -> bool {
+    match mode {
+        TaskMode::Approve => decision_set(ledger, phrase_id),
+        TaskMode::Explain | TaskMode::Select => viewed_name(ledger, phrase_id) == "acknowledged",
+    }
 }
 
 fn resolve_presentation(mode: TaskMode, controls: Option<ClientControls>) -> Result<DrawnControls, TaskError> {
@@ -534,6 +988,25 @@ fn viewed_name(ledger: &Ledger, phrase_id: &str) -> &'static str {
     }
 }
 
+fn decision_set(ledger: &Ledger, phrase_id: &str) -> bool {
+    let Ok(value) = ledger.list_value(&ListPhraseFlagsBody {
+        proposal_id: "view".into(),
+        since: None,
+        task_id: None,
+        doc_key: None,
+        decided_by: None,
+        limit: None,
+        events: false,
+        wire_kind: None,
+    }) else {
+        return false;
+    };
+    let Some(rows) = value.get("rows").and_then(|rows| rows.as_array()) else { return false };
+    rows.iter().any(|row| {
+        row.get("phraseId").and_then(|id| id.as_str()) == Some(phrase_id) && row.get("decision").and_then(|d| d.as_str()).is_some()
+    })
+}
+
 fn err_wire(err: TaskError) -> &'static str {
     match err {
         TaskError::Schema => "schema",
@@ -568,6 +1041,8 @@ pub fn route_task(
         Proposal::DraftTask(body) => Some(route_create(tier, book, ledger, body, presence_alive, now_ms, true)),
         Proposal::CancelTask(body) => Some(route_cancel(tier, book, body)),
         Proposal::QueryTask(body) => Some(route_query(tier, book, body)),
+        Proposal::ResolveItem(body) => Some(route_resolve(tier, book, ledger, body, now_ms)),
+        Proposal::TourSignal(body) => Some(route_signal(tier, book, ledger, body, now_ms)),
         _ => None,
     }
 }
@@ -634,11 +1109,15 @@ fn insert_task(
             scroll: raw.scroll,
             page: raw.page,
             matched: ItemMatch::Pending,
+            attempts: 0,
         });
     }
     let id = book.mint_task_id();
+    let scroll = body.items.iter().any(|item| item.scroll);
     let (origin, state) = if draft {
         (Origin::SidecarDraft, TaskState::Draft)
+    } else if tier == Tier::T2Client && scroll {
+        (Origin::Agent, TaskState::AwaitingStart)
     } else if tier == Tier::T1User {
         (Origin::User, TaskState::Pending)
     } else {
@@ -659,6 +1138,9 @@ fn insert_task(
         doc_key: body.doc_key.as_ref().map(|text| cut(text, crate::ledger::TEXT_CAP)),
         items,
         index: 0,
+        entered_ms: None,
+        narration_done: false,
+        last_move_ms: None,
     });
     Ok(id)
 }
@@ -725,6 +1207,90 @@ fn route_cancel(tier: Tier, book: &mut TaskBook, body: &crate::protocol::CancelT
     ProposalResult::ok(&body.proposal_id, book.query_value(&id))
 }
 
+fn route_resolve(
+    tier: Tier,
+    book: &mut TaskBook,
+    ledger: &mut Ledger,
+    body: &ResolveItemBody,
+    now_ms: u64,
+) -> ProposalResult {
+    if !matches!(tier, Tier::T1User | Tier::T2Client) {
+        return ProposalResult::err(&body.proposal_id, "not_allowed_for_tier:resolveItem");
+    }
+    let uv = match crate::ledger::checked_uv(body.u, body.v, body.w, body.h) {
+        Ok(uv) => uv,
+        Err(()) => return ProposalResult::err(&body.proposal_id, "schema"),
+    };
+    let Some(task) = book.task(&body.task_id) else {
+        return ProposalResult::err(&body.proposal_id, "no_such_task");
+    };
+    if !live(task.state) {
+        return ProposalResult::err(&body.proposal_id, "task_not_active");
+    }
+    let Some(item) = task.items.iter().find(|item| item.phrase_id == body.phrase_id) else {
+        return ProposalResult::err(&body.proposal_id, "schema");
+    };
+    let query = item.query.clone();
+    let doc_key = task.doc_key.clone();
+    let active = task.state == TaskState::Active;
+    let matched = match body.match_info.status {
+        MatchStatus::Located => ItemMatch::Located,
+        MatchStatus::Ambiguous => ItemMatch::Ambiguous,
+        MatchStatus::NotFound => ItemMatch::NotFound,
+    };
+    let located = ObservedAppend::Located {
+        phrase_id: body.phrase_id.clone(),
+        task_id: Some(body.task_id.clone()),
+        query,
+        doc_key,
+        matched: MatchInfo {
+            status: body.match_info.status,
+            conf: body.match_info.conf,
+            ocr_snippet: body.match_info.ocr_snippet.clone(),
+        },
+        uv,
+    };
+    if ledger.append_observed(tier, located, now_ms).is_err() {
+        return ProposalResult::err(&body.proposal_id, "schema");
+    }
+    if book.note_match(&body.task_id, &body.phrase_id, matched).is_err() {
+        return ProposalResult::err(&body.proposal_id, "schema");
+    }
+    if active {
+        book.consider(ledger, now_ms);
+    }
+    ProposalResult::ok(&body.proposal_id, book.query_value(&body.task_id))
+}
+
+fn route_signal(
+    tier: Tier,
+    book: &mut TaskBook,
+    ledger: &mut Ledger,
+    body: &TourSignalBody,
+    now_ms: u64,
+) -> ProposalResult {
+    if !matches!(tier, Tier::T1User | Tier::T2Client) {
+        return ProposalResult::err(&body.proposal_id, "not_allowed_for_tier:tourSignal");
+    }
+    if book.task(&body.task_id).is_none() {
+        return ProposalResult::err(&body.proposal_id, "no_such_task");
+    }
+    let result = match body.signal {
+        TourSignalKind::Begin => book.begin_task(&body.task_id, ledger, now_ms),
+        TourSignalKind::NarrationDone => book.mark_narration(&body.task_id, ledger, now_ms),
+        TourSignalKind::Preempt => {
+            match body.reason {
+                Some(crate::protocol::PreemptReason::Page | crate::protocol::PreemptReason::Pointer) | None => {}
+            }
+            book.preempt_task(&body.task_id)
+        }
+    };
+    match result {
+        Ok(()) => ProposalResult::ok(&body.proposal_id, book.query_value(&body.task_id)),
+        Err(err) => ProposalResult::err(&body.proposal_id, err_wire(err)),
+    }
+}
+
 fn route_query(tier: Tier, book: &TaskBook, body: &crate::protocol::QueryTaskBody) -> ProposalResult {
     if !matches!(tier, Tier::T1User | Tier::T2Client) {
         return ProposalResult::err(&body.proposal_id, "not_allowed_for_tier:queryTask");
@@ -785,6 +1351,7 @@ impl TaskBook {
             "docKey": task.doc_key,
             "index": task.index,
             "items": items,
+            "stopUtterance": self.stop_pending,
         }))
     }
 
@@ -1120,8 +1687,8 @@ mod tests {
         assert_eq!(row(&opened.ledger, &opened.phrase)["viewed"], "acknowledged");
         assert!(opened.book.handle_ui(
             &mut opened.ledger,
-            UiEvent::Click { phrase_id: opened.phrase.clone(), target: ClickTarget::Check, ts_ms: 1400 },
-            1400,
+            UiEvent::Click { phrase_id: opened.phrase.clone(), target: ClickTarget::Check, ts_ms: 2300 },
+            2300,
         ));
         assert_eq!(opened.ledger.events().iter().filter(|ev| ev.kind == LedgerKind::Cleared).count(), 1);
         assert_eq!(row(&opened.ledger, &opened.phrase)["viewed"], "dwelled");
@@ -1414,5 +1981,616 @@ mod tests {
         assert_eq!(view["controls"], "none");
         assert_eq!(view["origin"], "agent");
         assert_eq!(view["items"][0]["match"], "pending");
+    }
+
+    fn item_ids(book: &TaskBook, id: &str) -> Vec<String> {
+        book_query(book, id)["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["phraseId"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    fn signal(book: &mut TaskBook, ledger: &mut Ledger, id: &str, name: &str, now: u64) -> ProposalResult {
+        let line = format!(r#"{{"kind":"tourSignal","proposalId":"t","taskId":"{id}","signal":"{name}"}}"#);
+        route_task(&parse(&line), Tier::T2Client, book, ledger, true, now).unwrap()
+    }
+
+    fn resolve(book: &mut TaskBook, ledger: &mut Ledger, id: &str, phrase: &str, status: &str, extra: &str, tier: Tier, now: u64) -> ProposalResult {
+        let line = format!(
+            r#"{{"kind":"resolveItem","proposalId":"r","taskId":"{id}","phraseId":"{phrase}","match":{{"status":"{status}","conf":0.4}}{extra}}}"#
+        );
+        route_task(&parse(&line), tier, book, ledger, true, now).unwrap()
+    }
+
+    fn click(book: &mut TaskBook, ledger: &mut Ledger, phrase: &str, target: ClickTarget, ts: u64) -> bool {
+        book.handle_ui(ledger, UiEvent::Click { phrase_id: phrase.to_string(), target, ts_ms: ts }, ts)
+    }
+
+    #[test]
+    fn e6_wait_timeout_advances_undecided() {
+        let mut opened = open(&task_line("select", r#","itemTimeoutSeconds":1"#, r#"{"query":"one"},{"query":"two"}"#));
+        assert_eq!(signal(&mut opened.book, &mut opened.ledger, &opened.id, "begin", 0).status, "ok");
+        assert_eq!(signal(&mut opened.book, &mut opened.ledger, &opened.id, "begin", 1).status, "ok");
+        assert_eq!(opened.ledger.events().iter().filter(|ev| ev.kind == LedgerKind::Tour).count(), 1);
+        assert_eq!(opened.ledger.events()[0].dwell_ms, Some(0));
+        opened.book.tick(&mut opened.ledger, 999);
+        assert_eq!(book_query(&opened.book, &opened.id)["index"], 0);
+        opened.book.tick(&mut opened.ledger, 1000);
+        assert_eq!(book_query(&opened.book, &opened.id)["index"], 1);
+        assert_eq!(book_query(&opened.book, &opened.id)["state"], "active");
+        let phrase = item_ids(&opened.book, &opened.id)[0].clone();
+        assert_eq!(row(&opened.ledger, &phrase)["viewed"], "none");
+        assert!(row(&opened.ledger, &phrase)["decision"].is_null());
+        assert!(opened.ledger.events().iter().all(|ev| ev.viewed != Some(ViewedTier::Acknowledged)));
+        assert!(opened.ledger.events().iter().all(|ev| !matches!(ev.kind, LedgerKind::Approved | LedgerKind::Discarded | LedgerKind::Cleared)));
+    }
+
+    #[test]
+    fn e7_wait_click_advances() {
+        let mut opened = open(&task_line("select", "", r#"{"query":"one"},{"query":"two"}"#));
+        signal(&mut opened.book, &mut opened.ledger, &opened.id, "begin", 0);
+        let ids = item_ids(&opened.book, &opened.id);
+        assert!(click(&mut opened.book, &mut opened.ledger, &ids[0], ClickTarget::Check, 50));
+        assert_eq!(book_query(&opened.book, &opened.id)["index"], 1);
+        assert_eq!(book_query(&opened.book, &opened.id)["state"], "active");
+        assert_eq!(row(&opened.ledger, &ids[0])["viewed"], "acknowledged");
+    }
+
+    #[test]
+    fn e8_flow_waits_for_narration_and_dwell() {
+        let mut opened = open(&task_line("explain", "", r#"{"query":"one"},{"query":"two"}"#));
+        signal(&mut opened.book, &mut opened.ledger, &opened.id, "begin", 0);
+        opened.book.note_shown(&mut opened.ledger, &opened.phrase, 0);
+        opened.book.tick(&mut opened.ledger, 1200);
+        assert_eq!(book_query(&opened.book, &opened.id)["index"], 0);
+        signal(&mut opened.book, &mut opened.ledger, &opened.id, "narrationDone", 1200);
+        assert_eq!(book_query(&opened.book, &opened.id)["index"], 1);
+
+        let mut opened = open(&task_line("explain", "", r#"{"query":"one"},{"query":"two"}"#));
+        signal(&mut opened.book, &mut opened.ledger, &opened.id, "begin", 0);
+        opened.book.note_shown(&mut opened.ledger, &opened.phrase, 0);
+        signal(&mut opened.book, &mut opened.ledger, &opened.id, "narrationDone", 0);
+        opened.book.tick(&mut opened.ledger, 1199);
+        assert_eq!(book_query(&opened.book, &opened.id)["index"], 0);
+        opened.book.tick(&mut opened.ledger, 1200);
+        assert_eq!(book_query(&opened.book, &opened.id)["index"], 1);
+        assert_eq!(book_query(&opened.book, &opened.id)["state"], "active");
+    }
+
+    #[test]
+    fn e9_flow_check_click_does_not_pause() {
+        let mut opened = open(&task_line("explain", r#","controls":"check""#, r#"{"query":"one"},{"query":"two"}"#));
+        signal(&mut opened.book, &mut opened.ledger, &opened.id, "begin", 0);
+        let ids = item_ids(&opened.book, &opened.id);
+        assert!(click(&mut opened.book, &mut opened.ledger, &ids[0], ClickTarget::Check, 10));
+        assert_eq!(row(&opened.ledger, &ids[0])["viewed"], "acknowledged");
+        assert_eq!(book_query(&opened.book, &opened.id)["state"], "active");
+        assert_eq!(book_query(&opened.book, &opened.id)["index"], 0);
+        signal(&mut opened.book, &mut opened.ledger, &opened.id, "narrationDone", 10);
+        opened.book.tick(&mut opened.ledger, 1199);
+        assert_eq!(book_query(&opened.book, &opened.id)["index"], 0);
+        opened.book.tick(&mut opened.ledger, 1200);
+        assert_eq!(book_query(&opened.book, &opened.id)["index"], 1);
+        assert_eq!(book_query(&opened.book, &opened.id)["state"], "active");
+    }
+
+    #[test]
+    fn e10_flow_approve_leaves_the_rest_null() {
+        let mut opened = open(&task_line("approve", r#","pace":"flow""#, r#"{"query":"one"},{"query":"two"}"#));
+        signal(&mut opened.book, &mut opened.ledger, &opened.id, "begin", 0);
+        let ids = item_ids(&opened.book, &opened.id);
+        assert!(click(&mut opened.book, &mut opened.ledger, &ids[0], ClickTarget::Yes, 10));
+        assert_eq!(book_query(&opened.book, &opened.id)["index"], 0);
+        assert_eq!(row(&opened.ledger, &ids[0])["decision"], "approved");
+        signal(&mut opened.book, &mut opened.ledger, &opened.id, "narrationDone", 10);
+        opened.book.tick(&mut opened.ledger, 1200);
+        assert_eq!(book_query(&opened.book, &opened.id)["index"], 1);
+        signal(&mut opened.book, &mut opened.ledger, &opened.id, "narrationDone", 1200);
+        opened.book.tick(&mut opened.ledger, 2399);
+        assert_eq!(book_query(&opened.book, &opened.id)["index"], 1);
+        opened.book.tick(&mut opened.ledger, 2400);
+        assert_eq!(book_query(&opened.book, &opened.id)["state"], "done");
+        assert_eq!(row(&opened.ledger, &ids[0])["decision"], "approved");
+        assert!(row(&opened.ledger, &ids[1])["decision"].is_null());
+    }
+
+    #[test]
+    fn e11_pause_resume_skip_back() {
+        let mut opened = open(&task_line("explain", "", r#"{"query":"one"},{"query":"two"}"#));
+        signal(&mut opened.book, &mut opened.ledger, &opened.id, "begin", 0);
+        let before_pause = opened.ledger.events().len();
+        assert!(opened.book.handle_ui(&mut opened.ledger, UiEvent::Hotkey(Hotkey::Pause), 10));
+        assert_eq!(book_query(&opened.book, &opened.id)["state"], "paused");
+        assert_eq!(opened.ledger.events().len(), before_pause);
+        assert_eq!(opened.book.utterance_stops(), 0);
+        assert!(opened.book.handle_ui(&mut opened.ledger, UiEvent::Hotkey(Hotkey::Resume), 20));
+        assert_eq!(book_query(&opened.book, &opened.id)["state"], "active");
+        assert_eq!(book_query(&opened.book, &opened.id)["index"], 0);
+        let kept = opened.ledger.events()[0].seq;
+        assert!(opened.book.handle_ui(&mut opened.ledger, UiEvent::Hotkey(Hotkey::Skip), 30));
+        assert_eq!(opened.book.utterance_stops(), 1);
+        assert_eq!(book_query(&opened.book, &opened.id)["stopUtterance"], true);
+        assert_eq!(book_query(&opened.book, &opened.id)["index"], 1);
+        let after_skip = opened.ledger.events().len();
+        assert!(opened.book.handle_ui(&mut opened.ledger, UiEvent::Hotkey(Hotkey::Back), 40));
+        assert_eq!(book_query(&opened.book, &opened.id)["index"], 0);
+        assert!(opened.ledger.events().len() > after_skip);
+        assert!(opened.ledger.events().iter().any(|ev| ev.seq == kept));
+        assert!(opened.book.handle_ui(&mut opened.ledger, UiEvent::Hotkey(Hotkey::Back), 50));
+        assert_eq!(book_query(&opened.book, &opened.id)["index"], 0);
+    }
+
+    #[test]
+    fn preempt_pauses_without_a_decision() {
+        let mut opened = open(&explain_line());
+        signal(&mut opened.book, &mut opened.ledger, &opened.id, "begin", 0);
+        let before = opened.ledger.events().len();
+        assert_eq!(signal(&mut opened.book, &mut opened.ledger, &opened.id, "preempt", 5).status, "ok");
+        assert_eq!(book_query(&opened.book, &opened.id)["state"], "paused");
+        assert_eq!(opened.ledger.events().len(), before);
+        assert!(row(&opened.ledger, &opened.phrase)["decision"].is_null());
+    }
+
+    fn place(book: &mut TaskBook, id: &str, x: i32, now: u64) {
+        book.show_controls(id, word_at(x), 1920, 1080, now);
+    }
+
+    #[test]
+    fn f1_click_binds_to_the_earlier_item() {
+        let mut opened = open(&task_line("select", "", r#"{"query":"a"},{"query":"b"},{"query":"c"}"#));
+        signal(&mut opened.book, &mut opened.ledger, &opened.id, "begin", 0);
+        let ids = item_ids(&opened.book, &opened.id);
+        place(&mut opened.book, &opened.id, 200, 0);
+        assert!(opened.book.handle_ui(&mut opened.ledger, UiEvent::Hotkey(Hotkey::Skip), 100));
+        place(&mut opened.book, &opened.id, 200, 100);
+        assert!(opened.book.handle_ui(&mut opened.ledger, UiEvent::Hotkey(Hotkey::Skip), 200));
+        place(&mut opened.book, &opened.id, 200, 200);
+        assert_eq!(book_query(&opened.book, &opened.id)["index"], 2);
+        assert!(click(&mut opened.book, &mut opened.ledger, &ids[1], ClickTarget::Check, 250));
+        assert_eq!(row(&opened.ledger, &ids[1])["viewed"], "acknowledged");
+        assert_ne!(row(&opened.ledger, &ids[2])["viewed"], "acknowledged");
+    }
+
+    #[test]
+    fn f2_grace_window_records_the_old_item() {
+        let mut opened = open(&task_line("select", "", r#"{"query":"one"},{"query":"two"}"#));
+        signal(&mut opened.book, &mut opened.ledger, &opened.id, "begin", 0);
+        let ids = item_ids(&opened.book, &opened.id);
+        place(&mut opened.book, &opened.id, 200, 0);
+        assert!(opened.book.handle_ui(&mut opened.ledger, UiEvent::Hotkey(Hotkey::Skip), 10));
+        place(&mut opened.book, &opened.id, 200, 10);
+        assert_eq!(book_query(&opened.book, &opened.id)["index"], 1);
+        assert!(click(&mut opened.book, &mut opened.ledger, &ids[0], ClickTarget::Check, 10 + GRACE_MS - 1));
+        assert_eq!(row(&opened.ledger, &ids[0])["viewed"], "acknowledged");
+    }
+
+    #[test]
+    fn f3_click_after_grace_is_dropped() {
+        let mut opened = open(&task_line("select", "", r#"{"query":"one"},{"query":"two"}"#));
+        signal(&mut opened.book, &mut opened.ledger, &opened.id, "begin", 0);
+        let ids = item_ids(&opened.book, &opened.id);
+        place(&mut opened.book, &opened.id, 200, 0);
+        assert!(opened.book.handle_ui(&mut opened.ledger, UiEvent::Hotkey(Hotkey::Skip), 10));
+        place(&mut opened.book, &opened.id, 200, 10);
+        let before = opened.ledger.events().len();
+        assert!(!click(&mut opened.book, &mut opened.ledger, &ids[0], ClickTarget::Check, 10 + GRACE_MS));
+        assert_eq!(opened.ledger.events().len(), before);
+        assert_ne!(row(&opened.ledger, &ids[0])["viewed"], "acknowledged");
+    }
+
+    #[test]
+    fn f4_grace_control_is_the_upper_surface() {
+        let mut opened = open(&task_line("select", "", r#"{"query":"one"},{"query":"two"}"#));
+        signal(&mut opened.book, &mut opened.ledger, &opened.id, "begin", 0);
+        let ids = item_ids(&opened.book, &opened.id);
+        place(&mut opened.book, &opened.id, 200, 0);
+        let rect = opened.book.control_rects(&opened.id, word_at(200), 1920, 1080)[0].1;
+        assert!(opened.book.handle_ui(&mut opened.ledger, UiEvent::Hotkey(Hotkey::Skip), 10));
+        place(&mut opened.book, &opened.id, 200, 10);
+        let hit = opened.book.hit(rect.x, rect.y, 10).unwrap();
+        assert_eq!(hit.0, ids[0]);
+        assert_eq!(hit.1, ClickTarget::Check);
+    }
+
+    #[test]
+    fn f5_rapid_double_click_is_one_event() {
+        let mut opened = open(&task_line("select", "", r#"{"query":"the line"}"#));
+        assert!(click(&mut opened.book, &mut opened.ledger, &opened.phrase, ClickTarget::Check, 1000));
+        assert!(!click(&mut opened.book, &mut opened.ledger, &opened.phrase, ClickTarget::Check, 1010));
+        let acks = opened.ledger.events().iter().filter(|ev| ev.viewed == Some(ViewedTier::Acknowledged)).count();
+        assert_eq!(acks, 1);
+        assert!(click(&mut opened.book, &mut opened.ledger, &opened.phrase, ClickTarget::Check, 1000 + DOUBLE_CLICK_MS));
+        assert_eq!(opened.ledger.events().iter().filter(|ev| ev.kind == LedgerKind::Cleared).count(), 1);
+    }
+
+    #[test]
+    fn f6_pointer_down_keeps_the_control_phrase() {
+        let mut opened = open(&task_line("select", "", r#"{"query":"one"},{"query":"two"}"#));
+        signal(&mut opened.book, &mut opened.ledger, &opened.id, "begin", 0);
+        let ids = item_ids(&opened.book, &opened.id);
+        place(&mut opened.book, &opened.id, 200, 0);
+        let old = opened.book.control_rects(&opened.id, word_at(200), 1920, 1080)[0].1;
+        assert!(opened.book.handle_ui(&mut opened.ledger, UiEvent::Hotkey(Hotkey::Skip), 10));
+        place(&mut opened.book, &opened.id, 800, 10);
+        let new = opened.book.control_rects(&opened.id, word_at(800), 1920, 1080)[0].1;
+        assert_eq!(opened.book.hit(old.x, old.y, 10).unwrap().0, ids[0]);
+        assert_eq!(opened.book.hit(new.x, new.y, 10).unwrap().0, ids[1]);
+        assert_eq!(book_query(&opened.book, &opened.id)["index"], 1);
+    }
+
+    #[test]
+    fn f7_click_on_the_advance_timestamp_binds_once() {
+        let mut opened = open(&task_line("select", "", r#"{"query":"one"},{"query":"two"}"#));
+        signal(&mut opened.book, &mut opened.ledger, &opened.id, "begin", 0);
+        let ids = item_ids(&opened.book, &opened.id);
+        place(&mut opened.book, &opened.id, 200, 0);
+        let rect = opened.book.control_rects(&opened.id, word_at(200), 1920, 1080)[0].1;
+        assert!(opened.book.handle_ui(&mut opened.ledger, UiEvent::Hotkey(Hotkey::Skip), 4000));
+        place(&mut opened.book, &opened.id, 200, 4000);
+        let hit = opened.book.hit(rect.x, rect.y, 4000).unwrap();
+        assert_eq!(hit.0, ids[0]);
+        assert!(click(&mut opened.book, &mut opened.ledger, &hit.0, ClickTarget::Check, 4000));
+        assert_eq!(row(&opened.ledger, &ids[0])["viewed"], "acknowledged");
+        assert_ne!(row(&opened.ledger, &ids[1])["viewed"], "acknowledged");
+        assert_eq!(opened.ledger.events().iter().filter(|ev| ev.viewed == Some(ViewedTier::Acknowledged)).count(), 1);
+    }
+
+    #[test]
+    fn resolve_item_rejects_the_sidecar_and_bad_bodies() {
+        for field in [r#","approved":true"#, r#","viewed":"acknowledged""#] {
+            let line = format!(
+                r#"{{"kind":"resolveItem","proposalId":"r","taskId":"tk-1","phraseId":"ph-1","match":{{"status":"located","conf":0.5}}{field}}}"#
+            );
+            assert!(serde_json::from_str::<Proposal>(&line).is_err(), "{field}");
+        }
+        let mut opened = open(&task_line("explain", "", r#"{"query":"one"},{"query":"two"}"#));
+        let before = opened.ledger.events().len();
+        let denied = resolve(&mut opened.book, &mut opened.ledger, &opened.id, &opened.phrase, "located", "", Tier::T3Sidecar, 1);
+        assert_eq!(denied.error.as_deref(), Some("not_allowed_for_tier:resolveItem"));
+        assert_eq!(opened.ledger.events().len(), before);
+        let bad = resolve(&mut opened.book, &mut opened.ledger, &opened.id, &opened.phrase, "located", r#","u":2,"v":0,"w":1,"h":1"#, Tier::T2Client, 2);
+        assert_eq!(bad.error.as_deref(), Some("schema"));
+        assert_eq!(opened.ledger.events().len(), before);
+        signal(&mut opened.book, &mut opened.ledger, &opened.id, "begin", 3);
+        let miss = resolve(&mut opened.book, &mut opened.ledger, &opened.id, &opened.phrase, "notFound", "", Tier::T1User, 4);
+        assert_eq!(miss.status, "ok");
+        assert_eq!(book_query(&opened.book, &opened.id)["index"], 1);
+        assert_eq!(book_query(&opened.book, &opened.id)["items"][0]["match"], "notFound");
+        assert_eq!(opened.ledger.events().iter().filter(|ev| ev.kind == LedgerKind::Located).count(), 1);
+        assert_eq!(opened.ledger.events().iter().find(|ev| ev.kind == LedgerKind::Located).unwrap().by, Tier::T1User);
+        assert!(opened.ledger.events().iter().all(|ev| ev.kind != LedgerKind::Viewed));
+
+        let mut waiting = open(&task_line("select", r#","itemTimeoutSeconds":5"#, r#"{"query":"one"},{"query":"two"}"#));
+        signal(&mut waiting.book, &mut waiting.ledger, &waiting.id, "begin", 0);
+        let held = resolve(&mut waiting.book, &mut waiting.ledger, &waiting.id, &waiting.phrase, "notFound", "", Tier::T2Client, 1);
+        assert_eq!(held.status, "ok");
+        assert_eq!(book_query(&waiting.book, &waiting.id)["index"], 0);
+        waiting.book.tick(&mut waiting.ledger, 4999);
+        assert_eq!(book_query(&waiting.book, &waiting.id)["index"], 0);
+        assert!(waiting.book.control_rects(&waiting.id, word_at(100), 1920, 1080).is_empty());
+
+        let mut paused = open(&explain_line());
+        signal(&mut paused.book, &mut paused.ledger, &paused.id, "begin", 0);
+        assert!(paused.book.handle_ui(&mut paused.ledger, UiEvent::Hotkey(Hotkey::Pause), 1));
+        let wrote = resolve(&mut paused.book, &mut paused.ledger, &paused.id, &paused.phrase, "located", "", Tier::T2Client, 2);
+        assert_eq!(wrote.status, "ok");
+        assert_eq!(book_query(&paused.book, &paused.id)["state"], "paused");
+        assert_eq!(book_query(&paused.book, &paused.id)["index"], 0);
+        assert!(paused.ledger.events().iter().all(|ev| ev.kind != LedgerKind::Viewed));
+        paused.book.note_shown(&mut paused.ledger, &paused.phrase, 3);
+        assert!(paused.ledger.events().iter().any(|ev| ev.viewed == Some(ViewedTier::Shown)));
+    }
+
+    #[test]
+    fn teaching_highlight_without_a_task_writes_no_phrase() {
+        let mut reg = Registry::new();
+        reg.spawn_presence("p", "ctx", None, None);
+        reg.note_task_highlight("p", 5);
+        assert!(reg.ledger().events().is_empty());
+        assert_eq!(reg.ledger().occupancy(), 0);
+    }
+
+    fn scroll_line(tier_items: &str) -> String {
+        format!(r#"{{"kind":"createTask","proposalId":"c","presenceId":"p","mode":"explain","docKey":"doc-a","items":[{tier_items}]}}"#)
+    }
+
+    fn web_find(doc: &str, phrase: &str) -> ViewerMove {
+        ViewerMove::WebFind { doc_key: doc.into(), opening_phrase: phrase.into() }
+    }
+
+    #[test]
+    fn g1_move_without_an_active_tour_is_rejected() {
+        let mut book = TaskBook::new();
+        let mut ledger = Ledger::new();
+        let missing = book.authorize("tk-none", &web_find("doc-a", "the line"), true, &mut ledger, 0);
+        assert_eq!(missing, Err(MoveError::NoActiveTour));
+        let result = create(&mut book, &mut ledger, &scroll_line(r#"{"query":"the line","scroll":true}"#), Tier::T1User, 0);
+        let id = result.detail.unwrap()["taskId"].as_str().unwrap().to_string();
+        assert_eq!(book_query(&book, &id)["state"], "pending");
+        assert_eq!(book.authorize(&id, &web_find("doc-a", "the line"), true, &mut ledger, 0), Err(MoveError::NoActiveTour));
+        let drafted = create(
+            &mut book,
+            &mut ledger,
+            r#"{"kind":"draftTask","proposalId":"d","presenceId":"p","mode":"explain","docKey":"doc-a","items":[{"query":"the line","scroll":true}]}"#,
+            Tier::T3Sidecar,
+            0,
+        );
+        let draft = drafted.detail.unwrap()["taskId"].as_str().unwrap().to_string();
+        assert_eq!(book_query(&book, &draft)["state"], "draft");
+        assert_eq!(book.authorize(&draft, &web_find("doc-a", "the line"), true, &mut ledger, 0), Err(MoveError::NoActiveTour));
+        assert_eq!(book.moves_issued(), 0);
+        assert!(ledger.events().is_empty());
+    }
+
+    #[test]
+    fn g2_move_for_a_different_doc_is_rejected() {
+        let mut book = TaskBook::new();
+        let mut ledger = Ledger::new();
+        let result = create(&mut book, &mut ledger, &scroll_line(r#"{"query":"the line","scroll":true}"#), Tier::T1User, 0);
+        let id = result.detail.unwrap()["taskId"].as_str().unwrap().to_string();
+        book.admit().unwrap();
+        let wrong = book.authorize(&id, &web_find("other-doc", "the line"), true, &mut ledger, 0);
+        assert_eq!(wrong, Err(MoveError::DocMismatch));
+        assert_eq!(book.moves_issued(), 0);
+    }
+
+    #[test]
+    fn g3_t2_scroll_waits_for_start() {
+        let mut book = TaskBook::new();
+        let mut ledger = Ledger::new();
+        let result = create(&mut book, &mut ledger, &scroll_line(r#"{"query":"the line","scroll":true}"#), Tier::T2Client, 0);
+        let id = result.detail.unwrap()["taskId"].as_str().unwrap().to_string();
+        assert_eq!(book_query(&book, &id)["state"], "awaitingStart");
+        assert!(book.admit().is_none());
+        assert_eq!(book.planned_move(&id), Err(MoveError::NeedsStartConfirm));
+        assert_eq!(book.authorize(&id, &web_find("doc-a", "the line"), true, &mut ledger, 0), Err(MoveError::NeedsStartConfirm));
+        assert_eq!(book.moves_issued(), 0);
+        assert!(book.control_rects(&id, word_at(100), 1920, 1080).is_empty());
+    }
+
+    #[test]
+    fn g4_start_hands_the_runner_web_find_or_pdf_page() {
+        let mut book = TaskBook::new();
+        let mut ledger = Ledger::new();
+        let result = create(&mut book, &mut ledger, &scroll_line(r#"{"query":"the line","scroll":true}"#), Tier::T2Client, 0);
+        let id = result.detail.unwrap()["taskId"].as_str().unwrap().to_string();
+        assert!(book.handle_ui(&mut ledger, UiEvent::Hotkey(Hotkey::Start), 1));
+        assert_eq!(book_query(&book, &id)["state"], "active");
+        assert_eq!(book.planned_move(&id).unwrap(), web_find("doc-a", "the line"));
+        assert_eq!(viewer_move_slot(&book.planned_move(&id).unwrap()), 0);
+
+        let pdf = create(&mut book, &mut ledger, &scroll_line(r#"{"query":"the page","scroll":true,"page":4}"#), Tier::T2Client, 2);
+        let pdf_id = pdf.detail.unwrap()["taskId"].as_str().unwrap().to_string();
+        book.complete(&id).unwrap();
+        assert!(book.handle_ui(&mut ledger, UiEvent::Hotkey(Hotkey::Start), 3));
+        assert_eq!(book.planned_move(&pdf_id).unwrap(), ViewerMove::PdfPage { doc_key: "doc-a".into(), page: 4 });
+        assert_eq!(viewer_move_slot(&book.planned_move(&pdf_id).unwrap()), 1);
+    }
+
+    #[test]
+    fn g5_t1_does_not_wait_for_start() {
+        let mut book = TaskBook::new();
+        let mut ledger = Ledger::new();
+        let plain = create(&mut book, &mut ledger, &explain_line(), Tier::T2Client, 0);
+        assert_eq!(plain.detail.unwrap()["state"], "pending");
+        let mut book = TaskBook::new();
+        let mut ledger = Ledger::new();
+        let result = create(&mut book, &mut ledger, &scroll_line(r#"{"query":"the line","scroll":true}"#), Tier::T1User, 0);
+        let id = result.detail.unwrap()["taskId"].as_str().unwrap().to_string();
+        assert_eq!(book_query(&book, &id)["state"], "pending");
+        book.admit().unwrap();
+        assert_eq!(book.authorize(&id, &web_find("doc-a", "the line"), true, &mut ledger, 0), Ok(()));
+        assert_eq!(book.moves_issued(), 1);
+    }
+
+    fn preempt(book: &mut TaskBook, ledger: &mut Ledger, id: &str, reason: &str) {
+        let line = format!(r#"{{"kind":"tourSignal","proposalId":"t","taskId":"{id}","signal":"preempt","reason":"{reason}"}}"#);
+        let result = route_task(&parse(&line), Tier::T2Client, book, ledger, true, 10).unwrap();
+        assert_eq!(result.status, "ok");
+    }
+
+    #[test]
+    fn g6_g7_page_and_pointer_pause_and_issue_no_further_move() {
+        for reason in ["page", "pointer"] {
+            let mut book = TaskBook::new();
+            let mut ledger = Ledger::new();
+            let result = create(&mut book, &mut ledger, &scroll_line(r#"{"query":"the line","scroll":true}"#), Tier::T1User, 0);
+            let id = result.detail.unwrap()["taskId"].as_str().unwrap().to_string();
+            book.admit().unwrap();
+            book.authorize(&id, &web_find("doc-a", "the line"), true, &mut ledger, 0).unwrap();
+            let before = ledger.events().len();
+            preempt(&mut book, &mut ledger, &id, reason);
+            assert_eq!(book_query(&book, &id)["state"], "paused");
+            assert_eq!(ledger.events().len(), before);
+            assert_eq!(book.authorize(&id, &web_find("doc-a", "the line"), true, &mut ledger, 2_000), Err(MoveError::NoActiveTour));
+            assert_eq!(book.moves_issued(), 1);
+            assert!(ledger.events().iter().all(|ev| !matches!(ev.kind, LedgerKind::Approved | LedgerKind::Discarded | LedgerKind::Cleared)));
+        }
+    }
+
+    #[test]
+    fn g8_ordinary_keys_do_not_pause_and_no_grab_is_installed() {
+        assert!(!keyboard_grab_installed());
+        let overlay = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/overlay.rs")).unwrap();
+        assert!(!overlay.contains("get_keyboard"));
+        let keys = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/ui_input.rs")).unwrap();
+        let start = keys.find("pub enum Hotkey").unwrap();
+        let body = &keys[start..keys[start..].find('}').unwrap() + start];
+        assert!(!body.contains("Ordinary"));
+        assert!(body.contains("Skip"));
+        assert!(body.contains("Pause"));
+        let mut opened = open(&task_line("explain", "", r#"{"query":"one"},{"query":"two"}"#));
+        signal(&mut opened.book, &mut opened.ledger, &opened.id, "begin", 0);
+        assert!(opened.book.handle_ui(&mut opened.ledger, UiEvent::Hotkey(Hotkey::Skip), 1));
+        assert_eq!(book_query(&opened.book, &opened.id)["index"], 1);
+        assert_eq!(book_query(&opened.book, &opened.id)["state"], "active");
+        assert!(opened.book.handle_ui(&mut opened.ledger, UiEvent::Hotkey(Hotkey::Pause), 2));
+        assert_eq!(book_query(&opened.book, &opened.id)["state"], "paused");
+    }
+
+    #[test]
+    fn g9_a_failed_find_does_not_nudge() {
+        let mut book = TaskBook::new();
+        let mut ledger = Ledger::new();
+        let result = create(
+            &mut book,
+            &mut ledger,
+            &task_line("explain", r#","pace":"flow","docKey":"doc-a""#, r#"{"query":"one","scroll":true},{"query":"two","scroll":true}"#),
+            Tier::T1User,
+            0,
+        );
+        let id = result.detail.unwrap()["taskId"].as_str().unwrap().to_string();
+        book.admit().unwrap();
+        signal(&mut book, &mut ledger, &id, "begin", 0);
+        let nudge = ViewerMove::Nudge { dy_px: NUDGE_PX };
+        assert_eq!(book.authorize(&id, &nudge, false, &mut ledger, 1), Err(MoveError::OffGlass));
+        assert_eq!(book.moves_issued(), 0);
+        let ids = item_ids(&book, &id);
+        let miss = resolve(&mut book, &mut ledger, &id, &ids[0], "notFound", "", Tier::T2Client, 2);
+        assert_eq!(miss.status, "ok");
+        assert_eq!(book_query(&book, &id)["index"], 1);
+        assert_eq!(ledger.events().iter().filter(|ev| ev.kind == LedgerKind::Located).count(), 1);
+
+        let mut waiting_book = TaskBook::new();
+        let mut waiting_ledger = Ledger::new();
+        let waiting = create(
+            &mut waiting_book,
+            &mut waiting_ledger,
+            &task_line("select", r#","docKey":"doc-a","itemTimeoutSeconds":5"#, r#"{"query":"one","scroll":true},{"query":"two","scroll":true}"#),
+            Tier::T1User,
+            0,
+        );
+        let wait_id = waiting.detail.unwrap()["taskId"].as_str().unwrap().to_string();
+        waiting_book.admit().unwrap();
+        signal(&mut waiting_book, &mut waiting_ledger, &wait_id, "begin", 0);
+        assert_eq!(waiting_book.authorize(&wait_id, &nudge, false, &mut waiting_ledger, 1), Err(MoveError::OffGlass));
+        let phrase = item_ids(&waiting_book, &wait_id)[0].clone();
+        resolve(&mut waiting_book, &mut waiting_ledger, &wait_id, &phrase, "notFound", "", Tier::T2Client, 2);
+        assert_eq!(book_query(&waiting_book, &wait_id)["index"], 0);
+        waiting_book.tick(&mut waiting_ledger, 4999);
+        assert_eq!(book_query(&waiting_book, &wait_id)["index"], 0);
+    }
+
+    #[test]
+    fn g10_locate_failure_after_a_move_is_one_miss() {
+        let mut book = TaskBook::new();
+        let mut ledger = Ledger::new();
+        let result = create(
+            &mut book,
+            &mut ledger,
+            &task_line("explain", r#","docKey":"doc-a""#, r#"{"query":"one","scroll":true},{"query":"two","scroll":true}"#),
+            Tier::T1User,
+            0,
+        );
+        let id = result.detail.unwrap()["taskId"].as_str().unwrap().to_string();
+        book.admit().unwrap();
+        signal(&mut book, &mut ledger, &id, "begin", 0);
+        book.authorize(&id, &web_find("doc-a", "one"), true, &mut ledger, 1).unwrap();
+        let phrase = item_ids(&book, &id)[0].clone();
+        resolve(&mut book, &mut ledger, &id, &phrase, "notFound", "", Tier::T2Client, 2);
+        assert_eq!(ledger.events().iter().filter(|ev| ev.kind == LedgerKind::Located).count(), 1);
+        assert_eq!(book_query(&book, &id)["index"], 1);
+        book.tick(&mut ledger, 5_000);
+        assert_eq!(book.moves_issued(), 1);
+        assert_eq!(ledger.events().iter().filter(|ev| ev.kind == LedgerKind::Located).count(), 1);
+    }
+
+    #[test]
+    fn g11_viewer_move_has_three_variants_and_is_not_a_socket_kind() {
+        let samples = [
+            web_find("doc-a", "the line"),
+            ViewerMove::PdfPage { doc_key: "doc-a".into(), page: 2 },
+            ViewerMove::Nudge { dy_px: NUDGE_PX },
+        ];
+        assert_eq!(samples.iter().map(viewer_move_slot).collect::<Vec<_>>(), vec![0, 1, 2]);
+        let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/task.rs")).unwrap();
+        let start = src.find("pub enum ViewerMove").unwrap();
+        let end = src[start..].find('}').unwrap();
+        assert!(!src[start..start + end].contains("Deserialize"));
+        assert!(serde_json::from_str::<Proposal>(r#"{"kind":"viewerMove","proposalId":"v"}"#).is_err());
+    }
+
+    #[test]
+    fn g12_twelve_items_is_the_tour_cap() {
+        let mut book = TaskBook::new();
+        let mut ledger = Ledger::new();
+        let dozen = (0..12).map(|n| format!(r#"{{"query":"q{n}","scroll":true}}"#)).collect::<Vec<_>>().join(",");
+        let ok = create(
+            &mut book,
+            &mut ledger,
+            &format!(r#"{{"kind":"createTask","proposalId":"c","presenceId":"p","mode":"explain","docKey":"doc-a","items":[{dozen}]}}"#),
+            Tier::T2Client,
+            0,
+        );
+        assert_eq!(ok.status, "ok");
+        assert_eq!(ok.detail.unwrap()["items"].as_array().unwrap().len(), 12);
+        let extra = (0..13).map(|n| format!(r#"{{"query":"e{n}"}}"#)).collect::<Vec<_>>().join(",");
+        let rejected = create(
+            &mut book,
+            &mut ledger,
+            &format!(r#"{{"kind":"createTask","proposalId":"c2","presenceId":"p","mode":"explain","items":[{extra}]}}"#),
+            Tier::T2Client,
+            0,
+        );
+        assert_eq!(rejected.error.as_deref(), Some("schema"));
+        assert_eq!(book.len(), 1);
+    }
+
+    #[test]
+    fn g13_moves_do_not_outrun_the_locate_wait() {
+        let mut book = TaskBook::new();
+        let mut ledger = Ledger::new();
+        let result = create(&mut book, &mut ledger, &scroll_line(r#"{"query":"the line","scroll":true}"#), Tier::T1User, 0);
+        let id = result.detail.unwrap()["taskId"].as_str().unwrap().to_string();
+        book.admit().unwrap();
+        let mv = web_find("doc-a", "the line");
+        assert_eq!(book.authorize(&id, &mv, true, &mut ledger, 0), Ok(()));
+        assert_eq!(book.authorize(&id, &mv, true, &mut ledger, MOVE_WAIT_MS - 1), Err(MoveError::TooSoon));
+        assert_eq!(book.moves_issued(), 1);
+        assert_eq!(book.authorize(&id, &mv, true, &mut ledger, MOVE_WAIT_MS), Ok(()));
+        assert_eq!(book.moves_issued(), 2);
+    }
+
+    #[test]
+    fn g14_nudge_off_the_glass_is_rejected() {
+        let mut book = TaskBook::new();
+        let mut ledger = Ledger::new();
+        let result = create(&mut book, &mut ledger, &scroll_line(r#"{"query":"the line","scroll":true}"#), Tier::T1User, 0);
+        let id = result.detail.unwrap()["taskId"].as_str().unwrap().to_string();
+        book.admit().unwrap();
+        let nudge = ViewerMove::Nudge { dy_px: NUDGE_PX };
+        assert_eq!(book.authorize(&id, &nudge, false, &mut ledger, 0), Err(MoveError::OffGlass));
+        assert_eq!(book.moves_issued(), 0);
+        assert_eq!(book.authorize(&id, &nudge, true, &mut ledger, 0), Ok(()));
+        assert_eq!(book.moves_issued(), 1);
+    }
+
+    #[test]
+    fn three_attempts_then_one_miss_and_no_loop() {
+        let mut book = TaskBook::new();
+        let mut ledger = Ledger::new();
+        let result = create(
+            &mut book,
+            &mut ledger,
+            &task_line("explain", r#","docKey":"doc-a""#, r#"{"query":"one","scroll":true},{"query":"two","scroll":true}"#),
+            Tier::T1User,
+            0,
+        );
+        let id = result.detail.unwrap()["taskId"].as_str().unwrap().to_string();
+        book.admit().unwrap();
+        signal(&mut book, &mut ledger, &id, "begin", 0);
+        let mv = web_find("doc-a", "one");
+        for n in 0u64..3 {
+            book.authorize(&id, &mv, true, &mut ledger, n * MOVE_WAIT_MS).unwrap();
+        }
+        let err = book.authorize(&id, &mv, true, &mut ledger, 3 * MOVE_WAIT_MS);
+        assert_eq!(err, Err(MoveError::AttemptsExhausted));
+        assert_eq!(ledger.events().iter().filter(|ev| ev.kind == LedgerKind::Located).count(), 1);
+        assert_eq!(book_query(&book, &id)["index"], 1);
+        assert_eq!(book.moves_issued(), 3);
+        book.tick(&mut ledger, 10_000);
+        assert_eq!(ledger.events().iter().filter(|ev| ev.kind == LedgerKind::Located).count(), 1);
     }
 }
