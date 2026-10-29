@@ -2,6 +2,7 @@
 // the substrate (today: the daemon stub; eventually: the native Vulkan daemon).
 // This is intentionally small and readable — it is the one piece of this repo
 // that should get *more* conservative as capability grows, not less.
+// The daemon gate is authoritative for tiers; this gate remains a convenience rate-limiter.
 
 interface Record_ {
   id: string;

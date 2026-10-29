@@ -6,9 +6,8 @@ Paste this whole file into your coding agent. It is self-contained.
 
 Repo: `pachakutech-situated-ai-presence-mcp`. Read these first:
 - `docs/architecture.md` (design rules: "messages describe, not carry"; presence owns motion)
-- `docs/plans/local_multimodal_reflex.md` (the rewritten plan: trust tiers in section 2)
-- `docs/plans/command_layer.md` (design) and `docs/plans/command_layer_protocol.md` (wire sketch, allow-list, test list)
-  — if these are not committed yet, they are attached alongside this brief.
+- `docs/plans/local_multimodal_reflex.md` (trust tiers in section 2; running-system constraints in section 10)
+- `docs/plans/presence_command_layer.md` (design) and `docs/plans/command_layer_protocol.md` (wire sketch, allow-list, test list)
 - `daemon/src/protocol.rs`, `daemon/src/socket.rs`, `daemon/src/overlay.rs` (poll loop around line 3237), `src/policyGate.ts`
 
 Today the daemon has **one** socket (`presence.sock`, path from `socket_path()` in `main.rs`, override `PRESENCE_DAEMON_SOCKET`). `SocketServer` in `socket.rs` accepts clients non-blockingly from the overlay loop (`pump`), parses each line into `Proposal`, and `dispatch`es. Every connection has equal authority. The Node `PolicyGate` (`src/policyGate.ts`) rate-limits MCP calls but the daemon does not check anything about *who* sent a message.

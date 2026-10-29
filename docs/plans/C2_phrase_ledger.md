@@ -5,7 +5,8 @@ Paste this whole file into your coding agent. It is self-contained. **Requires C
 ## Context
 
 Read first:
-- `docs/plans/local_multimodal_reflex.md` section 3 (ledger) and `docs/plans/command_layer.md` sections 4.2–4.3 (data model, imperfect finding)
+- `docs/plans/local_multimodal_reflex.md` section 3 (ledger) and section 10 (running-system constraints)
+- `docs/plans/presence_command_layer.md` sections 4.2–4.3 (data model, imperfect finding)
 - `docs/plans/command_layer_protocol.md` sections 2, 5 and test groups B and D
 - `daemon/src/registry.rs`, `daemon/src/socket.rs` (`route_presence` is the pattern for a unit-testable router), `daemon/src/gate.rs` (from C1), `src/index.ts` (MCP tools registered with `server.registerTool` and zod), `src/daemonClient.ts`
 

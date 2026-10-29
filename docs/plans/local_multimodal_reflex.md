@@ -200,3 +200,43 @@ Config: `PRESENCE_LFM3_ENDPOINT`, model id, max crop size, max concurrent jobs (
 | B4 (later) | In-daemon actor, typed head, SFT schema, tighten-only advisor |
 
 Order: C1 and C2 first. C3 needs C1. C3b and C3c follow C3. C4, C5, B1 and C6 can then run in parallel. C7–C13 follow `research_tours.md` section 12; C11 needs C3.
+
+## 10. Addendum: constraints from the running system
+
+The design is agreed, and C1 then C2 is the right start. The tiers, the T0 witness, and the ticket order stay as written. This note is how the daemon, the Node client, and the locator behave today, and what that requires of the implementation. Where `research_tours.md` section 10 differs from `reflex-review.md`, build the tour plan.
+
+### The gate, and the socket that already works
+
+`SocketServer` accepts on one Unix socket, `presence.sock`, from the overlay poll (`overlay.rs`, the `listener_fd` entry). `read_client` runs on that overlay thread. It drains every buffered line, parses a `Proposal`, and `dispatch`es before the frame returns to drawing. Tier belongs on the listener that accepted the connection. `presence.sock` remains the socket the MCP server and the CLI use. The poll set has to include every new listener fd, or `command.sock` and `sidecar.sock` never wake.
+
+The one-and-a-half-second limit lives in `src/policyGate.ts`, once per MCP tool name. The daemon socket has no such limit. Cue-follow sends `concealHighlight`, `highlightRegion`, and `animatePresence` as a burst on that socket. A daemon copy of the MCP interval will stall a reading. Rate-limit `observePhrase` on its own, when the sidecar exists. Leave the existing kinds unlimited on `presence.sock`.
+
+The sockets are mode `0600` in this user's runtime directory. Any process of this user can open all three. The gate is the API boundary for a client that uses the socket it was given. It is not a boundary against another program running as the same user. Filesystem permissions are enough for C1. A handshake can wait.
+
+`C1_daemon_gate.md` names `docs/plans/command_layer.md`. The design file on this branch is `presence_command_layer.md`.
+
+### The ledger is the glass session
+
+C2's ledger is in memory, empty when the daemon starts, fifty distinct phrases, OCR snippets cut at two hundred characters. That cut is for the snippet on a glass observation. The quotation a citation stores belongs in the C7 project store, which is the record that survives retire and a restart. A project locus can be longer than two hundred characters, and there can be hundreds of them. The fifty-phrase cap counts live ledger phrases. It does not count the project.
+
+Accept a phrase id the project already chose. Mint `ph-n` only when an `observePhrase` arrives without one. The research locus id and the ledger phrase id are the same string when a tour shows that locus.
+
+`DaemonClient` (`src/daemonClient.ts`) keeps one connection and treats each incoming line as the reply to the next proposal in a FIFO. A ledger line pushed on that connection is parsed as the answer to the next highlight or speak, and the client loses its place. `subscribeLedger` gets its own connection. The MCP read is `listPhraseFlags`. The shared client stays one reply per proposal.
+
+Because `read_client` drains the buffer on the overlay thread, a sidecar that writes a pile of `observePhrase` lines stalls the discs for the time those lines take to parse. Cap how many ledger messages one frame will handle, and leave the rest in the buffer. The reply write today is a blocking `writeln`. A `subscribeLedger` push has to give up when the socket would block, record the overflow the plan already names, and return to the frame. A slow subscriber must not hold the overlay thread.
+
+### Controls, on the surfaces that exist
+
+The avatar layer is the 220-pixel disc (`DISC_PX`). Its input region is empty, its keyboard interactivity is `None`, and its exclusive zone is `-1`, so clicks and keys pass through to the page. Each highlight is a separate layer-shell surface (`spawn_mark` in `overlay.rs`), anchored top-left, sized to the word box, with the same empty input region and the same keyboard setting. `InterestBook` holds one box per presence. `declare` replaces that box. At most three marks are visible, the same cap as live presences.
+
+An input region covering the mark takes the click away from the browser, on the words the researcher is reading. Keep that surface click-through. Put the checkbox or the yes/no pair on a small region beside the words. Leave keyboard interactivity `None`. Turning it on so the overlay can see a hotkey takes the browser's keys for the whole time the surface is focused. A hotkey that must exist later is a binding outside this surface, registered only while a task is active. C3 can ship the click control first.
+
+A late click on the previous item has no surface once the next `declare` has replaced the box. The grace window in the protocol is real only while that previous control surface is still up. One mouth: `animatePresence` replaces the utterance still playing. Tour narration uses the speech board and waits for the clip to finish, the way cue-follow already does.
+
+### Moves and maps stay where the find already is
+
+`window.find`, the Chromium profile under `$XDG_RUNTIME_DIR/pachakutech/locate-chromium` on port 9222, and Evince's page turn already live in `src/locate/`. A second Chromium on that same profile does not start. `openSource` reuses that profile and that port, and the Evince window the PDF locator already opens. The daemon records that a move is allowed and records the result. It does not grow a CDP client, and it does not send keys.
+
+The screen-text message is one capture of the whole desktop, including chrome and whatever else is in the frame. The doc map is the text adapter: Poppler for a PDF, DOM text for a page, the file for plain text. Querying `queryScreenText` does not build a map.
+
+Cue-follow, in Node, is the tour runner that exists today: conceal, locate, mark, speak, wait. C3b and C11 drive that path. A second scroll implementation in the daemon will fight it. The gate's vocabulary for a move is the internal `ViewerMove`. The Node locator is the code that performs it.

@@ -1,6 +1,8 @@
-//! The Unix socket server. One connection at a time is fine for v0 — the
-//! MCP Binding is the only expected client, and it's a single local process.
+//! The Unix socket server. Three listeners, one tier each. The MCP binding
+//! and the CLI use `presence.sock` (T2). `command.sock` is T1 and
+//! `sidecar.sock` is T3. A connection cannot claim a different tier.
 
+use crate::gate::Tier;
 use crate::pipeline::SplatPipeline;
 use crate::protocol::{AvatarCommand, Proposal, ProposalResult};
 use crate::registry::Registry;
@@ -10,6 +12,7 @@ use serde_json::json;
 use std::io::{self, Read, Write};
 use std::time::Instant;
 use std::os::fd::{AsRawFd, RawFd};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -17,12 +20,24 @@ use std::sync::{Arc, Mutex};
 struct Client {
     stream: UnixStream,
     buf: Vec<u8>,
+    tier: Tier,
+}
+
+struct Endpoint {
+    listener: UnixListener,
+    path: PathBuf,
+    tier: Tier,
+}
+
+impl Drop for Endpoint {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
 
 /// Non-blocking Unix JSONL server, pumped from the overlay event loop.
 pub struct SocketServer {
-    listener: UnixListener,
-    path: PathBuf,
+    listeners: Vec<Endpoint>,
     clients: Vec<Client>,
     registry: Mutex<Registry>,
     avatar_commands: Vec<AvatarCommand>,
@@ -36,19 +51,61 @@ enum ClientRead {
     Shutdown,
 }
 
-impl SocketServer {
-    pub fn bind(socket_path: &Path, text: Arc<TextMemory>, speech: SpeechBoard) -> io::Result<Self> {
-        if socket_path.exists() {
-            std::fs::remove_file(socket_path)?;
-        }
-        if let Some(parent) = socket_path.parent() {
+/// Bind one socket at `0600`. On a failure after the file exists, the file is removed.
+fn bind_endpoint(path: &Path, tier: Tier) -> io::Result<Endpoint> {
+    if path.exists() {
+        std::fs::remove_file(path)?;
+    }
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)?;
         }
-        let listener = UnixListener::bind(socket_path)?;
-        listener.set_nonblocking(true)?;
+    }
+    let listener = UnixListener::bind(path)?;
+    if let Err(e) = listener.set_nonblocking(true) {
+        drop(listener);
+        let _ = std::fs::remove_file(path);
+        return Err(e);
+    }
+    if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+        drop(listener);
+        let _ = std::fs::remove_file(path);
+        return Err(e);
+    }
+    Ok(Endpoint { listener, path: path.to_path_buf(), tier })
+}
+
+fn listen_or_log(path: &Path, tier: Tier, listeners: &mut Vec<Endpoint>) {
+    match bind_endpoint(path, tier) {
+        Ok(endpoint) => {
+            println!("[socket] listening on {} ({})", endpoint.path.display(), endpoint.tier.wire_name());
+            listeners.push(endpoint);
+        }
+        Err(e) => eprintln!("[socket] {} bind failed: {e}", path.display()),
+    }
+}
+
+impl SocketServer {
+    /// `presence` failing is fatal. `command` and `sidecar` are logged and skipped.
+    pub fn bind(
+        presence: &Path,
+        command: &Path,
+        sidecar: &Path,
+        text: Arc<TextMemory>,
+        speech: SpeechBoard,
+    ) -> io::Result<Self> {
+        let mut listeners = Vec::new();
+        let presence_ep = bind_endpoint(presence, Tier::T2Client)?;
+        println!(
+            "[socket] listening on {} ({})",
+            presence_ep.path.display(),
+            presence_ep.tier.wire_name()
+        );
+        listeners.push(presence_ep);
+        listen_or_log(command, Tier::T1User, &mut listeners);
+        listen_or_log(sidecar, Tier::T3Sidecar, &mut listeners);
         Ok(Self {
-            listener,
-            path: socket_path.to_path_buf(),
+            listeners,
             clients: Vec::new(),
             registry: Mutex::new(Registry::new()),
             avatar_commands: Vec::new(),
@@ -81,8 +138,8 @@ impl SocketServer {
         self.registry.lock().expect("registry mutex poisoned").conceal_speech_interest(id, Instant::now());
     }
 
-    pub fn listener_fd(&self) -> RawFd {
-        self.listener.as_raw_fd()
+    pub fn listener_fds(&self) -> impl Iterator<Item = RawFd> + '_ {
+        self.listeners.iter().map(|endpoint| endpoint.listener.as_raw_fd())
     }
 
     pub fn client_fds(&self) -> impl Iterator<Item = RawFd> + '_ {
@@ -91,14 +148,17 @@ impl SocketServer {
 
     /// `Ok(true)` means a client asked the process to exit after its reply was written.
     pub fn pump(&mut self, pipeline: &SplatPipeline) -> io::Result<bool> {
-        loop {
-            match self.listener.accept() {
-                Ok((stream, _)) => {
-                    stream.set_nonblocking(true)?;
-                    self.clients.push(Client { stream, buf: Vec::new() });
-                }
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                Err(e) => return Err(e),
+        for i in 0..self.listeners.len() {
+            let tier = self.listeners[i].tier;
+            loop {
+                let accepted = match self.listeners[i].listener.accept() {
+                    Ok((stream, _)) => Some(stream),
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => None,
+                    Err(e) => return Err(e),
+                };
+                let Some(stream) = accepted else { break };
+                stream.set_nonblocking(true)?;
+                self.clients.push(Client { stream, buf: Vec::new(), tier });
             }
         }
 
@@ -116,12 +176,6 @@ impl SocketServer {
             }
         }
         Ok(false)
-    }
-}
-
-impl Drop for SocketServer {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
     }
 }
 
@@ -179,7 +233,10 @@ fn read_client(
             continue;
         }
         let (result, stop) = match serde_json::from_str::<Proposal>(line) {
-            Ok(proposal) => dispatch(proposal, pipeline, registry, avatar_commands, text, speech),
+            Ok(proposal) => match crate::gate::check(client.tier, &proposal) {
+                Err(rejected) => (rejected, false),
+                Ok(()) => dispatch(proposal, pipeline, registry, avatar_commands, text, speech),
+            },
             Err(e) => {
                 eprintln!("[socket] malformed proposal: {e}");
                 (ProposalResult::err("unknown", format!("malformed proposal: {e}")), false)
@@ -484,5 +541,84 @@ mod tests {
         assert_eq!(r.status, "ok");
         assert_eq!(r.detail.as_ref().unwrap()["avatar"], false);
         assert!(cmds.is_empty());
+    }
+
+    struct Scratch(std::path::PathBuf);
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    impl Scratch {
+        fn new(label: &str) -> Self {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos();
+            let dir = std::env::temp_dir().join(format!("presence-c1-{label}-{}-{nanos}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    fn boards() -> (Arc<TextMemory>, SpeechBoard) {
+        (
+            Arc::new(TextMemory::new(Arc::new(crate::screen_text::GlassStamp::new()))),
+            SpeechBoard::new(),
+        )
+    }
+
+    fn mode_is_0600(path: &Path) {
+        let mode = std::fs::metadata(path).unwrap_or_else(|e| panic!("{}: {e}", path.display())).permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "{}", path.display());
+    }
+
+    #[test]
+    fn endpoints_are_0600_and_removed_on_drop() {
+        let scratch = Scratch::new("a8");
+        let presence = scratch.0.join("presence.sock");
+        let command = scratch.0.join("command.sock");
+        let sidecar = scratch.0.join("sidecar.sock");
+        let (text, speech) = boards();
+        let server = SocketServer::bind(&presence, &command, &sidecar, text, speech).unwrap();
+        assert_eq!(server.listeners.len(), 3);
+        assert_eq!(
+            server.listeners.iter().map(|endpoint| endpoint.tier).collect::<Vec<_>>(),
+            vec![Tier::T2Client, Tier::T1User, Tier::T3Sidecar]
+        );
+        for endpoint in &server.listeners {
+            mode_is_0600(&endpoint.path);
+        }
+        let paths: Vec<_> = server.listeners.iter().map(|endpoint| endpoint.path.clone()).collect();
+        drop(server);
+        for path in paths {
+            assert!(!path.exists(), "{} still present", path.display());
+        }
+    }
+
+    #[test]
+    fn missing_side_socket_is_fail_soft() {
+        let scratch = Scratch::new("a8b");
+        let presence = scratch.0.join("presence.sock");
+        let sidecar = scratch.0.join("sidecar.sock");
+        let command_parent = scratch.0.join("not-a-directory");
+        std::fs::write(&command_parent, b"x").unwrap();
+        let command = command_parent.join("command.sock");
+        let Err(blocked) = bind_endpoint(&command, Tier::T1User) else {
+            panic!("command parent is a file");
+        };
+        assert_eq!(blocked.kind(), std::io::ErrorKind::AlreadyExists);
+        let (text, speech) = boards();
+        let server = SocketServer::bind(&presence, &command, &sidecar, text, speech).unwrap();
+        assert_eq!(server.listeners.len(), 2);
+        assert_eq!(server.listeners[0].tier, Tier::T2Client);
+        assert_eq!(server.listeners[1].tier, Tier::T3Sidecar);
+        mode_is_0600(&presence);
+        mode_is_0600(&sidecar);
+        assert!(!command.exists());
+        drop(server);
+        assert!(!presence.exists());
+        assert!(!sidecar.exists());
+        assert!(command_parent.is_file());
     }
 }
