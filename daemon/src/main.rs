@@ -9,6 +9,7 @@ mod screen_text;
 mod pipeline;
 mod avatar_expand;
 mod protocol;
+mod gate;
 mod registry;
 mod socket;
 mod speech;
@@ -68,6 +69,24 @@ fn socket_path() -> PathBuf {
     }
     let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
     PathBuf::from(runtime_dir).join("pachakutech").join("presence.sock")
+}
+
+fn command_socket_path() -> PathBuf {
+    if let Ok(over) = std::env::var("PRESENCE_COMMAND_SOCKET") {
+        if !over.is_empty() {
+            return PathBuf::from(over);
+        }
+    }
+    socket_path().with_file_name("command.sock")
+}
+
+fn sidecar_socket_path() -> PathBuf {
+    if let Ok(over) = std::env::var("PRESENCE_SIDECAR_SOCKET") {
+        if !over.is_empty() {
+            return PathBuf::from(over);
+        }
+    }
+    socket_path().with_file_name("sidecar.sock")
 }
 
 fn main() {
@@ -195,7 +214,19 @@ fn main() {
     }
 
     let path = socket_path();
-    let result = overlay::run(&mut overlay, &mut gpu, &vk, &pipeline, &path, &mut avatar, expand.as_mut());
+    let command = command_socket_path();
+    let sidecar = sidecar_socket_path();
+    let result = overlay::run(
+        &mut overlay,
+        &mut gpu,
+        &vk,
+        &pipeline,
+        &path,
+        &command,
+        &sidecar,
+        &mut avatar,
+        expand.as_mut(),
+    );
     gpu.destroy(&vk);
     if let Err(e) = result {
         eprintln!("[overlay] {e}");

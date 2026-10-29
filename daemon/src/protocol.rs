@@ -186,6 +186,27 @@ impl Proposal {
             | Proposal::ConcealHighlight { proposal_id, .. } => proposal_id,
         }
     }
+
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            Proposal::HighlightRegion { .. } => "highlightRegion",
+            Proposal::SpawnPresence { .. } => "spawnPresence",
+            Proposal::AnimatePresence { .. } => "animatePresence",
+            Proposal::RetirePresence { .. } => "retirePresence",
+            Proposal::AddArtifact { .. } => "addArtifact",
+            Proposal::RetireArtifact { .. } => "retireArtifact",
+            Proposal::Shutdown { .. } => "shutdown",
+            Proposal::AvatarRest { .. } => "avatarRest",
+            Proposal::AvatarFace { .. } => "avatarFace",
+            Proposal::StopPresence { .. } => "stopPresence",
+            Proposal::AvatarSpeak { .. } => "avatarSpeak",
+            Proposal::AvatarStop { .. } => "avatarStop",
+            Proposal::AvatarWalk { .. } => "avatarWalk",
+            Proposal::QueryScreenText { .. } => "queryScreenText",
+            Proposal::QuerySpeech { .. } => "querySpeech",
+            Proposal::ConcealHighlight { .. } => "concealHighlight",
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]

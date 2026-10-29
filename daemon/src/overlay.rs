@@ -2877,6 +2877,8 @@ pub fn run(
     vk: &VulkanContext,
     pipeline: &SplatPipeline,
     socket_path: &Path,
+    command_socket: &Path,
+    sidecar_socket: &Path,
     avatar: &mut Option<AvatarActor>,
     mut expand: Option<&mut AvatarExpand>,
 ) -> Result<(), String> {
@@ -2884,9 +2886,9 @@ pub fn run(
         crate::screen_text::GlassStamp::new(),
     )));
     let speech_board = avatar.as_ref().map(|a| a.speech.board()).unwrap_or_else(crate::speech::SpeechBoard::new);
-    let mut server = SocketServer::bind(socket_path, text_memory.clone(), speech_board).map_err(|e| format!("socket bind: {e}"))?;
+    let mut server = SocketServer::bind(socket_path, command_socket, sidecar_socket, text_memory.clone(), speech_board)
+        .map_err(|e| format!("socket bind: {e}"))?;
     let _pid = crate::socket::PidFile::create(socket_path).map_err(|e| format!("pid file: {e}"))?;
-    println!("[socket] listening on {}", socket_path.display());
     server.set_avatar_available(avatar.is_some());
 
     let locked = Arc::new(AtomicBool::new(false));
@@ -3232,10 +3234,10 @@ pub fn run(
             }
         }
 
-        let mut fds = vec![
-            libc::pollfd { fd: wl_fd, events: libc::POLLIN, revents: 0 },
-            libc::pollfd { fd: server.listener_fd(), events: libc::POLLIN, revents: 0 },
-        ];
+        let mut fds = vec![libc::pollfd { fd: wl_fd, events: libc::POLLIN, revents: 0 }];
+        for fd in server.listener_fds() {
+            fds.push(libc::pollfd { fd, events: libc::POLLIN, revents: 0 });
+        }
         for fd in server.client_fds() {
             fds.push(libc::pollfd { fd, events: libc::POLLIN, revents: 0 });
         }

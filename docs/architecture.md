@@ -64,6 +64,24 @@ Every tool in `src/index.ts` has a matching `Proposal` variant in
 the other direction: a socket kind with no MCP tool. It returns the
 latest screen-text message.
 
+## Endpoints and tiers
+
+The daemon binds three mode `0600` Unix sockets. `presence.sock` is the MCP
+and CLI socket (`PRESENCE_DAEMON_SOCKET`). `command.sock` is the user command
+channel (`PRESENCE_COMMAND_SOCKET`). `sidecar.sock` is the model sidecar
+(`PRESENCE_SIDECAR_SOCKET`). The side sockets sit in the same directory as
+`presence.sock` unless their override is set.
+
+Tier belongs to the listener that accepted the connection. A message body
+cannot name one. `presence.sock` is T2, `command.sock` is T1, and
+`sidecar.sock` is T3. T0 is physical input on the overlay and has no socket.
+Every kind that exists today is allowed only on T2. T1 and T3 answer those
+kinds with `not_allowed_for_tier:<kind>`. If `command.sock` or `sidecar.sock`
+cannot be bound, the daemon logs the error and keeps the sockets that did
+bind. `presence.sock` failing is still fatal.
+
+The Node policy gate does not decide tier. It rate-limits MCP tool calls.
+
 ## Ingress
 
 Screen and webcam are ticked.
