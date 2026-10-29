@@ -180,6 +180,12 @@ pub enum Proposal {
     /// Passages from a map. This is not a move and not a decision.
     #[serde(rename = "queryDocMap")]
     QueryDocMap(QueryDocMapBody),
+    /// T1 stores an active project. T3 stores `draft: true`. T2 is refused until C8.
+    #[serde(rename = "createProject")]
+    CreateProject(CreateProjectBody),
+    /// Read a project. This does not move a page and does not decide.
+    #[serde(rename = "queryProject")]
+    QueryProject(QueryProjectBody),
 }
 
 /// Applied on the overlay thread after the socket pump. Not a GPU command.
@@ -226,6 +232,8 @@ impl Proposal {
             Proposal::TourSignal(body) => &body.proposal_id,
             Proposal::BuildDocMap(body) => &body.proposal_id,
             Proposal::QueryDocMap(body) => &body.proposal_id,
+            Proposal::CreateProject(body) => &body.proposal_id,
+            Proposal::QueryProject(body) => &body.proposal_id,
         }
     }
 
@@ -258,6 +266,8 @@ impl Proposal {
             Proposal::TourSignal(_) => "tourSignal",
             Proposal::BuildDocMap(_) => "buildDocMap",
             Proposal::QueryDocMap(_) => "queryDocMap",
+            Proposal::CreateProject(_) => "createProject",
+            Proposal::QueryProject(_) => "queryProject",
         }
     }
 }
@@ -318,6 +328,12 @@ pub struct ObservePhraseBody {
     pub h: Option<f32>,
     #[serde(default)]
     pub viewed: Option<ObservedViewed>,
+    #[serde(rename = "projectId", default)]
+    pub project_id: Option<String>,
+    #[serde(rename = "locusId", default)]
+    pub locus_id: Option<String>,
+    #[serde(rename = "askId", default)]
+    pub ask_id: Option<String>,
     #[serde(default, rename = "kind")]
     pub wire_kind: Option<String>,
 }
@@ -534,6 +550,61 @@ pub struct QueryDocMapBody {
     pub query: String,
     #[serde(default)]
     pub k: Option<u32>,
+    #[serde(default, rename = "kind")]
+    pub wire_kind: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProjectAskKind {
+    Claim,
+    Question,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectAskIn {
+    pub text: String,
+    pub kind: ProjectAskKind,
+}
+
+/// Exactly one of `url`, `path`, or `dir` is a source. The handler rejects the rest.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectSourceIn {
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub dir: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateProjectBody {
+    #[serde(rename = "proposalId")]
+    pub proposal_id: String,
+    pub title: String,
+    pub asks: Vec<ProjectAskIn>,
+    pub sources: Vec<ProjectSourceIn>,
+    #[serde(rename = "grantedRoots", default)]
+    pub granted_roots: Vec<String>,
+    #[serde(default, rename = "kind")]
+    pub wire_kind: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QueryProjectBody {
+    #[serde(rename = "proposalId")]
+    pub proposal_id: String,
+    #[serde(rename = "projectId")]
+    pub project_id: String,
+    #[serde(rename = "sincePseq", default)]
+    pub since_pseq: Option<u64>,
+    #[serde(default)]
+    pub limit: Option<u32>,
     #[serde(default, rename = "kind")]
     pub wire_kind: Option<String>,
 }

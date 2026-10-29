@@ -14,6 +14,7 @@ mod ledger;
 mod ui_input;
 mod task;
 mod docmap;
+mod project;
 mod registry;
 mod socket;
 mod speech;

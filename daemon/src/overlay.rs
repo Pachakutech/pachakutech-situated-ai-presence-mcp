@@ -2893,6 +2893,7 @@ pub fn run(
             server.attach_ledger_watch(&watch);
         }
     }
+    server.attach_projects_from_env();
     let _pid = crate::socket::PidFile::create(socket_path).map_err(|e| format!("pid file: {e}"))?;
     server.set_avatar_available(avatar.is_some());
 

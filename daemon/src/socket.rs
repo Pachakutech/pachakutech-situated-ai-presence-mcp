@@ -130,6 +130,15 @@ impl SocketServer {
         self.registry.lock().expect("registry mutex poisoned").set_avatar_available(available);
     }
 
+    /// The project directory is opened after the registry exists. A failure is logged
+    /// and project kinds answer `projects_unavailable`. The overlay still runs.
+    pub fn attach_projects_from_env(&self) {
+        let root = crate::project::projects_root_from_env();
+        if let Err(err) = self.registry.lock().expect("registry mutex poisoned").open_projects(&root) {
+            eprintln!("[project] store unavailable at {}: {err}", root.display());
+        }
+    }
+
     /// The watch file is attached after the registry exists. `Ledger::new` does not open it.
     pub fn attach_ledger_watch(&self, path: &str) {
         self.registry.lock().expect("registry mutex poisoned").ledger_mut().attach_watch(path);
@@ -485,6 +494,10 @@ fn dispatch(
         return (result, false);
     }
 
+    if let Some(result) = crate::project::route_project(&proposal, tier, reg.projects_mut(), now_ms()) {
+        return (result, false);
+    }
+
     if let Some(result) = route_presence(&proposal, &mut reg, avatar_commands) {
         return (result, false);
     }
@@ -549,6 +562,7 @@ fn dispatch(
         | Proposal::ResolveItem(_)
         | Proposal::TourSignal(_) => ProposalResult::err(&proposal_id, "unrouted task proposal"),
         Proposal::BuildDocMap(_) | Proposal::QueryDocMap(_) => ProposalResult::err(&proposal_id, "unrouted docmap proposal"),
+        Proposal::CreateProject(_) | Proposal::QueryProject(_) => ProposalResult::err(&proposal_id, "unrouted project proposal"),
     };
     (result, false)
 }

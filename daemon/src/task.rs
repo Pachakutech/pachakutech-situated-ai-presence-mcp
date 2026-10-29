@@ -1148,7 +1148,7 @@ fn insert_task(
 fn ledger_err(err: LedgerError) -> TaskError {
     match err {
         LedgerError::Quota => TaskError::Quota,
-        LedgerError::Schema => TaskError::Schema,
+        LedgerError::Schema | LedgerError::Rejected(_) => TaskError::Schema,
     }
 }
 
