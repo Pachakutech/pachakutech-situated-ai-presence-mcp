@@ -2,9 +2,9 @@
 //! connection. A proposal body cannot name a tier.
 
 use crate::protocol::{Proposal, ProposalResult};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Tier {
     #[serde(rename = "T0")]
     T0Physical,
@@ -59,6 +59,9 @@ pub fn allowed(tier: Tier, proposal: &Proposal) -> bool {
         Proposal::ResolveItem(_) | Proposal::TourSignal(_) => matches!(tier, Tier::T1User | Tier::T2Client),
         Proposal::BuildDocMap(_) => matches!(tier, Tier::T1User | Tier::T2Client),
         Proposal::QueryDocMap(_) => matches!(tier, Tier::T1User | Tier::T2Client | Tier::T3Sidecar),
+        // T2 create waits for C8. T3 is stored as a draft by the handler.
+        Proposal::CreateProject(_) => matches!(tier, Tier::T1User | Tier::T3Sidecar),
+        Proposal::QueryProject(_) => matches!(tier, Tier::T1User | Tier::T2Client | Tier::T3Sidecar),
     }
 }
 
@@ -205,7 +208,13 @@ mod tests {
 
     #[test]
     fn t0_has_no_socket_kinds() {
-        for (proposal, kind) in samples().into_iter().chain(ledger_samples()).chain(task_samples()).chain(docmap_samples()) {
+        for (proposal, kind) in samples()
+            .into_iter()
+            .chain(ledger_samples())
+            .chain(task_samples())
+            .chain(docmap_samples())
+            .chain(project_samples())
+        {
             assert!(!allowed(Tier::T0Physical, &proposal), "{kind}");
             let message = check(Tier::T0Physical, &proposal).unwrap_err().error.expect("error string");
             assert!(message.starts_with("not_allowed_for_tier:"), "{message}");
@@ -281,6 +290,37 @@ mod tests {
                 other => panic!("unexpected docmap kind {other}"),
             }
         }
+        for (proposal, kind) in project_samples() {
+            let t1 = allowed(Tier::T1User, &proposal);
+            let t2 = allowed(Tier::T2Client, &proposal);
+            let t3 = allowed(Tier::T3Sidecar, &proposal);
+            match kind {
+                "createProject" => assert!(t1 && !t2 && t3, "{kind}"),
+                "queryProject" => assert!(t1 && t2 && t3, "{kind}"),
+                other => panic!("unexpected project kind {other}"),
+            }
+        }
+    }
+
+    fn project_samples() -> Vec<(Proposal, &'static str)> {
+        const LINES: &[(&str, &str)] = &[
+            (
+                r#"{"kind":"createProject","proposalId":"c","title":"t","asks":[],"sources":[]}"#,
+                "createProject",
+            ),
+            (
+                r#"{"kind":"queryProject","proposalId":"q","projectId":"pj-0123456789abcdef"}"#,
+                "queryProject",
+            ),
+        ];
+        LINES
+            .iter()
+            .map(|(json, kind)| {
+                let proposal: Proposal = serde_json::from_str(json).unwrap_or_else(|e| panic!("{kind}: {e}"));
+                assert_eq!(proposal.kind_name(), *kind);
+                (proposal, *kind)
+            })
+            .collect()
     }
 
     fn docmap_samples() -> Vec<(Proposal, &'static str)> {

@@ -9,7 +9,7 @@ use crate::protocol::{
     ListPhraseFlagsBody, MatchInfo, MatchStatus, ObservePhraseBody, ObservedViewed, Proposal, ProposalResult,
 };
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -56,6 +56,17 @@ pub struct LedgerEvent {
     /// Set on a tour enter or leave. Absent on every other kind, and omitted
     /// from the wire when absent so older event JSON stays stable.
     pub dwell_ms: Option<u64>,
+    /// Stamped from the phrase association. Omitted from the wire when absent.
+    pub project_id: Option<String>,
+    pub ask_id: Option<String>,
+    pub locus_id: Option<String>,
+}
+
+#[derive(Clone)]
+struct PhraseBind {
+    project_id: String,
+    locus_id: String,
+    ask_id: Option<String>,
 }
 
 /// Socket-visible observations. This enum cannot represent an acknowledgement,
@@ -102,6 +113,7 @@ pub enum UserAppend {
 pub enum LedgerError {
     Quota,
     Schema,
+    Rejected(&'static str),
 }
 
 #[derive(Debug)]
@@ -123,6 +135,11 @@ pub struct Ledger {
     /// Copy of each appended event. Absent unless `attach_watch` opened one.
     /// Not opened from `new`, so tests that build a ledger do not touch a file.
     watch: Option<std::fs::File>,
+    /// Phrase to project, for this process only. Empty when the ledger is new.
+    assoc: HashMap<String, PhraseBind>,
+    /// Registry-owned store. `new` leaves it closed so tests do not touch the
+    /// user's project directory. The overlay opens it after the socket binds.
+    projects: Option<crate::project::ProjectStore>,
 }
 
 impl Ledger {
@@ -134,7 +151,53 @@ impl Ledger {
             compacted_below: 0,
             reserved: HashSet::new(),
             watch: None,
+            assoc: HashMap::new(),
+            projects: None,
         }
+    }
+
+    pub fn open_projects(&mut self, root: &std::path::Path) -> std::io::Result<()> {
+        self.projects = Some(crate::project::ProjectStore::open(root)?);
+        Ok(())
+    }
+
+    pub fn projects(&self) -> Option<&crate::project::ProjectStore> {
+        self.projects.as_ref()
+    }
+
+    pub fn projects_mut(&mut self) -> Option<&mut crate::project::ProjectStore> {
+        self.projects.as_mut()
+    }
+
+    pub fn association_len(&self) -> usize {
+        self.assoc.len()
+    }
+
+    fn remember_binding(&mut self, phrase_id: &str, project_id: String, locus_id: String, ask_id: Option<String>) {
+        self.assoc.insert(
+            phrase_id.to_string(),
+            PhraseBind { project_id, locus_id, ask_id },
+        );
+    }
+
+    fn take_binding(&mut self, phrase_id: &str) -> Option<PhraseBind> {
+        self.assoc.remove(phrase_id)
+    }
+
+    fn restore_binding(&mut self, phrase_id: &str, previous: Option<PhraseBind>) {
+        match previous {
+            Some(bind) => {
+                self.assoc.insert(phrase_id.to_string(), bind);
+            }
+            None => {
+                self.assoc.remove(phrase_id);
+            }
+        }
+    }
+
+    fn latest_task_id(&self, phrase_id: &str) -> Option<String> {
+        let phrase_id = cut(phrase_id.to_string());
+        self.events.iter().rev().find(|ev| ev.phrase_id == phrase_id && ev.task_id.is_some()).and_then(|ev| ev.task_id.clone())
     }
 
     /// Open an absolute watch path. A relative path is logged and left closed.
@@ -255,7 +318,8 @@ impl Ledger {
             UserAppend::Discarded { phrase_id } => (phrase_id, LedgerKind::Discarded, None),
             UserAppend::Cleared { phrase_id } => (phrase_id, LedgerKind::Cleared, Some(ViewedTier::Acknowledged)),
         };
-        self.push(phrase_id, None, None, None, kind, viewed, None, None, None, Tier::T0Physical, now_ms)
+        let task_id = self.latest_task_id(&phrase_id);
+        self.push(phrase_id, task_id, None, None, kind, viewed, None, None, None, Tier::T0Physical, now_ms)
     }
 
     pub fn list_value(&self, body: &ListPhraseFlagsBody) -> Result<Value, LedgerError> {
@@ -340,13 +404,17 @@ impl Ledger {
         if !self.known(&phrase_id) && !self.reserved.contains(&phrase_id) && self.occupancy() >= PHRASE_CAP {
             return Err(LedgerError::Quota);
         }
+        let bind = self.assoc.get(&phrase_id).cloned();
+        let (project_id, locus_id, ask_id) = match &bind {
+            Some(bind) => (Some(bind.project_id.clone()), Some(bind.locus_id.clone()), bind.ask_id.clone()),
+            None => (None, None, None),
+        };
         let seq = self.next_seq;
-        self.next_seq += 1;
         let mut matched = matched;
         if let Some(info) = matched.as_mut() {
             info.ocr_snippet = info.ocr_snippet.take().map(cut);
         }
-        self.events.push(LedgerEvent {
+        let event = LedgerEvent {
             seq,
             ts_ms: now_ms,
             phrase_id,
@@ -359,7 +427,16 @@ impl Ledger {
             doc_key: doc_key.map(cut),
             by,
             dwell_ms,
-        });
+            project_id,
+            ask_id,
+            locus_id,
+        };
+        if let Some(project_id) = &event.project_id {
+            let store = self.projects.as_mut().ok_or(LedgerError::Rejected("projects_unavailable"))?;
+            store.append_event(project_id, &event).map_err(|err| LedgerError::Rejected(err.as_wire()))?;
+        }
+        self.next_seq += 1;
+        self.events.push(event);
         if self.events.len() > EVENT_CAP {
             self.compact();
         }
@@ -474,12 +551,15 @@ struct Derived {
     uv: Option<UvBox>,
     doc_key: Option<String>,
     task_id: Option<String>,
+    project_id: Option<String>,
+    ask_id: Option<String>,
+    locus_id: Option<String>,
     seq: u64,
 }
 
 impl Derived {
     fn wire(&self) -> Value {
-        json!({
+        let mut value = json!({
             "phraseId": self.phrase_id,
             "query": self.query,
             "match": self.matched.as_ref().map(MatchInfo::wire),
@@ -493,12 +573,14 @@ impl Derived {
             "source": { "docKey": self.doc_key },
             "taskId": self.task_id,
             "seq": self.seq,
-        })
+        });
+        insert_bound(&mut value, self.project_id.as_deref(), self.ask_id.as_deref(), self.locus_id.as_deref());
+        value
     }
 }
 
 impl LedgerEvent {
-    fn wire(&self) -> Value {
+    pub(crate) fn wire(&self) -> Value {
         let mut value = json!({
             "seq": self.seq,
             "ts": self.ts_ms,
@@ -515,7 +597,20 @@ impl LedgerEvent {
         if let Some(dwell) = self.dwell_ms {
             value["dwellMs"] = json!(dwell);
         }
+        insert_bound(&mut value, self.project_id.as_deref(), self.ask_id.as_deref(), self.locus_id.as_deref());
         value
+    }
+}
+
+fn insert_bound(value: &mut Value, project_id: Option<&str>, ask_id: Option<&str>, locus_id: Option<&str>) {
+    if let Some(project_id) = project_id {
+        value["projectId"] = json!(project_id);
+    }
+    if let Some(ask_id) = ask_id {
+        value["askId"] = json!(ask_id);
+    }
+    if let Some(locus_id) = locus_id {
+        value["locusId"] = json!(locus_id);
     }
 }
 
@@ -550,6 +645,7 @@ fn route_list(tier: Tier, ledger: &Ledger, body: &ListPhraseFlagsBody) -> Propos
         Ok(detail) => ProposalResult::ok(&body.proposal_id, Some(detail)),
         Err(LedgerError::Schema) => ProposalResult::err(&body.proposal_id, "schema"),
         Err(LedgerError::Quota) => ProposalResult::err(&body.proposal_id, "quota: phrase cap"),
+        Err(LedgerError::Rejected(message)) => ProposalResult::err(&body.proposal_id, message),
     }
 }
 
@@ -568,11 +664,30 @@ fn route_observe(tier: Tier, ledger: &mut Ledger, body: &ObservePhraseBody, now_
         Ok(uv) => uv,
         Err(()) => return ProposalResult::err(&body.proposal_id, "schema"),
     };
+    let bind = match (&body.project_id, &body.locus_id, &body.ask_id) {
+        (None, None, None) => None,
+        (Some(project_id), Some(locus_id), ask_id) => Some((project_id.clone(), locus_id.clone(), ask_id.clone())),
+        _ => return ProposalResult::err(&body.proposal_id, "schema"),
+    };
+    if let Some((project_id, locus_id, ask_id)) = &bind {
+        let wire = match ledger.projects_mut() {
+            None => return ProposalResult::err(&body.proposal_id, "projects_unavailable"),
+            Some(store) => store.check_binding(project_id, locus_id, ask_id.as_deref()).err().map(|err| err.as_wire()),
+        };
+        if let Some(wire) = wire {
+            return ProposalResult::err(&body.proposal_id, wire);
+        }
+    }
     let phrase_id = match ledger.accept_phrase_id(body.phrase_id.clone()) {
         Ok(id) => id,
         Err(LedgerError::Quota) => return ProposalResult::err(&body.proposal_id, "quota: phrase cap"),
         Err(LedgerError::Schema) => return ProposalResult::err(&body.proposal_id, "schema"),
+        Err(LedgerError::Rejected(message)) => return ProposalResult::err(&body.proposal_id, message),
     };
+    let previous = if bind.is_some() { ledger.take_binding(&phrase_id) } else { None };
+    if let Some((project_id, locus_id, ask_id)) = bind.clone() {
+        ledger.remember_binding(&phrase_id, project_id, locus_id, ask_id);
+    }
     let located = ObservedAppend::Located {
         phrase_id: phrase_id.clone(),
         task_id: body.task_id.clone(),
@@ -582,6 +697,9 @@ fn route_observe(tier: Tier, ledger: &mut Ledger, body: &ObservePhraseBody, now_
         uv,
     };
     if let Err(err) = ledger.append_observed(tier, located, now_ms) {
+        if bind.is_some() {
+            ledger.restore_binding(&phrase_id, previous);
+        }
         return ProposalResult::err(&body.proposal_id, err_wire(err));
     }
     let seq = if let Some(viewed) = body.viewed {
@@ -607,6 +725,7 @@ fn err_wire(err: LedgerError) -> &'static str {
     match err {
         LedgerError::Quota => "quota: phrase cap",
         LedgerError::Schema => "schema",
+        LedgerError::Rejected(message) => message,
     }
 }
 
@@ -685,6 +804,9 @@ fn derive_phrase(events: &[&LedgerEvent]) -> Derived {
         uv: None,
         doc_key: None,
         task_id: None,
+        project_id: None,
+        ask_id: None,
+        locus_id: None,
         seq: 0,
     };
     let mut non_ack: Option<ViewedTier> = None;
@@ -704,6 +826,11 @@ fn derive_phrase(events: &[&LedgerEvent]) -> Derived {
         }
         if ev.task_id.is_some() {
             row.task_id = ev.task_id.clone();
+        }
+        if ev.project_id.is_some() {
+            row.project_id = ev.project_id.clone();
+            row.ask_id = ev.ask_id.clone();
+            row.locus_id = ev.locus_id.clone();
         }
         match ev.kind {
             LedgerKind::Viewed => match ev.viewed {

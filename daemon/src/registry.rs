@@ -7,6 +7,7 @@ use crate::actors::{ControlActor, PresenceActor, SceneMemory};
 use crate::highlight::{InterestBook, UvBox, MAX_SECS};
 use crate::docmap::DocMap;
 use crate::ledger::Ledger;
+use crate::project::ProjectStore;
 use crate::task::TaskBook;
 use crate::pipeline::{SplatPipeline, INACTIVE_SPLAT};
 use std::collections::HashMap;
@@ -60,6 +61,16 @@ impl Registry {
 
     pub fn docmap_mut(&mut self) -> &mut DocMap {
         &mut self.docmap
+    }
+
+    /// Opens the project directory. `new` does not call this, so a test registry
+    /// does not create `~/.local/share/pachakutech/projects`.
+    pub fn open_projects(&mut self, root: &std::path::Path) -> std::io::Result<()> {
+        self.ledger.open_projects(root)
+    }
+
+    pub fn projects_mut(&mut self) -> Option<&mut ProjectStore> {
+        self.ledger.projects_mut()
     }
 
     pub fn ledger(&self) -> &Ledger {
