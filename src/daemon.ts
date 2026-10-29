@@ -26,6 +26,28 @@ export type PhraseFlagList = {
   floor?: number;
 };
 
+export type TaskItemInput = {
+  phraseId?: string;
+  query?: string;
+  narration?: string;
+  scroll?: boolean;
+  page?: number;
+};
+
+export type CreateTaskInput = {
+  presenceId: string;
+  mode: "explain" | "select" | "approve";
+  pace?: "flow" | "wait";
+  controls?: "none" | "check";
+  prompt?: string;
+  ttlSeconds?: number;
+  itemTimeoutSeconds?: number;
+  docKey?: string;
+  items: TaskItemInput[];
+};
+
+export type TaskView = Record<string, unknown>;
+
 export interface PresenceDaemon {
   highlightRegion(
     presenceId: string,
@@ -47,4 +69,7 @@ export interface PresenceDaemon {
   addArtifact(artifactId: string, description: string, sourceUri?: string): Promise<void>;
   retireArtifact(artifactId: string): Promise<void>;
   listPhraseFlags(query: PhraseFlagQuery): Promise<PhraseFlagList>;
+  createTask(input: CreateTaskInput): Promise<TaskView>;
+  cancelTask(taskId: string): Promise<TaskView>;
+  queryTask(taskId: string): Promise<TaskView>;
 }

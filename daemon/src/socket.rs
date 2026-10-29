@@ -134,6 +134,11 @@ impl SocketServer {
         std::mem::take(&mut self.avatar_commands)
     }
 
+    /// Dwell clock and task TTL. The overlay thread calls this once a frame.
+    pub fn tick_tasks(&self) {
+        self.registry.lock().expect("registry mutex poisoned").tick_tasks(now_ms());
+    }
+
     /// UV boxes whose mark should be on screen. The overlay thread calls this.
     pub fn visible_interests(&self) -> Vec<(String, crate::highlight::UvBox)> {
         self.registry.lock().expect("registry mutex poisoned").visible_interests(Instant::now())
@@ -462,6 +467,15 @@ fn dispatch(
         return (result, false);
     }
 
+    let presence_alive = match &proposal {
+        Proposal::CreateTask(body) | Proposal::DraftTask(body) => reg.has_presence(&body.presence_id),
+        _ => true,
+    };
+    let (book, ledger) = reg.task_and_ledger();
+    if let Some(result) = crate::task::route_task(&proposal, tier, book, ledger, presence_alive, now_ms()) {
+        return (result, false);
+    }
+
     if let Some(result) = route_presence(&proposal, &mut reg, avatar_commands) {
         return (result, false);
     }
@@ -469,6 +483,7 @@ fn dispatch(
     let result = match proposal {
         Proposal::ConcealHighlight { presence_id, .. } => {
             let concealed = reg.conceal_for_jump(&presence_id, Instant::now());
+            reg.note_task_hidden(&presence_id);
             ProposalResult::ok(&proposal_id, Some(json!({ "concealed": concealed })))
         }
         Proposal::HighlightRegion { presence_id, description, u, v, w, h, duration_seconds, until_speech, .. } => {
@@ -481,6 +496,7 @@ fn dispatch(
             ) {
                 Ok((box_, secs)) => {
                     if until_speech { reg.hold_interest_for_speech(&presence_id); }
+                    reg.note_task_highlight(&presence_id, now_ms());
                     ProposalResult::ok(
                         &proposal_id,
                         Some(json!({
@@ -516,6 +532,9 @@ fn dispatch(
         | Proposal::QuerySpeech { .. } => ProposalResult::ok(&proposal_id, None),
         Proposal::ListPhraseFlags(_) | Proposal::SubscribeLedger(_) | Proposal::ObservePhrase(_) => {
             ProposalResult::err(&proposal_id, "unrouted ledger proposal")
+        }
+        Proposal::CreateTask(_) | Proposal::DraftTask(_) | Proposal::CancelTask(_) | Proposal::QueryTask(_) => {
+            ProposalResult::err(&proposal_id, "unrouted task proposal")
         }
     };
     (result, false)

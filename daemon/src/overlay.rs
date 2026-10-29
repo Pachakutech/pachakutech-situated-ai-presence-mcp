@@ -3054,6 +3054,7 @@ pub fn run(
             }
         }
 
+        server.tick_tasks();
         if server.pump(pipeline).map_err(|e| format!("socket pump: {e}"))? {
             println!("[socket] shutdown requested");
             capture_enabled.store(false, Ordering::Relaxed);

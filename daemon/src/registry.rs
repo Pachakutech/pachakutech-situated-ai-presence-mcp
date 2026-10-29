@@ -6,6 +6,7 @@ use crate::actors::gpu_layout::to_gpu_splat;
 use crate::actors::{ControlActor, PresenceActor, SceneMemory};
 use crate::highlight::{InterestBook, UvBox, MAX_SECS};
 use crate::ledger::Ledger;
+use crate::task::TaskBook;
 use crate::pipeline::{SplatPipeline, INACTIVE_SPLAT};
 use std::collections::HashMap;
 use std::time::Instant;
@@ -31,6 +32,8 @@ pub struct Registry {
     interests: InterestBook,
     /// Glass-session phrase log. Retiring a presence does not clear it.
     ledger: Ledger,
+    /// Task queue for this run. Retire dismisses that presence's tasks.
+    tasks: TaskBook,
 }
 
 impl Registry {
@@ -47,6 +50,7 @@ impl Registry {
             avatar_owner: None,
             interests: InterestBook::new(),
             ledger: Ledger::new(),
+            tasks: TaskBook::new(),
         }
     }
 
@@ -56,6 +60,30 @@ impl Registry {
 
     pub fn ledger_mut(&mut self) -> &mut Ledger {
         &mut self.ledger
+    }
+
+    pub fn task_book(&self) -> &TaskBook {
+        &self.tasks
+    }
+
+    pub fn task_book_mut(&mut self) -> &mut TaskBook {
+        &mut self.tasks
+    }
+
+    pub fn task_and_ledger(&mut self) -> (&mut TaskBook, &mut Ledger) {
+        (&mut self.tasks, &mut self.ledger)
+    }
+
+    pub fn tick_tasks(&mut self, now_ms: u64) {
+        self.tasks.tick(&mut self.ledger, now_ms);
+    }
+
+    pub fn note_task_highlight(&mut self, presence_id: &str, now_ms: u64) {
+        self.tasks.note_highlight(presence_id, &mut self.ledger, now_ms);
+    }
+
+    pub fn note_task_hidden(&mut self, presence_id: &str) {
+        self.tasks.note_hidden_presence(presence_id);
     }
 
     /// The presence must already be in the daemon map. It does not need the body.
@@ -153,6 +181,7 @@ impl Registry {
     pub fn retire_presence(&mut self, presence_id: &str) -> Result<bool, String> {
         self.presence.retire(presence_id)?;
         self.interests.retire(presence_id);
+        self.tasks.dismiss_presence(presence_id);
         let owned = self.avatar_owner.as_deref() == Some(presence_id);
         if owned {
             self.avatar_owner = None;

@@ -109,11 +109,53 @@ pub struct Ledger {
     /// Highest seq removed by compaction. A `since` below this is not a
     /// complete event stream.
     compacted_below: u64,
+    /// Phrase ids a task holds before any event is written. They count
+    /// toward the session cap so two creates cannot pass 50.
+    reserved: HashSet<String>,
 }
 
 impl Ledger {
     pub fn new() -> Self {
-        Self { events: Vec::new(), next_seq: 1, next_mint: 1, compacted_below: 0 }
+        Self { events: Vec::new(), next_seq: 1, next_mint: 1, compacted_below: 0, reserved: HashSet::new() }
+    }
+
+    /// Ledger phrases plus task ids that have no event yet.
+    pub fn occupancy(&self) -> usize {
+        let mut n = self.distinct_phrases();
+        for id in &self.reserved {
+            if !self.known(id) {
+                n += 1;
+            }
+        }
+        n
+    }
+
+    /// Mint `ph-<n>`, skip ids already in the log or reserved, and reserve it.
+    /// Does not write an event.
+    pub fn mint_and_hold(&mut self) -> Result<String, LedgerError> {
+        if self.occupancy() >= PHRASE_CAP {
+            return Err(LedgerError::Quota);
+        }
+        let id = self.allocate_mint();
+        self.reserved.insert(id.clone());
+        Ok(id)
+    }
+
+    pub fn holds(&self, id: &str) -> bool {
+        self.known(id) || self.reserved.contains(id)
+    }
+
+    /// Count a caller-supplied id toward the cap. An id already in the log
+    /// or already reserved does not take a second slot.
+    pub fn hold_phrase(&mut self, id: &str) -> Result<(), LedgerError> {
+        if self.known(id) || self.reserved.contains(id) {
+            return Ok(());
+        }
+        if self.occupancy() >= PHRASE_CAP {
+            return Err(LedgerError::Quota);
+        }
+        self.reserved.insert(id.to_string());
+        Ok(())
     }
 
     pub fn events(&self) -> &[LedgerEvent] {
@@ -244,7 +286,7 @@ impl Ledger {
         if phrase_id.trim().is_empty() {
             return Err(LedgerError::Schema);
         }
-        if !self.known(&phrase_id) && self.distinct_phrases() >= PHRASE_CAP {
+        if !self.known(&phrase_id) && !self.reserved.contains(&phrase_id) && self.occupancy() >= PHRASE_CAP {
             return Err(LedgerError::Quota);
         }
         let seq = self.next_seq;
@@ -314,7 +356,7 @@ impl Ledger {
         loop {
             let id = format!("ph-{}", self.next_mint);
             self.next_mint += 1;
-            if !self.known(&id) {
+            if !self.known(&id) && !self.reserved.contains(&id) {
                 return id;
             }
         }
@@ -324,13 +366,13 @@ impl Ledger {
         let id = match requested {
             Some(raw) if !raw.trim().is_empty() => cut(raw),
             _ => {
-                if self.distinct_phrases() >= PHRASE_CAP {
+                if self.occupancy() >= PHRASE_CAP {
                     return Err(LedgerError::Quota);
                 }
                 self.allocate_mint()
             }
         };
-        if !self.known(&id) && self.distinct_phrases() >= PHRASE_CAP {
+        if !self.known(&id) && !self.reserved.contains(&id) && self.occupancy() >= PHRASE_CAP {
             return Err(LedgerError::Quota);
         }
         Ok(id)

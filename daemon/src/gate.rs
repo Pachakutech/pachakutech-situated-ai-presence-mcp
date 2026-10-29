@@ -53,6 +53,9 @@ pub fn allowed(tier: Tier, proposal: &Proposal) -> bool {
             matches!(tier, Tier::T1User | Tier::T2Client | Tier::T3Sidecar)
         }
         Proposal::ObservePhrase(_) => matches!(tier, Tier::T3Sidecar),
+        Proposal::CreateTask(_) => matches!(tier, Tier::T1User | Tier::T2Client),
+        Proposal::DraftTask(_) => matches!(tier, Tier::T3Sidecar),
+        Proposal::CancelTask(_) | Proposal::QueryTask(_) => matches!(tier, Tier::T1User | Tier::T2Client),
     }
 }
 
@@ -166,9 +169,32 @@ mod tests {
             .collect()
     }
 
+    fn task_samples() -> Vec<(Proposal, &'static str)> {
+        const LINES: &[(&str, &str)] = &[
+            (
+                r#"{"kind":"createTask","proposalId":"c","presenceId":"p","mode":"explain","items":[{"query":"the line"}]}"#,
+                "createTask",
+            ),
+            (
+                r#"{"kind":"draftTask","proposalId":"d","presenceId":"p","mode":"explain","items":[{"query":"the line"}]}"#,
+                "draftTask",
+            ),
+            (r#"{"kind":"cancelTask","proposalId":"x","taskId":"tk-1"}"#, "cancelTask"),
+            (r#"{"kind":"queryTask","proposalId":"q","taskId":"tk-1"}"#, "queryTask"),
+        ];
+        LINES
+            .iter()
+            .map(|(json, kind)| {
+                let proposal: Proposal = serde_json::from_str(json).unwrap_or_else(|e| panic!("{kind}: {e}"));
+                assert_eq!(proposal.kind_name(), *kind);
+                (proposal, *kind)
+            })
+            .collect()
+    }
+
     #[test]
     fn t0_has_no_socket_kinds() {
-        for (proposal, kind) in samples().into_iter().chain(ledger_samples()) {
+        for (proposal, kind) in samples().into_iter().chain(ledger_samples()).chain(task_samples()) {
             assert!(!allowed(Tier::T0Physical, &proposal), "{kind}");
             let message = check(Tier::T0Physical, &proposal).unwrap_err().error.expect("error string");
             assert!(message.starts_with("not_allowed_for_tier:"), "{message}");
@@ -222,6 +248,16 @@ mod tests {
                 other => panic!("unexpected ledger kind {other}"),
             }
         }
+        for (proposal, kind) in task_samples() {
+            let t1 = allowed(Tier::T1User, &proposal);
+            let t2 = allowed(Tier::T2Client, &proposal);
+            let t3 = allowed(Tier::T3Sidecar, &proposal);
+            match kind {
+                "createTask" | "cancelTask" | "queryTask" => assert!(t1 && t2 && !t3, "{kind}"),
+                "draftTask" => assert!(!t1 && !t2 && t3, "{kind}"),
+                other => panic!("unexpected task kind {other}"),
+            }
+        }
     }
 
     #[test]
@@ -248,14 +284,22 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "enabled by C2"]
     fn create_task_rejected_on_sidecar() {
-        panic!("C2 enables create_task_rejected_on_sidecar");
+        let (proposal, _) = task_samples().into_iter().find(|(_, kind)| *kind == "createTask").unwrap();
+        assert!(!allowed(Tier::T3Sidecar, &proposal));
+        let rejected = check(Tier::T3Sidecar, &proposal).unwrap_err();
+        assert_eq!(rejected.error.as_deref(), Some("not_allowed_for_tier:createTask"));
+        assert!(check(Tier::T1User, &proposal).is_ok());
+        assert!(check(Tier::T2Client, &proposal).is_ok());
     }
 
     #[test]
-    #[ignore = "enabled by C3"]
     fn draft_task_rejected_on_mcp() {
-        panic!("C3 enables draft_task_rejected_on_mcp");
+        let (proposal, _) = task_samples().into_iter().find(|(_, kind)| *kind == "draftTask").unwrap();
+        assert!(!allowed(Tier::T2Client, &proposal));
+        let rejected = check(Tier::T2Client, &proposal).unwrap_err();
+        assert_eq!(rejected.error.as_deref(), Some("not_allowed_for_tier:draftTask"));
+        assert!(check(Tier::T3Sidecar, &proposal).is_ok());
+        assert!(!allowed(Tier::T1User, &proposal));
     }
 }

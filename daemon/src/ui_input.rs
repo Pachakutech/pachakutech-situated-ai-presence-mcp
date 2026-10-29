@@ -15,11 +15,29 @@ pub struct T0Witness {
     _private: (),
 }
 
+/// Beside-word control the pointer hit. The word mark is not a target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClickTarget {
+    Check,
+    Yes,
+    No,
+}
+
+/// Tour keys. Ordinary keys are not a variant: the daemon does not watch them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hotkey {
+    Ack,
+    Stop,
+}
+
 pub enum UiEvent {
     Acknowledge { phrase_id: String },
     Uncheck { phrase_id: String },
     Approve { phrase_id: String },
     Discard { phrase_id: String },
+    /// Pointer-down on a control square. `ts_ms` is the compositor timestamp.
+    Click { phrase_id: String, target: ClickTarget, ts_ms: u64 },
+    Hotkey(Hotkey),
 }
 
 pub fn apply_ui_event(ledger: &mut Ledger, ev: UiEvent, now_ms: u64) -> Result<u64, LedgerError> {
@@ -29,6 +47,9 @@ pub fn apply_ui_event(ledger: &mut Ledger, ev: UiEvent, now_ms: u64) -> Result<u
         UiEvent::Uncheck { phrase_id } => UserAppend::Cleared { phrase_id },
         UiEvent::Approve { phrase_id } => UserAppend::Approved { phrase_id },
         UiEvent::Discard { phrase_id } => UserAppend::Discarded { phrase_id },
+        // Clicks and hotkeys are accepted by the task book, which calls back
+        // with one of the variants above. This arm writes nothing.
+        UiEvent::Click { .. } | UiEvent::Hotkey(_) => return Err(LedgerError::Schema),
     };
     ledger.append_user(witness, append, now_ms)
 }

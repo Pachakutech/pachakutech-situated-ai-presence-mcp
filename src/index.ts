@@ -351,6 +351,73 @@ server.registerTool(
   },
 );
 
+const taskItem = z.object({
+  phraseId: z.string().optional().describe("Existing phrase id. Omit when query is set."),
+  query: z.string().optional().describe("Phrase text. Omit when phraseId is set."),
+  narration: z.string().optional().describe("Spoken line for this item, cut at 300 characters."),
+  scroll: z.boolean().optional().describe("The item is off the glass and will need a move."),
+  page: z.number().int().positive().optional().describe("PDF page, starting at 1."),
+});
+
+server.registerTool(
+  "createPresenceTask",
+  {
+    title: "Create a task",
+    description:
+      "Opens a task on the daemon. The daemon holds the list. " +
+      "explain may draw nothing or a checkbox. select draws a checkbox. approve draws yes and no. " +
+      "The client does not send origin, checked, or a decision. " +
+      "A client that lost its context reads the task again with queryPresenceTask.",
+    inputSchema: {
+      presenceId: z.string().describe("Live presence the task belongs to"),
+      mode: z.enum(["explain", "select", "approve"]),
+      pace: z.enum(["flow", "wait"]).optional().describe("explain defaults to flow. select and approve default to wait."),
+      controls: z.enum(["none", "check"]).optional().describe("explain defaults to none. select defaults to check. approve takes no controls value."),
+      prompt: z.string().optional().describe("Agent text, cut at 120 characters."),
+      ttlSeconds: z.number().int().positive().optional().describe("Seconds until the task expires. Default 120. Zero is rejected."),
+      itemTimeoutSeconds: z.number().int().positive().optional().describe("Seconds an item may wait. Default 20."),
+      docKey: z.string().optional(),
+      items: z.array(taskItem).min(1).max(12),
+    },
+  },
+  async (input) => {
+    policy.assertAllowed("createPresenceTask");
+    const detail = await (await getDaemon()).createTask(input);
+    return { content: [{ type: "text", text: JSON.stringify(detail) }] };
+  },
+);
+
+server.registerTool(
+  "cancelPresenceTask",
+  {
+    title: "Dismiss a task",
+    description: "Dismisses the task. Phrase rows stay as they are. The client's answers are not cleared.",
+    inputSchema: { taskId: z.string() },
+  },
+  async ({ taskId }) => {
+    policy.assertAllowed("cancelPresenceTask");
+    const detail = await (await getDaemon()).cancelTask(taskId);
+    return { content: [{ type: "text", text: JSON.stringify(detail) }] };
+  },
+);
+
+server.registerTool(
+  "queryPresenceTask",
+  {
+    title: "Read a task",
+    description:
+      "Reads the task the daemon holds: state, items, and whether a control is drawn. " +
+      "The checkbox and the yes/no pair are the user's. A client does not write those answers. " +
+      "After a compaction, read the task again.",
+    inputSchema: { taskId: z.string() },
+  },
+  async ({ taskId }) => {
+    policy.assertAllowed("queryPresenceTask");
+    const detail = await (await getDaemon()).queryTask(taskId);
+    return { content: [{ type: "text", text: JSON.stringify(detail) }] };
+  },
+);
+
 server.registerTool(
   "retirePresence",
   {
