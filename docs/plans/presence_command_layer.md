@@ -256,7 +256,7 @@ Specified in `research_tours.md`. In short: a **project** holds an ordered list 
 | C7–C13 | Projects, intake, adapters, loci, `openSource` and multi-source tours, exports, MCP tools: see `research_tours.md` section 12. |
 | C14 (later) | Tighten-only learned advisor. |
 
-Dependencies: C1 and C2 first. C3 needs C1. C4 and C5 can run in parallel after C3. B1 (sidecar client) from the reflex plan feeds C-tickets as T3.
+Dependencies: C1 and C2 first. C3 needs C1. C4 and C5 can run in parallel after C3. B1 (sidecar client) from the reflex plan feeds C-tickets as T3. Goals and acceptance criteria for C4, C5, and C6 are in `C4_C5_C6_command_report_map.md`. The tour listed here as C6b landed as C3b and C3c.
 
 ## 11. Open questions
 
