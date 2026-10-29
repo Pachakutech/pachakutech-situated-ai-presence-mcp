@@ -6,14 +6,15 @@
 // registration command, rather than reimplementing per-agent config parsing.
 
 import { execFileSync } from "node:child_process";
-import { cpSync, existsSync, accessSync, constants, mkdirSync } from "node:fs";
+import { cpSync, existsSync, accessSync, constants, mkdirSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { getBundledDaemonPath } from "./daemonBinary.js";
 import { socketPath } from "./daemonClient.js";
 import { askCommand } from "./command/ask.js";
-import { commandSocketPath, connectCommand } from "./command/socket.js";
+import { runLedger } from "./command/ledger.js";
+import { commandSocketPath, connectCommand, openCommand } from "./command/socket.js";
 import { sendProposal, socketReachable, startDaemon, statusDaemon, stopDaemon } from "./daemonControl.js";
 import { cueFollowMain } from "./locate/cues.js";
 import { fuseCommand, locateCommand, screenTextCommand } from "./locate/run.js";
@@ -72,6 +73,11 @@ function usage(): never {
       "                       MCP name: manifestHighlightFromQuery.",
       "  screen-text          Print the daemon's latest screen-text message as JSON.",
       "                       Columns from one capture. Fresh is false when it is quiet.",
+      "  ledger [--format jsonl|csv|md] [--events] [--decided-by T0] [--doc <docKey>]",
+      "                       [--since <seq>] [--follow] [--out <path>]",
+      "                       Read the phrase ledger on command.sock. The table and --out",
+      "                       are copies. A decision is the user's click when decisionBy",
+      "                       is T0. It is not permission to act.",
       "  ask --presence <id> [--scroll] [--controls check] [--doc <docKey>]",
       "                       [--transcript <text>] [sentence]",
       "                       Parse a sentence, confirm the mode, and send one createTask",
@@ -390,6 +396,24 @@ switch (command) {
   case "screen-text":
     process.exit(await screenTextCommand());
     break;
+  case "ledger": {
+    const commandPath = commandSocketPath(socketPath());
+    const session = openCommand(commandPath);
+    const out = process.argv.slice(3);
+    const outFlag = out.indexOf("--out");
+    const outPath = outFlag >= 0 ? out[outFlag + 1] : undefined;
+    process.exit(
+      await runLedger(out, {
+        request: (body) => session.request(body),
+        follow: (body) => session.subscribe(body, (line) => process.stdout.write(`${line}\n`)),
+        write: (text) => {
+          if (outPath) writeFileSync(outPath, text);
+          else process.stdout.write(text);
+        },
+      }),
+    );
+    break;
+  }
   case "ask": {
     const commandPath = commandSocketPath(socketPath());
     process.exit(

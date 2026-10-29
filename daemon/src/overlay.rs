@@ -2888,6 +2888,11 @@ pub fn run(
     let speech_board = avatar.as_ref().map(|a| a.speech.board()).unwrap_or_else(crate::speech::SpeechBoard::new);
     let mut server = SocketServer::bind(socket_path, command_socket, sidecar_socket, text_memory.clone(), speech_board)
         .map_err(|e| format!("socket bind: {e}"))?;
+    if let Ok(watch) = std::env::var("PRESENCE_LEDGER_WATCH") {
+        if !watch.is_empty() {
+            server.attach_ledger_watch(&watch);
+        }
+    }
     let _pid = crate::socket::PidFile::create(socket_path).map_err(|e| format!("pid file: {e}"))?;
     server.set_avatar_available(avatar.is_some());
 

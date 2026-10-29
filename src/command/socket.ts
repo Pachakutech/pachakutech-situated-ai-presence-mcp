@@ -52,3 +52,69 @@ export function connectCommand(path: string, body: unknown): Promise<CommandRepl
     });
   });
 }
+
+export interface CommandSession {
+  request(body: unknown): Promise<CommandReply>;
+  /** One subscribeLedger on this same connection. Later lines are handed to `onLine`. */
+  subscribe(body: unknown, onLine: (line: string) => void): void;
+}
+
+/** A private command-socket connection. Several replies, then at most one subscribe. */
+export function openCommand(path: string): CommandSession {
+  const sock = createConnection({ path });
+  let buf = "";
+  let subscribed = false;
+  let onLine: ((line: string) => void) | null = null;
+  const waiters: Array<(line: string) => void> = [];
+  const pump = () => {
+    let nl = buf.indexOf("\n");
+    while (nl >= 0) {
+      const line = buf.slice(0, nl);
+      buf = buf.slice(nl + 1);
+      nl = buf.indexOf("\n");
+      if (subscribed) {
+        if (line.length > 0) onLine?.(line);
+        continue;
+      }
+      waiters.shift()?.(line);
+    }
+  };
+  sock.setEncoding("utf8");
+  sock.on("data", (chunk: string) => {
+    buf += chunk;
+    pump();
+  });
+  sock.on("error", () => {
+    while (waiters.length) waiters.shift()?.("");
+  });
+  return {
+    request(body) {
+      return new Promise((resolve, reject) => {
+        if (subscribed) {
+          reject(new Error("command socket is already subscribed"));
+          return;
+        }
+        waiters.push((line) => {
+          if (!line) {
+            reject(new Error("command socket closed"));
+            return;
+          }
+          try {
+            resolve(JSON.parse(line) as CommandReply);
+          } catch (error) {
+            reject(error);
+          }
+        });
+        sock.write(`${JSON.stringify(body)}\n`);
+      });
+    },
+    subscribe(body, cb) {
+      if (subscribed) return;
+      onLine = cb;
+      waiters.push(() => {
+        subscribed = true;
+      });
+      sock.write(`${JSON.stringify(body)}\n`);
+    },
+  };
+}

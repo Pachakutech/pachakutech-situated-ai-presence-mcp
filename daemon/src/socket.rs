@@ -130,6 +130,11 @@ impl SocketServer {
         self.registry.lock().expect("registry mutex poisoned").set_avatar_available(available);
     }
 
+    /// The watch file is attached after the registry exists. `Ledger::new` does not open it.
+    pub fn attach_ledger_watch(&self, path: &str) {
+        self.registry.lock().expect("registry mutex poisoned").ledger_mut().attach_watch(path);
+    }
+
     pub fn take_avatar_commands(&mut self) -> Vec<AvatarCommand> {
         std::mem::take(&mut self.avatar_commands)
     }
