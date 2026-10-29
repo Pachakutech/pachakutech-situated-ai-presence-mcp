@@ -167,6 +167,13 @@ pub enum Proposal {
     CancelTask(CancelTaskBody),
     #[serde(rename = "queryTask")]
     QueryTask(QueryTaskBody),
+    /// Report a locate result for an item the task already holds.
+    #[serde(rename = "resolveItem")]
+    ResolveItem(ResolveItemBody),
+    /// Runner facts: the item was entered, narration finished, or the viewer
+    /// took the page. None of these is a phrase decision.
+    #[serde(rename = "tourSignal")]
+    TourSignal(TourSignalBody),
 }
 
 /// Applied on the overlay thread after the socket pump. Not a GPU command.
@@ -209,6 +216,8 @@ impl Proposal {
             Proposal::CreateTask(body) | Proposal::DraftTask(body) => &body.proposal_id,
             Proposal::CancelTask(body) => &body.proposal_id,
             Proposal::QueryTask(body) => &body.proposal_id,
+            Proposal::ResolveItem(body) => &body.proposal_id,
+            Proposal::TourSignal(body) => &body.proposal_id,
         }
     }
 
@@ -237,6 +246,8 @@ impl Proposal {
             Proposal::DraftTask(_) => "draftTask",
             Proposal::CancelTask(_) => "cancelTask",
             Proposal::QueryTask(_) => "queryTask",
+            Proposal::ResolveItem(_) => "resolveItem",
+            Proposal::TourSignal(_) => "tourSignal",
         }
     }
 }
@@ -422,6 +433,63 @@ pub struct QueryTaskBody {
     pub task_id: String,
     #[serde(default, rename = "kind")]
     pub wire_kind: Option<String>,
+}
+
+/// Closed body. `viewed` and a decision field fail the parse.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResolveItemBody {
+    #[serde(rename = "proposalId")]
+    pub proposal_id: String,
+    #[serde(rename = "taskId")]
+    pub task_id: String,
+    #[serde(rename = "phraseId")]
+    pub phrase_id: String,
+    #[serde(rename = "match")]
+    pub match_info: MatchInfo,
+    #[serde(default)]
+    pub u: Option<f32>,
+    #[serde(default)]
+    pub v: Option<f32>,
+    #[serde(default)]
+    pub w: Option<f32>,
+    #[serde(default)]
+    pub h: Option<f32>,
+    #[serde(default, rename = "kind")]
+    pub wire_kind: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub enum TourSignalKind {
+    #[serde(rename = "begin")]
+    Begin,
+    #[serde(rename = "narrationDone")]
+    NarrationDone,
+    #[serde(rename = "preempt")]
+    Preempt,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TourSignalBody {
+    #[serde(rename = "proposalId")]
+    pub proposal_id: String,
+    #[serde(rename = "taskId")]
+    pub task_id: String,
+    pub signal: TourSignalKind,
+    /// Why the viewer took the page. Absent on begin and narrationDone.
+    #[serde(default)]
+    pub reason: Option<PreemptReason>,
+    #[serde(default, rename = "kind")]
+    pub wire_kind: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub enum PreemptReason {
+    #[serde(rename = "page")]
+    Page,
+    #[serde(rename = "pointer")]
+    Pointer,
 }
 
 #[derive(Debug, Serialize)]

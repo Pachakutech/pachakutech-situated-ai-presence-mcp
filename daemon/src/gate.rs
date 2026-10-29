@@ -56,6 +56,7 @@ pub fn allowed(tier: Tier, proposal: &Proposal) -> bool {
         Proposal::CreateTask(_) => matches!(tier, Tier::T1User | Tier::T2Client),
         Proposal::DraftTask(_) => matches!(tier, Tier::T3Sidecar),
         Proposal::CancelTask(_) | Proposal::QueryTask(_) => matches!(tier, Tier::T1User | Tier::T2Client),
+        Proposal::ResolveItem(_) | Proposal::TourSignal(_) => matches!(tier, Tier::T1User | Tier::T2Client),
     }
 }
 
@@ -181,6 +182,14 @@ mod tests {
             ),
             (r#"{"kind":"cancelTask","proposalId":"x","taskId":"tk-1"}"#, "cancelTask"),
             (r#"{"kind":"queryTask","proposalId":"q","taskId":"tk-1"}"#, "queryTask"),
+            (
+                r#"{"kind":"resolveItem","proposalId":"r","taskId":"tk-1","phraseId":"ph-1","match":{"status":"located","conf":0.5}}"#,
+                "resolveItem",
+            ),
+            (
+                r#"{"kind":"tourSignal","proposalId":"t","taskId":"tk-1","signal":"begin"}"#,
+                "tourSignal",
+            ),
         ];
         LINES
             .iter()
@@ -253,7 +262,9 @@ mod tests {
             let t2 = allowed(Tier::T2Client, &proposal);
             let t3 = allowed(Tier::T3Sidecar, &proposal);
             match kind {
-                "createTask" | "cancelTask" | "queryTask" => assert!(t1 && t2 && !t3, "{kind}"),
+                "createTask" | "cancelTask" | "queryTask" | "resolveItem" | "tourSignal" => {
+                    assert!(t1 && t2 && !t3, "{kind}")
+                }
                 "draftTask" => assert!(!t1 && !t2 && t3, "{kind}"),
                 other => panic!("unexpected task kind {other}"),
             }

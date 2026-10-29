@@ -533,9 +533,12 @@ fn dispatch(
         Proposal::ListPhraseFlags(_) | Proposal::SubscribeLedger(_) | Proposal::ObservePhrase(_) => {
             ProposalResult::err(&proposal_id, "unrouted ledger proposal")
         }
-        Proposal::CreateTask(_) | Proposal::DraftTask(_) | Proposal::CancelTask(_) | Proposal::QueryTask(_) => {
-            ProposalResult::err(&proposal_id, "unrouted task proposal")
-        }
+        Proposal::CreateTask(_)
+        | Proposal::DraftTask(_)
+        | Proposal::CancelTask(_)
+        | Proposal::QueryTask(_)
+        | Proposal::ResolveItem(_)
+        | Proposal::TourSignal(_) => ProposalResult::err(&proposal_id, "unrouted task proposal"),
     };
     (result, false)
 }
