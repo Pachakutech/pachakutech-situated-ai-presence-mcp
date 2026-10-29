@@ -236,6 +236,9 @@ Specified in `research_tours.md`. In short: a **project** holds an ordered list 
 | Client asks to open a sensitive local file and reads it back through snippets | T2 local paths only inside user-granted roots; `openSource` opens only listed sources |
 | Client points the viewer at a private-network or `localhost` URL | Blocked for T2 unless the user allows |
 | A page acts as the user | Viewer Chromium uses a dedicated profile without the user's cookies; debugging port on localhost |
+| Keyboard mash or junk becomes a stored note | Sanitation pipeline; suspect input held for T0 Keep/Drop; dropped notes store nothing |
+| Hidden characters in notes or quotes mislead a reader or model (bidi overrides, zero-width, tag characters) | Stripped on ingest |
+| Quotes or notes run as spreadsheet formulas in CSV exports | Leading `= + - @`, tab or CR prefixed with `'` |
 | Web text injected into the `.tex` export runs LaTeX commands | Full escaping of all exported text; no `\input`/`\write`; no `-shell-escape` |
 
 ## 10. Phasing and tickets
@@ -249,6 +252,7 @@ Specified in `research_tours.md`. In short: a **project** holds an ordered list 
 | C5 | Reporting: ledger export, read-only viewer, `subscribeLedger`. |
 | C6 | Doc map (index with page/line or heading path, LFM3 resource; not a scroll guide). |
 | C6b | Tour runner: pace, viewer-find moves and nudge in the gate, preempt rules, item binding. |
+| C7b | User notes on highlights (T0 arm, T1 text, sanitation). |
 | C7–C13 | Projects, intake, adapters, loci, `openSource` and multi-source tours, exports, MCP tools: see `research_tours.md` section 12. |
 | C14 (later) | Tighten-only learned advisor. |
 

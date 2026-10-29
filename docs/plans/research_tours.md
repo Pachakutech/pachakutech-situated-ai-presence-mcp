@@ -14,7 +14,7 @@ Both are a **project**: an ordered list of sources, the loci found in them, and 
 
 These follow `reflex-review.md` ("Three records") with additions.
 
-**Project.** `{ projectId, title, asks: [Ask], sources: [Source], cursor, createdBy: T1|T2|T3-draft, createdAt }`. Stored under `~/.local/share/pachakutech/projects/<projectId>/` (a SQLite file plus the exports). This store holds project data. It is **not** a scroll guide and nothing in it moves a page (see `viewer_find.md`).
+**Project.** `{ projectId, title, asks: [Ask], sources: [Source], cursor, createdBy: T1|T2|T3-draft, createdAt }`. Stored under `~/.local/share/pachakutech/projects/<projectId>/` as plain files (`project.json`, append-only `loci.jsonl`, `tasks.jsonl`, `events.jsonl`) plus the exports; the doc map keeps its own index. No new native dependency. This store holds project data. It is **not** a scroll guide and nothing in it moves a page (see `viewer_find.md`).
 
 **Ask.** `{ askId, text, kind: "claim" | "question" }`. A citation walk has one claim-ask per cited claim. A research ask has one question. The ask text becomes the subject heading in the exports.
 
@@ -35,6 +35,10 @@ These follow `reflex-review.md` ("Three records") with additions.
 - Both are T0-only ledger events, so the rule "only the user's hands keep something" carries over unchanged. Unchecking removes a keep. A passage the user passed over is neither kept nor rejected.
 
 Ledger events gain `projectId`, `askId` and `locusId` fields. Events that carry a `projectId` are **also persisted** into the project store when they are written. The in-memory ledger keeps its caps; the project keeps hundreds of loci.
+
+## 2a. Notes
+
+The user can attach free-text notes to a passage ("keep this, but cut the second clause"). Arming is T0: the note button on a highlight, or the note hotkey, arms a note for that item, bound by the clicked-item rule. The words arrive on the user's command channel (T1): the `presence note` prompt or a push-to-talk transcript. The client and the sidecar can read notes but never write them, and notes never keep, approve or grant anything. Every note passes a sanitation pipeline (control, bidi, zero-width and tag characters stripped; whitespace normalized; length capped). Keyboard-mash input is held for a Keep/Drop confirmation and, if dropped, stores nothing. Notes are append-only (edits replace, deletes tombstone) and persist with the project. Spec: ticket C7b.
 
 ## 3. Intake
 
@@ -129,6 +133,7 @@ The review proposed one biblatex child entry per quote (`crossref` plus `annotat
 \bibliography{references}
 \end{document}
 ```
+- The user's notes on a kept passage follow its quote as an escaped `\emph{Note:} …` paragraph.
 - One `\section` per ask. Subsections group kept loci by **proposed** stance, and the heading says "Proposed" because the label came from a model.
 - `p.~N` from the page label; for web, the heading path goes in a trailing `% heading: …` comment and no page is given.
 - **Escaping is mandatory**: every quote, title and heading has `\ { } % $ & # _ ^ ~` escaped (backslash first), and control characters stripped. Text from the web must never reach the file as a LaTeX command. The file never uses `\input`, `\include`, `\write` or `\immediate`, and the build instructions do not use `-shell-escape`.
@@ -142,9 +147,11 @@ The review proposed one biblatex child entry per quote (`crossref` plus `annotat
   Smith, J. (2021). Effects of X. Journal of Y. p. 4. https://doi.org/…
   [smith2021effects]
 ```
-Each phrase sits directly above its formatted citation and citekey.
+Each phrase sits directly above its formatted citation and citekey. The user's notes on that passage follow as `Note: …` lines.
 
-**`decisions.csv` (audit, from `reflex-review.md`).** One row per keep, uncheck, approve or discard: source ref, page or heading path, extractor line, phrase, event, stance proposed, time, `by`.
+**`decisions.csv` (audit, from `reflex-review.md`).** One row per keep, uncheck, approve or discard: source ref, page or heading path, extractor line, phrase, event, stance proposed, time, `by`, notes.
+
+**CSV safety (all CSV exports):** any cell starting with `=`, `+`, `-`, `@`, tab or carriage return is prefixed with `'`, so quotes or notes cannot run as spreadsheet formulas.
 
 **`citation_check.csv` (citation walks).** One row per cited source: URL, claim, `matchKind` (`exact | near | none`), page status (`opened | failed(reason)`), the found span if any.
 
@@ -195,7 +202,8 @@ Following C1 (gate) and C2 (ledger):
 
 | Ticket | Deliverable |
 |---|---|
-| C7 | Project store (SQLite), ledger events with `projectId`/`askId`/`locusId` persisted into it |
+| C7 | Project store (JSONL files), ledger events with `projectId`/`askId`/`locusId` persisted into it |
+| C7b | User notes on highlights: T0 arming, T1 text, sanitation pipeline, suspect-input hold, persistence |
 | C8 | Intake: list, granted roots, directory snapshot (T1), URL rules for T2, per-source checks |
 | C9 | Text adapters for mapping (Poppler with lines; web DOM text with heading paths; plain text) and citation facts (section 6) |
 | C10 | Locus selection: quote search, shortlist, relevance yes/no, proposed stance |
@@ -203,4 +211,4 @@ Following C1 (gate) and C2 (ledger):
 | C12 | Exports: `references.bib`, `collection.tex` (escaped), `collection.txt`, `decisions.csv`, `citation_check.csv`; optional md and CSL-JSON |
 | C13 | MCP tools, including `showCitations`; skill text |
 
-Order: C7, then C8 and C9 together, then C10 and C11, then C12 and C13. C3 (tasks and controls) must be in before C11.
+Order: C7, then C7b, then C8 and C9 together, then C10 and C11, then C12 and C13. C3 (tasks and controls) must be in before C11.
