@@ -82,6 +82,7 @@ only on T3. `createTask`, `cancelTask`, `queryTask`, `resolveItem`, and
 `tourSignal` are allowed on T1 and T2. `draftTask` is allowed only on T3.
 A tour move is not a socket kind. The daemon permits `WebFind`, `PdfPage`,
 or an 80px `Nudge`, and the locator performs it.
+`buildDocMap` is allowed on T1 and T2. `queryDocMap` is allowed on T1, T2, and T3. The map is an index of a file. It is not a move.
 If `command.sock` or `sidecar.sock`
 cannot be bound, the daemon logs the error and keeps the sockets that did
 bind. `presence.sock` failing is still fatal.

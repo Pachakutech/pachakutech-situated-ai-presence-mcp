@@ -58,3 +58,5 @@ The presences and artifacts live in a shared substrate, not in your context wind
 **Ask.** The user asks with `presence ask` on the command socket. The ask can create a task after they confirm the mode. It cannot acknowledge, approve, or discard. A transcript is the same ask.
 
 **Report.** `presence ledger` reads the task's phrases and the user's answers. The table and the watch file are copies. Editing a copy does not change the ledger.
+
+**Doc map.** `presence docmap` indexes a file the user named and answers `queryDocMap` with passages. The map does not move a page, and it does not decide.
