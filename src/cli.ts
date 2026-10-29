@@ -12,6 +12,8 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { getBundledDaemonPath } from "./daemonBinary.js";
 import { socketPath } from "./daemonClient.js";
+import { askCommand } from "./command/ask.js";
+import { commandSocketPath, connectCommand } from "./command/socket.js";
 import { sendProposal, socketReachable, startDaemon, statusDaemon, stopDaemon } from "./daemonControl.js";
 import { cueFollowMain } from "./locate/cues.js";
 import { fuseCommand, locateCommand, screenTextCommand } from "./locate/run.js";
@@ -70,6 +72,11 @@ function usage(): never {
       "                       MCP name: manifestHighlightFromQuery.",
       "  screen-text          Print the daemon's latest screen-text message as JSON.",
       "                       Columns from one capture. Fresh is false when it is quiet.",
+      "  ask --presence <id> [--scroll] [--controls check] [--doc <docKey>]",
+      "                       [--transcript <text>] [sentence]",
+      "                       Parse a sentence, confirm the mode, and send one createTask",
+      "                       on command.sock. Empty or y accepts. n drops the ask.",
+      "                       explain, select, or approve replaces the parsed mode.",
       "  stop <id>            Stop that presence's speech; face returns to neutral",
       "  retire <id>          End the presence, hide its avatar, free its slot",
       "                       The doubled form still works: presence presence speak <id> <text>",
@@ -383,6 +390,16 @@ switch (command) {
   case "screen-text":
     process.exit(await screenTextCommand());
     break;
+  case "ask": {
+    const commandPath = commandSocketPath(socketPath());
+    process.exit(
+      await askCommand(process.argv.slice(3), {
+        commandPath,
+        writer: { write: (body) => connectCommand(commandPath, body) },
+      }),
+    );
+    break;
+  }
   default:
     usage();
 }
