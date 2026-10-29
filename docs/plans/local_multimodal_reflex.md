@@ -15,7 +15,8 @@ Design background: `presence_command_layer.md` (the command layer design). Wire 
 | Policy gate in the Node MCP layer | Gate in the daemon, enforced per socket endpoint, so the sidecar and every other producer pass through it. |
 | Sidecar was a loose "proposal" producer | Sidecar is a tier-3 producer with its own endpoint. It cannot write decisions or `acknowledged`, and cannot create runnable tasks. |
 | Single highlight proposals | Tasks and tours (explain / select / approve; `wait` or `flow` pacing; gated scroll injection). |
-| Off-screen documents unaddressed | Doc map (navigation and cueing index), not whole-document search. |
+| Off-screen documents unaddressed | Doc map (shortlist and citation index, not a scroll guide), not whole-document search. |
+| One document at a time | Projects: mixed lists of URLs and files, citation walks, research asks with collections (`research_tours.md`). |
 
 ## 1. Goal
 
@@ -98,7 +99,9 @@ Derived view (what `listPhraseFlags` returns per phrase):
 
 ### Gated scroll injection
 
-Scroll only (no clicks, keys, text); only inside an active tour; only to the window matching `source.docKey`; any real user input pauses the tour; bounded attempts per item; every scroll is verified by locate; failure records `mismatch` and moves on or holds with a notice. Never loops.
+The viewer's own find moves the page (Chromium `window.find`, Poppler page plus Evince `goToPage`, per `complete/viewer_find.md`); the presence only adds the short centering nudge. No clicks, keys or text; only inside an active tour; only to the window matching `source.docKey`; any real user input pauses the tour; no index-driven jumps or page walks; every move is verified by locate; failure records `mismatch` and moves on or holds with a notice. Never loops.
+
+Opening further sources in a multi-source project tour is a separate internal capability, `openSource`, specified in `research_tours.md` section 7.
 
 ## 5. Subtask B: LFM3 sidecar
 
@@ -127,7 +130,11 @@ Scroll only (no clicks, keys, text); only inside an active tour; only to the win
 
 ### Doc map
 
-Per-source index for navigation and cueing: heading tree, phrase and paragraph offsets, approximate offset-to-scroll mapping, optional short section summaries. SQLite with full-text search. Built once for a URL or file, or incrementally from OCR as the user scrolls. It is document content, hence untrusted data. It informs suggestions and scroll targets and never carries commands. Precise highlighting remains with locate and OCR.
+Per-source index for shortlisting and citation loci: heading tree, phrase and paragraph offsets, page and extractor line (PDF, text) or heading path (HTML), optional short section summaries. SQLite with full-text search. Built once for a URL or file, or incrementally from OCR as the user scrolls. It is document content, hence untrusted data. It informs suggestions and ordering and never carries commands or scroll targets: the viewer's own find moves the page (`complete/viewer_find.md`). Precise highlighting remains with locate and OCR.
+
+### Research asks (multi-source)
+
+The user can talk to the sidecar about a list of sources ("is X supported in this literature?"). The sidecar's part: turn the conversation into a draft project and ask (T3 draft, confirmed by T0), answer yes/no relevance on short shortlisted spans, and optionally propose a stance label with a confidence. Stance is advisory and never keeps anything; the outer model supplies it when present. Quote words always come from the text adapter. With the sidecar down, intake, the tour and the exports still work (stance `unknown`). Full plan: `research_tours.md`.
 
 ### Phase 1 — in-daemon actor
 
@@ -186,9 +193,10 @@ Config: `PRESENCE_LFM3_ENDPOINT`, model id, max crop size, max concurrent jobs (
 | C4 | T1 command channel, intent parse, mode confirm |
 | C5 | Ledger export, read-only viewer, webhook or file-watch |
 | C6 | Doc map |
+| C7–C13 | Projects and research tours (`research_tours.md`) |
 | B1 | Sidecar client, T3 endpoint, JSON schema, mapping |
 | B2 | Crop ingest at decision cadence |
 | B3 | Doctor, config, GPU/CPU placement notes |
 | B4 (later) | In-daemon actor, typed head, SFT schema, tighten-only advisor |
 
-Order: C1 and C2 first. C3 needs C1. C3b and C3c follow C3. C4, C5, B1 and C6 can then run in parallel.
+Order: C1 and C2 first. C3 needs C1. C3b and C3c follow C3. C4, C5, B1 and C6 can then run in parallel. C7–C13 follow `research_tours.md` section 12; C11 needs C3.

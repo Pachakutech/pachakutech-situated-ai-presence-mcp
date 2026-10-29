@@ -138,7 +138,7 @@ Examples:
 
 Pipeline:
 1. **Intent parse (LFM3 text or a small rule parser):** produces `{ mode, query or exemplar crop, source }`. Mode inference: "find/where is" gives explain; "pull out/collect" gives select; "let me approve/rank" gives approve. Show the inferred mode and let the user override with a key before the task begins.
-2. **Candidate generation (mostly deterministic):** text search over OCR words or over the file/URL text, with fuzzy matching. For the visible screen, use the existing OCR path. For content off screen, see 6.1.
+2. **Candidate generation (mostly deterministic):** text search over OCR words or over the file/URL text, with fuzzy matching. For the visible screen, use the existing OCR path. For content off screen, see 6.3 and `research_tours.md`.
 3. **LFM3 judgement (semantic):** for each candidate, a crop plus the query returns a yes/no and confidence (the preferred typed d1-style head). The 2B model judges candidates. It is not asked to read a whole document.
 4. **Task creation** (`origin: user`), rendered through the same gate, same controls, same ledger.
 
@@ -177,13 +177,13 @@ An item list is played as a **tour**. This generalizes the current education mod
 
 Scrolling the user's window is an actuator, so it gets its own rules in the gate:
 
-1. **Scroll only.** No clicks, keys or text. The gate's vocabulary is `scrollTo(docKey, anchor)` or `scrollBy`, nothing else.
+1. **The viewer's find moves the page; the presence only nudges.** Per `viewer_find.md`: Chromium `window.find` on the opening phrase, or a Poppler page hit plus Evince `goToPage`. The presence's own scroll vocabulary is the short centering nudge (`NUDGE_PX`, 80 px) while the phrase is already on the glass. No anchor jumps, no walking the page, no clicks, keys or text.
 2. **Only inside an active tour,** and only to the window matching the task's `source.docKey`.
 3. **User preempts.** Any real user scroll, pointer movement over the target, or key press cancels or pauses the tour immediately. The daemon never fights the user.
 4. **Start confirmation for agent-originated tours.** A tour created by T2 that wants to scroll the user's window needs one T0 start press. User-originated tours (T1) don't need it, since the user just asked.
 5. **Bounded.** A scroll budget per item (about 3 attempts) and a tour length cap. Rate limit scroll commands.
 6. **Verify, don't trust.** After scrolling, run the normal OCR locate. On failure, record `mismatch` (or `not_found`) and move on in flow, or hold with an "I can't find this" notice in wait. Never loop.
-7. **Doc map gives the anchors.** The doc map (section 6.3) turns a phrase into an approximate scroll target. The OCR locate does the precise work afterward.
+7. **No index-driven scrolling.** The doc map (section 6.3) never supplies a scroll target. A phrase the viewer's find does not find is a miss: record it and move on.
 
 ### Narration
 
@@ -191,12 +191,12 @@ Per-item narration is client-written text, spoken and capped in length. It is no
 
 ## 6.3 Doc map
 
-A small per-source index used for **navigation and cueing**, not for fine highlighting.
+A small per-source index used for **shortlisting and citation loci**. It is not a scroll guide and never moves a page (`viewer_find.md` removed the index-driven walk).
 
 - Built once per source (URL, PDF, file) or incrementally from OCR as the user scrolls.
-- Contents: heading tree, paragraph and phrase offsets, an approximate offset-to-scroll mapping, and optionally short section summaries. SQLite with full-text search is enough.
-- Used by: (a) LFM3, which gets the outline and a few top passages to suggest what to look for before the user confirms a task; (b) the tour runner, to choose scroll targets and ordering by narrative.
-- It is document content, so it is untrusted data (T4). It can inform suggestions and scroll targets but never carry a command.
+- Contents: heading tree, paragraph and phrase offsets, page and extractor line (PDF, text) or heading path (HTML), and optionally short section summaries. SQLite with full-text search is enough.
+- Used by: (a) LFM3, which gets the outline and a few top passages to suggest what to look for before the user confirms a task; (b) the tour runner, to choose which phrases to visit and in what order (the viewer's find then moves the page); (c) the research-tour exports, which cite page and line.
+- It is document content, so it is untrusted data (T4). It can inform suggestions and ordering but never carry a command or a scroll target.
 - Non-goal: whole-document search or extraction. Precise finding stays with locate and OCR.
 
 ## 7. Reporting interface
@@ -217,6 +217,10 @@ Yes, `listPhraseFlags` is ready made for this, with these additions:
 - Dismiss gesture: Esc dismisses the task. A per-item skip is not needed; untouched items stay untouched.
 - Button hit-testing uses the daemon's own geometry, not anything the client supplied.
 
+## 6.4 Projects and multi-source tours
+
+Specified in `research_tours.md`. In short: a **project** holds an ordered list of sources (URLs and file paths, mixed; a user-given directory is snapshotted into the list), the loci found in them, and the user's keeps. A project tour is a sequence of ordinary per-source tasks; the project holds the cursor, so tours can time out and resume. Opening each source uses a new internal gated capability, `openSource`: only sources on the active project's list, only in the presence's own viewer windows (dedicated Chromium profile, Evince, Writer), one at a time, no link following, and one T0 start press for a T2-originated tour, covering that list only. T2 may submit `http(s)` URLs, and local paths only inside roots the user granted.
+
 ## 9. Threat model (short)
 
 | Threat | Mitigation |
@@ -229,6 +233,10 @@ Yes, `listPhraseFlags` is ready made for this, with these additions:
 | Voice in the room or audio playback | Voice is T1 only for push-to-talk. It cannot answer approve tasks by default. |
 | Click spam or task flooding | Queue and rate caps. |
 | False `viewed` | Dwell tiers. Downstream logic uses `dwelled` or higher. |
+| Client asks to open a sensitive local file and reads it back through snippets | T2 local paths only inside user-granted roots; `openSource` opens only listed sources |
+| Client points the viewer at a private-network or `localhost` URL | Blocked for T2 unless the user allows |
+| A page acts as the user | Viewer Chromium uses a dedicated profile without the user's cookies; debugging port on localhost |
+| Web text injected into the `.tex` export runs LaTeX commands | Full escaping of all exported text; no `\input`/`\write`; no `-shell-escape` |
 
 ## 10. Phasing and tickets
 
@@ -239,9 +247,10 @@ Yes, `listPhraseFlags` is ready made for this, with these additions:
 | C3 | Task object, queue, TTL, and mode-to-controls rendering with limited input regions plus hotkeys. |
 | C4 | T1 command channel: typed input and push-to-talk, intent parse, mode confirm. |
 | C5 | Reporting: ledger export, read-only viewer, `subscribeLedger`. |
-| C6 | Doc map (index, offset-to-scroll mapping, LFM3 resource). |
-| C6b | Tour runner: pace, scroll capability in the gate, preempt rules, item binding. |
-| C7 (later) | Tighten-only learned advisor. |
+| C6 | Doc map (index with page/line or heading path, LFM3 resource; not a scroll guide). |
+| C6b | Tour runner: pace, viewer-find moves and nudge in the gate, preempt rules, item binding. |
+| C7–C13 | Projects, intake, adapters, loci, `openSource` and multi-source tours, exports, MCP tools: see `research_tours.md` section 12. |
+| C14 (later) | Tighten-only learned advisor. |
 
 Dependencies: C1 and C2 first. C3 needs C1. C4 and C5 can run in parallel after C3. B1 (sidecar client) from the reflex plan feeds C-tickets as T3.
 
@@ -256,3 +265,6 @@ Dependencies: C1 and C2 first. C3 needs C1. C4 and C5 can run in parallel after 
 
 - `local_multimodal_reflex.md` (rewritten): the sidecar plan with these decisions applied.
 - `command_layer_protocol.md`: protocol variants, endpoint allow-lists and the test list.
+- `research_tours.md`: projects, multi-source citation walks and research asks, exports (`.bib`, `.tex`, `.txt`, CSV).
+- `reflex-review.md`: the review that introduced the citation project.
+- `complete/viewer_find.md`: the shipped rule that the viewer's find moves the page.

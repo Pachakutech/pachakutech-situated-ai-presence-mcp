@@ -1,3 +1,5 @@
+> Note: the citation project below is extended, and in a few places revised, by `research_tours.md` (multi-source opening, select-mode collections, `.tex`/`.txt` exports, BibTeX one entry per work). See its section 10 for the differences.
+
 # Reflex review
 
 The research flow is feasible. The plans split the labor the right way. A citable quote cursor is a further record on that loop, and Liquid LFM3 should not be the piece that produces it.
