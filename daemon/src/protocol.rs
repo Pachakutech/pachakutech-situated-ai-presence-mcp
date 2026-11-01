@@ -192,6 +192,9 @@ pub enum Proposal {
     /// Read a project. This does not move a page and does not decide.
     #[serde(rename = "queryProject")]
     QueryProject(QueryProjectBody),
+    /// Choose loci for one ask. T1 and T2. This does not open a window.
+    #[serde(rename = "selectLoci")]
+    SelectLoci(SelectLociBody),
     /// T1 text on a phrase. Without `phraseId`, one live arming is consumed.
     #[serde(rename = "addNote")]
     AddNote(AddNoteBody),
@@ -248,6 +251,7 @@ impl Proposal {
             Proposal::AddSources(body) => &body.proposal_id,
             Proposal::ConfirmProject(body) => &body.proposal_id,
             Proposal::QueryProject(body) => &body.proposal_id,
+            Proposal::SelectLoci(body) => &body.proposal_id,
             Proposal::AddNote(body) => &body.proposal_id,
             Proposal::DeleteNote(body) => &body.proposal_id,
         }
@@ -286,6 +290,7 @@ impl Proposal {
             Proposal::AddSources(_) => "addSources",
             Proposal::ConfirmProject(_) => "confirmProject",
             Proposal::QueryProject(_) => "queryProject",
+            Proposal::SelectLoci(_) => "selectLoci",
             Proposal::AddNote(_) => "addNote",
             Proposal::DeleteNote(_) => "deleteNote",
         }
@@ -657,6 +662,36 @@ pub struct QueryProjectBody {
     pub since_pseq: Option<u64>,
     #[serde(default)]
     pub limit: Option<u32>,
+    #[serde(default, rename = "kind")]
+    pub wire_kind: Option<String>,
+}
+
+/// A caller label on a span `selectLoci` already chose. It is not a keep.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StanceLabelIn {
+    #[serde(rename = "sourceId")]
+    pub source_id: String,
+    #[serde(rename = "spanStart")]
+    pub span_start: u64,
+    #[serde(rename = "spanEnd")]
+    pub span_end: u64,
+    pub stance: String,
+    #[serde(default)]
+    pub confidence: Option<f32>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SelectLociBody {
+    #[serde(rename = "proposalId")]
+    pub proposal_id: String,
+    #[serde(rename = "projectId")]
+    pub project_id: String,
+    #[serde(rename = "askId")]
+    pub ask_id: String,
+    #[serde(default)]
+    pub labels: Vec<StanceLabelIn>,
     #[serde(default, rename = "kind")]
     pub wire_kind: Option<String>,
 }
