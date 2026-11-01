@@ -180,9 +180,15 @@ pub enum Proposal {
     /// Passages from a map. This is not a move and not a decision.
     #[serde(rename = "queryDocMap")]
     QueryDocMap(QueryDocMapBody),
-    /// T1 stores an active project. T3 stores `draft: true`. T2 is refused until C8.
+    /// T1 and T2 store an active project after intake checks. T3 stores `draft: true` unchecked.
     #[serde(rename = "createProject")]
     CreateProject(CreateProjectBody),
+    /// Append sources. T1 and T2. A draft project is `draft_unconfirmed`.
+    #[serde(rename = "addSources")]
+    AddSources(AddSourcesBody),
+    /// T1 runs intake checks on a draft and clears `draft`.
+    #[serde(rename = "confirmProject")]
+    ConfirmProject(ConfirmProjectBody),
     /// Read a project. This does not move a page and does not decide.
     #[serde(rename = "queryProject")]
     QueryProject(QueryProjectBody),
@@ -239,6 +245,8 @@ impl Proposal {
             Proposal::BuildDocMap(body) => &body.proposal_id,
             Proposal::QueryDocMap(body) => &body.proposal_id,
             Proposal::CreateProject(body) => &body.proposal_id,
+            Proposal::AddSources(body) => &body.proposal_id,
+            Proposal::ConfirmProject(body) => &body.proposal_id,
             Proposal::QueryProject(body) => &body.proposal_id,
             Proposal::AddNote(body) => &body.proposal_id,
             Proposal::DeleteNote(body) => &body.proposal_id,
@@ -275,6 +283,8 @@ impl Proposal {
             Proposal::BuildDocMap(_) => "buildDocMap",
             Proposal::QueryDocMap(_) => "queryDocMap",
             Proposal::CreateProject(_) => "createProject",
+            Proposal::AddSources(_) => "addSources",
+            Proposal::ConfirmProject(_) => "confirmProject",
             Proposal::QueryProject(_) => "queryProject",
             Proposal::AddNote(_) => "addNote",
             Proposal::DeleteNote(_) => "deleteNote",
@@ -588,6 +598,11 @@ pub struct ProjectSourceIn {
     pub path: Option<String>,
     #[serde(default)]
     pub dir: Option<String>,
+    /// Kept on the source. Intake does not match it.
+    #[serde(default)]
+    pub claim: Option<String>,
+    #[serde(default)]
+    pub quote: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -598,8 +613,35 @@ pub struct CreateProjectBody {
     pub title: String,
     pub asks: Vec<ProjectAskIn>,
     pub sources: Vec<ProjectSourceIn>,
+    /// Present from T2 is `schema`, including an empty list. T1 stores the canonical directories.
     #[serde(rename = "grantedRoots", default)]
-    pub granted_roots: Vec<String>,
+    pub granted_roots: Option<Vec<String>>,
+    /// Present from T2 is `schema`. T1 `true` allows a private or loopback URL.
+    #[serde(rename = "allowPrivateNetwork", default)]
+    pub allow_private_network: Option<bool>,
+    #[serde(default, rename = "kind")]
+    pub wire_kind: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AddSourcesBody {
+    #[serde(rename = "proposalId")]
+    pub proposal_id: String,
+    #[serde(rename = "projectId")]
+    pub project_id: String,
+    pub sources: Vec<ProjectSourceIn>,
+    #[serde(default, rename = "kind")]
+    pub wire_kind: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfirmProjectBody {
+    #[serde(rename = "proposalId")]
+    pub proposal_id: String,
+    #[serde(rename = "projectId")]
+    pub project_id: String,
     #[serde(default, rename = "kind")]
     pub wire_kind: Option<String>,
 }
