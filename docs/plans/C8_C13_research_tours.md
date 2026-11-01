@@ -162,7 +162,7 @@ Citation shape, per source, in list order:
 Research shape, when no source carries a quote or a claim:
 
 1. Shortlist the ask text across mapped sources. At most 5 loci per source and 40 per call.
-2. A judge may drop a span. The judge is a trait. The default judge keeps every shortlisted span. A sidecar judge, when B1 is up and answers, may drop a span. When the sidecar is down or the call fails, the default judge is used and the call still returns loci.
+2. A judge may drop a span. The judge is a trait. The default judge keeps every shortlisted span. A sidecar judge, when B1 is up and answers, may drop a span. The contract is `B1_sidecar.md`: `{ relevant, confidence, stance }`, and a failure keeps the span with stance `unknown`. C10 does not define a second contract. When the sidecar is down or the call fails, the default judge is used and the call still returns loci.
 3. Stance is `unknown` unless the caller passed `stance` on a span the daemon already chose, or the sidecar trait returned one. Stored with `stanceBy` `T2` or `T3` and a confidence. Stance never writes `Approved`, `Acknowledged`, or a keep.
 
 Order of the returned loci: source list order, then `spanStart`. `upsert_locus` is the write. The same span mints the same `locusId`.
@@ -331,14 +331,14 @@ Add to the MCP surface, each a `createTask`-style forwarder on the shared `Daemo
 
 | Tool | Daemon kind | Notes |
 |---|---|---|
-| `queryProject` | `queryProject` | Read. T2 is already allowed |
+| `queryProject` | `queryProject` | Read. T2 is already allowed. The reply includes `keeps`, `decisions`, notes on the loci, the tour cursor, and `pseq`. `decisions` are the T0 acknowledge, clear, approve, and discard rows. This is the preferences read in `research_tours.md` section 1a |
 | `createProject` | `createProject` | URLs only. A path in the tool arguments is refused in the client before the socket, and the daemon still enforces L1 |
 | `addSources` | `addSources` | Same URL rule |
 | `startProjectTour` | `startProjectTour` | T2, so the daemon returns `awaitingStart` and the source list. The tool shows that list. It does not send Start |
 | `exportProject` | `exportProject` | Returns the fixed paths and the row counts |
-| `showCitations` | no new kind | Builds `createProject` with one claim-ask per citation and the URL, claim, and optional quote on each source, then `selectLoci`, then `startProjectTour` with mode `explain` and pace `flow` |
+| `showCitations` | no new kind | Builds `createProject` with one claim-ask per citation and the URL, claim, and optional quote on each source, then `selectLoci`, then `startProjectTour`. Omitted `mode` and `pace` are `explain` and `flow`. Arguments `mode` and `pace` are forwarded. `select` or `approve` with `wait` is the preference review |
 
-`showCitations` input: `{ citations: [{ url, claim, quote? }] }`. A local path in that list is refused before the socket. A quote is stored for C10. The tour waits for the user's Start because the caller is T2.
+`showCitations` input: `{ citations: [{ url, claim, quote? }], mode?, pace? }`. A local path in that list is refused before the socket. A quote is stored for C10. The tour waits for the user's Start because the caller is T2. Omitted `mode` and `pace` stay `explain` and `flow`. A preference review passes `select` and `wait`, then re-reads `queryProject` for keeps, decisions, and notes. The tour cursor on that reply is the resume point.
 
 `queryDocMap` and `buildDocMap` stay out of this ticket.
 
@@ -346,9 +346,9 @@ Add to the MCP surface, each a `createTask`-style forwarder on the shared `Daemo
 
 Add these paragraphs to both presence skill copies. Leave the Task book paragraph as it is. Do not merge the rest of the files.
 
-**Project.** A project is a list of sources the daemon keeps on disk. Read it with `queryProject`. A keep is still the user's checkbox or yes. You may propose sources and a stance. You cannot write the keep.
+**Project.** A project is a list of sources the daemon keeps on disk. Read it with `queryProject`. The reply's keeps, decisions, and notes are the user's preferences as filled so far. The cursor on that reply is where the tour resumes. A keep is still the user's checkbox or yes. You may propose sources and a stance. You cannot write the keep.
 
-**Citations.** `showCitations` takes URLs, the claim, and the quote when you have one. The tour waits for the user's start. A quote the page does not contain is reported as a near passage, and it is not presented as the quoted words.
+**Citations.** `showCitations` takes URLs, the claim, and the quote when you have one. The tour waits for the user's start. Omit `mode` and `pace` for the narrated check. Pass `select` and `wait` when the user is recording preferences, and re-read `queryProject` as those decisions land. A quote the page does not contain is reported as a near passage, and it is not presented as the quoted words.
 
 ### Acceptance
 
@@ -357,7 +357,8 @@ Add these paragraphs to both presence skill copies. Leave the Task book paragrap
 | V1 | Each tool name is rate-limited. `draftTask` is not a tool |
 | V2 | `createProject` from the tool opens `presence.sock` and sends no `path` |
 | V3 | `showCitations` with a `file` path does not open a socket |
-| V4 | `showCitations` with two URLs sends one `createProject`, one `selectLoci`, and one `startProjectTour` of mode `explain` and pace `flow` |
+| V4 | `showCitations` with two URLs and no mode sends one `createProject`, one `selectLoci`, and one `startProjectTour` of mode `explain` and pace `flow` |
+| V7 | `showCitations` with `mode: select` and `pace: wait` forwards those two fields and still does not send Start. `queryProject`'s daemon reply includes a T0 discard in `decisions` |
 | V5 | The tool module does not send `subscribeLedger`, `addNote`, or `observePhrase` |
 | V6 | Both skill copies contain the Project and Citations paragraphs, and the Task book paragraph is unchanged |
 
@@ -367,7 +368,7 @@ A new daemon kind, a sidecar tool, shipping the daemon.
 
 ### Done when
 
-V1 through V6 pass. `npm run build` passes. Commit title: `mcp: project tools and showCitations (C13)`.
+V1 through V7 pass. `npm run build` passes. Commit title: `mcp: project tools and showCitations (C13)`.
 
 ## Order
 
