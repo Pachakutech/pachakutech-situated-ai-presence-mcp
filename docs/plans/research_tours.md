@@ -88,6 +88,21 @@ Mapping runs in the background with a concurrency of one or two. A failed source
 
 The sidecar's role here is the conversation and the yes/no judgement. The quote words always come from the text adapter, as `reflex-review.md` requires.
 
+### 4a. Sidecar expansion (noted 31 October 2026)
+
+The review memorializes a user's choice inside an AI-augmented process. The model proposes a pile and a label. The keep, the discard, and the note are the user's. The project stores those, and the outer client reads them back.
+
+The sidecar's wider role, when this note is adopted:
+
+1. It may draft the project from the conversation. The draft still waits for one T0 confirm.
+2. It may label a span `supports`, `contrary`, `mentions`, or leave it `unknown`, with a confidence. The label stays proposed. It never keeps.
+3. It may add candidates. Besides the full-text pass on the question, a second pass searches the same mapped sources for wording that would refute that question. Those spans are loci too, labeled `contrary` when the sidecar says so, and they count toward the same caps (about 5 a source and 40 a tour).
+4. The yes/no head does not drop a span. A span the head would have called irrelevant stays on the tour, so the user can pass over it, discard it, or keep it. The default with the sidecar down already behaves this way: every shortlisted span remains.
+
+The quote stays the text adapter's span. The URL stays one that was submitted. Nothing in this note crawls past the list, embeds a corpus, or writes the bibliography from the model's memory.
+
+Section 4, step 2 of the research ask, and C10's rule that a sidecar judge may drop a span, are the text this note supersedes once a ticket adopts it. The C10 U tests are unchanged until that ticket. `cleanup_plan_deltas.md` points here.
+
 ## 5. The multi-source tour
 
 A project tour is **a sequence of per-source tasks**. Each per-source task is an ordinary task within the existing caps (one active, about 12 items, item timeout). The project holds the tour cursor (which source, which locus) so a tour that times out resumes where it stopped, and the project caps stay separate from the session caps. That cursor is the resume point. The preferences the model reads are the keeps, the T0 decisions, and the notes (section 1a).

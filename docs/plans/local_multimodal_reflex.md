@@ -134,7 +134,7 @@ Per-source index for shortlisting and citation loci: heading tree, phrase and pa
 
 ### Research asks (multi-source)
 
-The user can talk to the sidecar about a list of sources ("is X supported in this literature?"). The sidecar's part: turn the conversation into a draft project and ask (T3 draft, confirmed by T0), answer yes/no relevance on short shortlisted spans, and optionally propose a stance label with a confidence. Stance is advisory and never keeps anything; the outer model supplies it when present. Quote words always come from the text adapter. With the sidecar down, intake, the tour and the exports still work (stance `unknown`). Full plan: `research_tours.md`.
+The user can talk to the sidecar about a list of sources ("is X supported in this literature?"). The sidecar's part: turn the conversation into a draft project and ask (T3 draft, confirmed by T0), answer yes/no relevance on short shortlisted spans, and optionally propose a stance label with a confidence. Stance is advisory and never keeps anything; the outer model supplies it when present. Quote words always come from the text adapter. With the sidecar down, intake, the tour and the exports still work (stance `unknown`). Full plan: `research_tours.md`. The wider review role, including a contrary pass and no drop, is section 4a of that plan. It is noted and not yet a C10 test change.
 
 ### Phase 1 — in-daemon actor
 
@@ -195,11 +195,11 @@ Config: `PRESENCE_LFM3_ENDPOINT`, model id, max crop size, max concurrent jobs (
 | C6 | Doc map |
 | C7–C13 | Projects and research tours (`research_tours.md`) |
 | B1 | Sidecar client, T3 endpoint, JSON schema, mapping (`B1_sidecar.md`) |
-| B2 | Crop ingest at decision cadence |
-| B3 | Doctor, config, GPU/CPU placement notes |
+| B2 | Crop ingest at decision cadence (`B2_crops.md`) |
+| B3 | Doctor, config, GPU/CPU placement notes (`B3_doctor.md`) |
 | B4 (later) | In-daemon actor, typed head, SFT schema, tighten-only advisor |
 
-Order: C1 and C2 first. C3 needs C1. C3b and C3c follow C3. C4, C5, B1 and C6 can then run in parallel. C7–C13 follow `research_tours.md` section 12; C11 needs C3. The C7 implementation brief is `C7_project_store.md`. C8 through C13 are in `C8_C13_research_tours.md`. The B1 implementation brief is `B1_sidecar.md`. Goals and acceptance criteria for C3, C3b, and C3c are in `C3_tasks_tours_moves.md`. Goals and acceptance criteria for C4, C5, and C6 are in `C4_C5_C6_command_report_map.md`. An exploration of an armed voice command, and of what B1 should leave alone, is `voice_command.md`. It is not a ticket and it does not reorder this list.
+Order: C1 and C2 first. C3 needs C1. C3b and C3c follow C3. C4, C5, B1 and C6 can then run in parallel. C7–C13 follow `research_tours.md` section 12; C11 needs C3. The C7 implementation brief is `C7_project_store.md`. C8 through C13 are in `C8_C13_research_tours.md`. The B1 implementation brief is `B1_sidecar.md`. The B2 implementation brief is `B2_crops.md`. The B3 implementation brief is `B3_doctor.md`. Goals and acceptance criteria for C3, C3b, and C3c are in `C3_tasks_tours_moves.md`. Goals and acceptance criteria for C4, C5, and C6 are in `C4_C5_C6_command_report_map.md`. An exploration of an armed voice command, and of what B1 should leave alone, is `voice_command.md`. It is not a ticket and it does not reorder this list. Plan text that disagrees with landed code is listed in `cleanup_plan_deltas.md`.
 
 ## 10. Addendum: constraints from the running system
 

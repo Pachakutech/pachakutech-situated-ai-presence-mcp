@@ -162,7 +162,7 @@ Citation shape, per source, in list order:
 Research shape, when no source carries a quote or a claim:
 
 1. Shortlist the ask text across mapped sources. At most 5 loci per source and 40 per call.
-2. A judge may drop a span. The judge is a trait. The default judge keeps every shortlisted span. A sidecar judge, when B1 is up and answers, may drop a span. The contract is `B1_sidecar.md`: `{ relevant, confidence, stance }`, and a failure keeps the span with stance `unknown`. C10 does not define a second contract. When the sidecar is down or the call fails, the default judge is used and the call still returns loci.
+2. A judge may drop a span. The judge is a trait. The default judge keeps every shortlisted span. A sidecar judge, when B1 is up and answers, may drop a span. The contract is `B1_sidecar.md`: `{ relevant, confidence, stance }`, and a failure keeps the span with stance `unknown`. C10 does not define a second contract. When the sidecar is down or the call fails, the default judge is used and the call still returns loci. `research_tours.md` section 4a notes a later change: the contrary pass is added, and the drop stays off. These U tests stay as written until a ticket adopts 4a.
 3. Stance is `unknown` unless the caller passed `stance` on a span the daemon already chose, or the sidecar trait returned one. Stored with `stanceBy` `T2` or `T3` and a confidence. Stance never writes `Approved`, `Acknowledged`, or a keep.
 
 Order of the returned loci: source list order, then `spanStart`. `upsert_locus` is the write. The same span mints the same `locusId`.
