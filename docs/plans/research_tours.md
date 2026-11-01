@@ -18,6 +18,8 @@ The recording store is already on disk. The review is this epic.
 
 **On disk now (C7 and C7b).** A project holds sources, asks, loci, keeps, notes, and a cursor. A keep is a T0 acknowledge in a select task, or a T0 approve in an approve task. A discard, a clear, and a note are events in that project's `events.jsonl`, written before the call returns. `queryProject` on the daemon socket returns the project, the loci, the keeps, the cursor, and `pseq`. Loci include notes. T2 may call that kind. The MCP client has no project tool: `src/` forwards `listPhraseFlags` and `queryTask`, and the session ledger those read is empty after a restart. `createProject` is T1, or T3 as a draft. T2 is refused, so a model cannot submit the URL list. Nothing checks a URL, maps a page, opens a viewer, or walks a list.
 
+That paragraph is the store as of C7b. C8 through C11 have since landed, and T2 may create a project of public URLs. The background runner that maps a pending source is C9b (`C9b_background_map.md`). It does not reorder C12 or C13.
+
 **Citation list.** C8 accepts the URLs. C9 and C10 turn each citation into loci (`exact`, `near`, or `none`). C11 walks them. C13's `showCitations` is the model's one call. The user's keeps, discards, and notes on those loci are the preferences.
 
 **One plan, or a group of plans.** A plan is a file source. One plan is one path. A group is several paths, or one directory snapshot taken by T1. T2 submits URLs only. The user submits local plan files. The passages of those files are the loci, and the same keeps, discards, and notes are the preferences. Several asks in one project are several questions over one source list. A group of plan documents is several sources in that same project. One project is one preferences read. A second project is a second `queryProject`.
@@ -71,7 +73,7 @@ A stored note is `noteId`, `text`, `via` (`typed` or `voice`), `ts`, and `flags`
 2. **Map each source** (beside the doc map, C6). Read the text through the text adapter: Poppler (`pdftotext`, with `-bbox-layout` for lines) for PDF, a fetched-and-cleaned DOM text with headings for web, plain read for text files. Mapping reads; it does not open a window or scroll.
 3. **Extract citation facts** (section 6).
 
-Mapping runs in the background with a concurrency of one or two. A failed source is marked `failed(reason)` and the project carries on.
+Mapping runs in the background with a concurrency of one or two. A failed source is marked `failed(reason)` and the project carries on. The runner is C9b (`C9b_background_map.md`). It follows the AllPoetry trial of C11 and does not reorder C12 or C13.
 
 ## 4. Choosing the loci
 
@@ -246,7 +248,8 @@ Following C1 (gate) and C2 (ledger):
 | C10 | Locus selection: quote search, shortlist, relevance yes/no, proposed stance |
 | C11 | `openSource` in the gate, viewer isolation, multi-source tour runner with project cursor and source hotkeys |
 | C11-bugfix | The intake fetch stores a short failure class and writes one log line. Both curls send a browser User-Agent. Brief: `C11_bugfix.md`. Follows the live trial; does not reorder C12 or C13 |
+| C9b | Background runner for the C9 adapter. A pending source is mapped off the overlay thread. A citation select stores no `matchKind: none` while that source is still pending. Brief: `C9b_background_map.md`. Follows the AllPoetry trial; does not reorder C12 or C13 |
 | C12 | Exports: `references.bib`, `collection.tex` (escaped), `collection.txt`, `decisions.csv`, `citation_check.csv`; optional md and CSL-JSON |
 | C13 | MCP tools, including `showCitations` with optional `mode` and `pace`; `queryProject` returns keeps, decisions, and notes; skill text |
 
-Order: C7, then C7b, then C8 and C9 together, then C10 and C11, then C12 and C13. C3 (tasks and controls) must be in before C11. C3, C3b, and C3c have landed. The implementation brief for C7 is `C7_project_store.md`. C7b's brief is `C7b_locus_notes.md`. The implementation briefs for C8 through C13 are `C8_C13_research_tours.md`. C11-bugfix follows the live trial of C11 and does not reorder C12 or C13. Its brief is `C11_bugfix.md`.
+Order: C7, then C7b, then C8 and C9 together, then C10 and C11, then C12 and C13. C3 (tasks and controls) must be in before C11. C3, C3b, and C3c have landed. The implementation brief for C7 is `C7_project_store.md`. C7b's brief is `C7b_locus_notes.md`. The implementation briefs for C8 through C13 are `C8_C13_research_tours.md`. C11-bugfix follows the live trial of C11 and does not reorder C12 or C13. Its brief is `C11_bugfix.md`. C9b follows the AllPoetry trial of that build and does not reorder C12 or C13. Its brief is `C9b_background_map.md`.

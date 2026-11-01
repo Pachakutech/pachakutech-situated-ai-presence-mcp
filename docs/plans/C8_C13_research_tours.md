@@ -91,7 +91,7 @@ Each `pending` source becomes text with a place on each passage, a `docKey`, and
 
 ### Adapters
 
-One source at a time, off the overlay thread. The trait returns passages or a reason.
+One source at a time, off the overlay thread. The trait returns passages or a reason. The function is `map_pending`. The tests call it. The socket and the overlay do not. The background runner is `C9b_background_map.md`.
 
 | Source | Adapter | Place |
 |---|---|---|
@@ -157,7 +157,7 @@ Citation shape, per source, in list order:
 
 1. `quote` present: exact match in the passage text, then a match that ignores extra whitespace and punctuation. Hit: one locus, `matchKind: exact`.
 2. No quote, or the quote missed: token-overlap shortlist of the `claim`, or of the ask text when there is no claim. At most one locus, `matchKind: near`, words taken from the winning passage. The locus stores the narration sentence `I couldn't find the quoted words. The closest passage is this one.` when a quote was missed. C10 does not speak it.
-3. No passage overlaps: one locus with `matchKind: none` and empty words. The source is still a stop for C11. Nothing is highlighted for it.
+3. No passage overlaps: one locus with `matchKind: none` and empty words. The source is still a stop for C11. Nothing is highlighted for it. A source whose status is still `pending` is not this row. `C9b_background_map.md` leaves it unselected and names it on the reply. U4 is a mapped source whose text has no overlap, and that source still stores `matchKind: none` with its doc key.
 
 Research shape, when no source carries a quote or a claim:
 
