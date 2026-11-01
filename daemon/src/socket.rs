@@ -498,6 +498,10 @@ fn dispatch(
         return (result, false);
     }
 
+    if let Some(result) = reg.route_tour_proposal(&proposal, tier, now_ms()) {
+        return (result, false);
+    }
+
     if let Some(result) = reg.route_project_proposal(&proposal, tier, now_ms()) {
         return (result, false);
     }
@@ -570,7 +574,8 @@ fn dispatch(
         | Proposal::AddSources(_)
         | Proposal::ConfirmProject(_)
         | Proposal::QueryProject(_)
-        | Proposal::SelectLoci(_) => ProposalResult::err(&proposal_id, "unrouted project proposal"),
+        | Proposal::SelectLoci(_)
+        | Proposal::StartProjectTour(_) => ProposalResult::err(&proposal_id, "unrouted project proposal"),
         Proposal::AddNote(_) | Proposal::DeleteNote(_) => ProposalResult::err(&proposal_id, "unrouted note proposal"),
     };
     (result, false)

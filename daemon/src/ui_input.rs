@@ -36,6 +36,8 @@ pub enum Hotkey {
     Start,
     Note,
     ConfirmProject,
+    NextSource,
+    PrevSource,
 }
 
 pub enum UiEvent {

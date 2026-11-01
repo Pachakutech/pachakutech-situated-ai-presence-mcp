@@ -195,6 +195,9 @@ pub enum Proposal {
     /// Choose loci for one ask. T1 and T2. This does not open a window.
     #[serde(rename = "selectLoci")]
     SelectLoci(SelectLociBody),
+    /// Walk a project's sources. T1 and T2. T2 waits for the start key.
+    #[serde(rename = "startProjectTour")]
+    StartProjectTour(StartProjectTourBody),
     /// T1 text on a phrase. Without `phraseId`, one live arming is consumed.
     #[serde(rename = "addNote")]
     AddNote(AddNoteBody),
@@ -252,6 +255,7 @@ impl Proposal {
             Proposal::ConfirmProject(body) => &body.proposal_id,
             Proposal::QueryProject(body) => &body.proposal_id,
             Proposal::SelectLoci(body) => &body.proposal_id,
+            Proposal::StartProjectTour(body) => &body.proposal_id,
             Proposal::AddNote(body) => &body.proposal_id,
             Proposal::DeleteNote(body) => &body.proposal_id,
         }
@@ -291,6 +295,7 @@ impl Proposal {
             Proposal::ConfirmProject(_) => "confirmProject",
             Proposal::QueryProject(_) => "queryProject",
             Proposal::SelectLoci(_) => "selectLoci",
+            Proposal::StartProjectTour(_) => "startProjectTour",
             Proposal::AddNote(_) => "addNote",
             Proposal::DeleteNote(_) => "deleteNote",
         }
@@ -692,6 +697,23 @@ pub struct SelectLociBody {
     pub ask_id: String,
     #[serde(default)]
     pub labels: Vec<StanceLabelIn>,
+    #[serde(default, rename = "kind")]
+    pub wire_kind: Option<String>,
+}
+
+/// T1 opens the first source. T2 lists names and waits for the start key.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StartProjectTourBody {
+    #[serde(rename = "proposalId")]
+    pub proposal_id: String,
+    #[serde(rename = "projectId")]
+    pub project_id: String,
+    #[serde(default, rename = "askId")]
+    pub ask_id: Option<String>,
+    pub mode: TaskMode,
+    #[serde(default)]
+    pub pace: Option<TaskPace>,
     #[serde(default, rename = "kind")]
     pub wire_kind: Option<String>,
 }

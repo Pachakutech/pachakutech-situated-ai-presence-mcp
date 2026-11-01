@@ -17,6 +17,7 @@ mod docmap;
 mod intake;
 mod adapt;
 mod select;
+mod tour;
 mod project;
 mod note_text;
 mod registry;
