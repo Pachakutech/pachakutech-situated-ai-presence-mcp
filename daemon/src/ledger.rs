@@ -5,8 +5,10 @@
 
 use crate::gate::Tier;
 use crate::highlight::UvBox;
+use crate::note_text::{self, NoteCarry, NoteFact, NoteFlags, NoteVia, NoteView};
 use crate::protocol::{
-    ListPhraseFlagsBody, MatchInfo, MatchStatus, ObservePhraseBody, ObservedViewed, Proposal, ProposalResult,
+    AddNoteBody, DeleteNoteBody, ListPhraseFlagsBody, MatchInfo, MatchStatus, NoteVia as WireVia, ObservePhraseBody,
+    ObservedViewed, Proposal, ProposalResult,
 };
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -21,6 +23,11 @@ pub const TEXT_CAP: usize = 200;
 pub const DEFAULT_LIMIT: usize = 50;
 pub const MAX_LIMIT: usize = 200;
 pub const SUBSCRIBE_LAG: usize = 1000;
+const NOTE_ARM_MS: u64 = 60_000;
+const NOTE_RATE_MS: u64 = 2_000;
+const NOTES_PER_PHRASE: usize = 20;
+const NOTES_PER_PROJECT: usize = 200;
+const NOTES_PER_SESSION: usize = 500;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LedgerKind {
@@ -31,6 +38,8 @@ pub enum LedgerKind {
     Cleared,
     Mismatch,
     Tour,
+    Note,
+    NoteDeleted,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,6 +69,8 @@ pub struct LedgerEvent {
     pub project_id: Option<String>,
     pub ask_id: Option<String>,
     pub locus_id: Option<String>,
+    /// Set on `Note` and `NoteDeleted`. Omitted from the wire when absent.
+    pub note: Option<NoteCarry>,
 }
 
 #[derive(Clone)]
@@ -140,6 +151,14 @@ pub struct Ledger {
     /// Registry-owned store. `new` leaves it closed so tests do not touch the
     /// user's project directory. The overlay opens it after the socket binds.
     projects: Option<crate::project::ProjectStore>,
+    arming: Option<Arming>,
+    note_mint: u64,
+    last_note_ms: HashMap<String, u64>,
+}
+
+struct Arming {
+    phrase_id: String,
+    at_ms: u64,
 }
 
 impl Ledger {
@@ -153,6 +172,9 @@ impl Ledger {
             watch: None,
             assoc: HashMap::new(),
             projects: None,
+            arming: None,
+            note_mint: 0,
+            last_note_ms: HashMap::new(),
         }
     }
 
@@ -302,7 +324,7 @@ impl Ledger {
                 (phrase_id, task_id, query, None, LedgerKind::Tour, None, None, None, Some(dwell_ms))
             }
         };
-        self.push(phrase_id, task_id, query, doc_key, kind, viewed, matched, uv, dwell_ms, by, now_ms)
+        self.push(phrase_id, task_id, query, doc_key, kind, viewed, matched, uv, dwell_ms, by, now_ms, None)
     }
 
     /// Only `ui_input::apply_ui_event` can build the witness this requires.
@@ -319,7 +341,98 @@ impl Ledger {
             UserAppend::Cleared { phrase_id } => (phrase_id, LedgerKind::Cleared, Some(ViewedTier::Acknowledged)),
         };
         let task_id = self.latest_task_id(&phrase_id);
-        self.push(phrase_id, task_id, None, None, kind, viewed, None, None, None, Tier::T0Physical, now_ms)
+        self.push(phrase_id, task_id, None, None, kind, viewed, None, None, None, Tier::T0Physical, now_ms, None)
+    }
+
+    pub fn arm_note(&mut self, phrase_id: &str, now_ms: u64) -> Result<(), LedgerError> {
+        let phrase_id = cut(phrase_id.to_string());
+        if phrase_id.is_empty() || !self.known(&phrase_id) {
+            return Err(LedgerError::Rejected("no_such_phrase"));
+        }
+        self.arming = Some(Arming { phrase_id, at_ms: now_ms });
+        Ok(())
+    }
+
+    pub fn add_note(&mut self, body: &AddNoteBody, now_ms: u64) -> Result<Value, LedgerError> {
+        let _ = body.burst;
+        let via = match body.via {
+            WireVia::Typed => NoteVia::Typed,
+            WireVia::Voice => NoteVia::Voice,
+        };
+        let cleaned = note_text::clean(&body.text).map_err(LedgerError::Rejected)?;
+        let phrase_id = if let Some(raw) = body.phrase_id.as_deref().map(str::trim).filter(|text| !text.is_empty()) {
+            let phrase_id = cut(raw.to_string());
+            if !self.known(&phrase_id) {
+                return Err(LedgerError::Rejected("no_such_phrase"));
+            }
+            phrase_id
+        } else {
+            self.take_arming(now_ms)?
+        };
+        let replaces = match body.replaces.as_deref().map(str::trim).filter(|text| !text.is_empty()) {
+            Some(replaces) if self.live_note(&phrase_id, replaces) => Some(replaces.to_string()),
+            Some(_) => return Err(LedgerError::Rejected("no_such_note")),
+            None => None,
+        };
+        let flags = NoteFlags {
+            transcribed: via == NoteVia::Voice,
+            truncated: cleaned.truncated,
+            normalized: cleaned.normalized,
+        };
+        let (_, note_id) = self.commit_note(phrase_id, cleaned.text, via, flags, replaces, now_ms)?;
+        Ok(json!({ "noteId": note_id }))
+    }
+
+    pub fn delete_note(&mut self, note_id: &str, now_ms: u64) -> Result<Value, LedgerError> {
+        let note_id = note_id.trim();
+        if note_id.is_empty() {
+            return Err(LedgerError::Schema);
+        }
+        let found = self
+            .events
+            .iter()
+            .find(|ev| ev.kind == LedgerKind::Note && ev.note.as_ref().is_some_and(|note| note.note_id == note_id))
+            .cloned();
+        let Some(found) = found else {
+            return Err(LedgerError::Rejected("no_such_note"));
+        };
+        if self.events.iter().any(|ev| {
+            ev.kind == LedgerKind::NoteDeleted && ev.note.as_ref().is_some_and(|note| note.note_id == note_id)
+        }) {
+            return Err(LedgerError::Rejected("no_such_note"));
+        }
+        let phrase_id = found.phrase_id.clone();
+        let planted = if self.assoc.get(&phrase_id).is_none() {
+            if let (Some(project_id), Some(locus_id)) = (found.project_id.clone(), found.locus_id.clone()) {
+                self.remember_binding(&phrase_id, project_id, locus_id, found.ask_id.clone());
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        let carry = NoteCarry { note_id: note_id.to_string(), text: None, via: None, replaces: None, flags: None };
+        let task_id = found.task_id.clone().or_else(|| self.latest_task_id(&phrase_id));
+        let result = self.push(
+            phrase_id.clone(),
+            task_id,
+            None,
+            None,
+            LedgerKind::NoteDeleted,
+            None,
+            None,
+            None,
+            None,
+            Tier::T1User,
+            now_ms,
+            Some(carry),
+        );
+        if planted {
+            self.assoc.remove(&phrase_id);
+        }
+        result?;
+        Ok(json!({ "noteId": note_id }))
     }
 
     pub fn list_value(&self, body: &ListPhraseFlagsBody) -> Result<Value, LedgerError> {
@@ -396,6 +509,7 @@ impl Ledger {
         dwell_ms: Option<u64>,
         by: Tier,
         now_ms: u64,
+        note: Option<NoteCarry>,
     ) -> Result<u64, LedgerError> {
         let phrase_id = cut(phrase_id);
         if phrase_id.trim().is_empty() {
@@ -430,6 +544,7 @@ impl Ledger {
             project_id,
             ask_id,
             locus_id,
+            note,
         };
         if let Some(project_id) = &event.project_id {
             let store = self.projects.as_mut().ok_or(LedgerError::Rejected("projects_unavailable"))?;
@@ -519,6 +634,90 @@ impl Ledger {
         Ok(id)
     }
 
+    fn take_arming(&mut self, now_ms: u64) -> Result<String, LedgerError> {
+        let Some(arm) = self.arming.take() else {
+            return Err(LedgerError::Rejected("no_armed_note"));
+        };
+        if now_ms.saturating_sub(arm.at_ms) > NOTE_ARM_MS {
+            return Err(LedgerError::Rejected("no_armed_note"));
+        }
+        Ok(arm.phrase_id)
+    }
+
+    fn live_note(&self, phrase_id: &str, note_id: &str) -> bool {
+        let present = self.events.iter().any(|ev| {
+            ev.phrase_id == phrase_id
+                && ev.kind == LedgerKind::Note
+                && ev.note.as_ref().is_some_and(|note| note.note_id == note_id)
+        });
+        let deleted = self.events.iter().any(|ev| {
+            ev.kind == LedgerKind::NoteDeleted && ev.note.as_ref().is_some_and(|note| note.note_id == note_id)
+        });
+        present && !deleted
+    }
+
+    fn mint_id(&mut self, prefix: &str) -> String {
+        let id = format!("{prefix}{:016x}", self.note_mint);
+        self.note_mint = self.note_mint.saturating_add(1);
+        id
+    }
+
+    fn commit_note(
+        &mut self,
+        phrase_id: String,
+        text: String,
+        via: NoteVia,
+        flags: NoteFlags,
+        replaces: Option<String>,
+        now_ms: u64,
+    ) -> Result<(u64, String), LedgerError> {
+        if let Some(last) = self.last_note_ms.get(&phrase_id) {
+            if now_ms.saturating_sub(*last) < NOTE_RATE_MS {
+                return Err(LedgerError::Rejected("rate_limited"));
+            }
+        }
+        let on_phrase = self.events.iter().filter(|ev| ev.phrase_id == phrase_id && ev.kind == LedgerKind::Note).count();
+        if on_phrase >= NOTES_PER_PHRASE {
+            return Err(LedgerError::Rejected("quota:notes"));
+        }
+        if let Some(project_id) = self.assoc.get(&phrase_id).map(|bind| bind.project_id.clone()) {
+            let store = self.projects.as_ref().ok_or(LedgerError::Rejected("projects_unavailable"))?;
+            if store.count_notes(&project_id) >= NOTES_PER_PROJECT {
+                return Err(LedgerError::Rejected("quota:notes"));
+            }
+        } else {
+            let session = self.events.iter().filter(|ev| ev.kind == LedgerKind::Note && ev.project_id.is_none()).count();
+            if session >= NOTES_PER_SESSION {
+                return Err(LedgerError::Rejected("quota:notes"));
+            }
+        }
+        let note_id = self.mint_id("nt-");
+        let carry = NoteCarry {
+            note_id: note_id.clone(),
+            text: Some(text),
+            via: Some(via),
+            replaces,
+            flags: Some(flags),
+        };
+        let task_id = self.latest_task_id(&phrase_id);
+        let seq = self.push(
+            phrase_id.clone(),
+            task_id,
+            None,
+            None,
+            LedgerKind::Note,
+            None,
+            None,
+            None,
+            None,
+            Tier::T1User,
+            now_ms,
+            Some(carry),
+        )?;
+        self.last_note_ms.insert(phrase_id, now_ms);
+        Ok((seq, note_id))
+    }
+
     fn derived(&self) -> Vec<Derived> {
         let mut rows = Vec::new();
         for id in self.phrase_ids() {
@@ -555,6 +754,7 @@ struct Derived {
     ask_id: Option<String>,
     locus_id: Option<String>,
     seq: u64,
+    notes: Vec<NoteView>,
 }
 
 impl Derived {
@@ -575,6 +775,9 @@ impl Derived {
             "seq": self.seq,
         });
         insert_bound(&mut value, self.project_id.as_deref(), self.ask_id.as_deref(), self.locus_id.as_deref());
+        if !self.notes.is_empty() {
+            value["notes"] = json!(self.notes.iter().map(note_text::note_view_json).collect::<Vec<_>>());
+        }
         value
     }
 }
@@ -598,6 +801,25 @@ impl LedgerEvent {
             value["dwellMs"] = json!(dwell);
         }
         insert_bound(&mut value, self.project_id.as_deref(), self.ask_id.as_deref(), self.locus_id.as_deref());
+        if let Some(note) = &self.note {
+            value["noteId"] = json!(note.note_id);
+            if let Some(text) = &note.text {
+                value["text"] = json!(text);
+            }
+            if let Some(via) = note.via {
+                value["via"] = json!(via.wire());
+            }
+            if let Some(replaces) = &note.replaces {
+                value["replaces"] = json!(replaces);
+            }
+            if let Some(flags) = &note.flags {
+                value["flags"] = json!({
+                    "transcribed": flags.transcribed,
+                    "truncated": flags.truncated,
+                    "normalized": flags.normalized,
+                });
+            }
+        }
         value
     }
 }
@@ -625,6 +847,35 @@ impl MatchInfo {
             "conf": self.conf,
             "ocrSnippet": self.ocr_snippet,
         })
+    }
+}
+
+pub fn route_note(proposal: &Proposal, tier: Tier, ledger: &mut Ledger, now_ms: u64) -> Option<ProposalResult> {
+    match proposal {
+        Proposal::AddNote(body) => {
+            if tier != Tier::T1User {
+                return Some(ProposalResult::err(&body.proposal_id, "not_allowed_for_tier:addNote"));
+            }
+            let id = body.proposal_id.clone();
+            Some(map_note(&id, ledger.add_note(body, now_ms)))
+        }
+        Proposal::DeleteNote(body) => {
+            if tier != Tier::T1User {
+                return Some(ProposalResult::err(&body.proposal_id, "not_allowed_for_tier:deleteNote"));
+            }
+            let id = body.proposal_id.clone();
+            Some(map_note(&id, ledger.delete_note(&body.note_id, now_ms)))
+        }
+        _ => None,
+    }
+}
+
+fn map_note(id: &str, result: Result<Value, LedgerError>) -> ProposalResult {
+    match result {
+        Ok(detail) => ProposalResult::ok(id, Some(detail)),
+        Err(LedgerError::Schema) => ProposalResult::err(id, "schema"),
+        Err(LedgerError::Quota) => ProposalResult::err(id, "quota: phrase cap"),
+        Err(LedgerError::Rejected(message)) => ProposalResult::err(id, message),
     }
 }
 
@@ -766,6 +1017,8 @@ fn kind_wire(kind: LedgerKind) -> &'static str {
         LedgerKind::Cleared => "cleared",
         LedgerKind::Mismatch => "mismatch",
         LedgerKind::Tour => "tour",
+        LedgerKind::Note => "note",
+        LedgerKind::NoteDeleted => "noteDeleted",
     }
 }
 
@@ -808,6 +1061,7 @@ fn derive_phrase(events: &[&LedgerEvent]) -> Derived {
         ask_id: None,
         locus_id: None,
         seq: 0,
+        notes: Vec::new(),
     };
     let mut non_ack: Option<ViewedTier> = None;
     for ev in events {
@@ -857,15 +1111,58 @@ fn derive_phrase(events: &[&LedgerEvent]) -> Derived {
                 row.decision_by = Some(ev.by);
             }
             LedgerKind::Located | LedgerKind::Mismatch | LedgerKind::Tour => {}
+            LedgerKind::Note | LedgerKind::NoteDeleted => {}
         }
     }
+    row.notes = notes_of(events);
     row
+}
+
+fn notes_of(events: &[&LedgerEvent]) -> Vec<NoteView> {
+    let mut facts = Vec::new();
+    for ev in events {
+        let Some(note) = &ev.note else { continue };
+        match ev.kind {
+            LedgerKind::Note => {
+                let Some(text) = &note.text else { continue };
+                facts.push(NoteFact {
+                    note_id: note.note_id.clone(),
+                    text: text.clone(),
+                    via: note.via.map(NoteVia::wire).unwrap_or("typed").to_string(),
+                    ts_ms: ev.ts_ms,
+                    replaces: note.replaces.clone(),
+                    flags: note.flags.clone().unwrap_or(NoteFlags {
+                        transcribed: false,
+                        truncated: false,
+                        normalized: false,
+                    }),
+                    tombstone: false,
+                });
+            }
+            LedgerKind::NoteDeleted => facts.push(NoteFact {
+                note_id: note.note_id.clone(),
+                text: String::new(),
+                via: String::new(),
+                ts_ms: ev.ts_ms,
+                replaces: None,
+                flags: NoteFlags { transcribed: false, truncated: false, normalized: false },
+                tombstone: true,
+            }),
+            _ => {}
+        }
+    }
+    note_text::visible_notes(&facts)
 }
 
 fn seqs_to_keep(events: &[&LedgerEvent]) -> HashSet<u64> {
     let mut keep = HashSet::new();
     if let Some(last) = events.last() {
         keep.insert(last.seq);
+    }
+    for ev in events {
+        if matches!(ev.kind, LedgerKind::Note | LedgerKind::NoteDeleted) {
+            keep.insert(ev.seq);
+        }
     }
     for pick in [
         |ev: &&LedgerEvent| ev.query.is_some(),
@@ -1430,5 +1727,181 @@ mod tests {
         assert_eq!(before, after);
         assert!(watch.is_file());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn seed(ledger: &mut Ledger, id: &str) {
+        ledger.append_observed(Tier::T3Sidecar, located(id, 1.0, None), 1).unwrap();
+    }
+
+    fn add_at(ledger: &mut Ledger, text: &str, phrase: Option<&str>, replaces: Option<&str>, now: u64) -> ProposalResult {
+        let text = serde_json::to_string(text).unwrap();
+        let phrase = phrase.map(|id| format!(r#","phraseId":"{id}""#)).unwrap_or_default();
+        let replaces = replaces.map(|id| format!(r#","replaces":"{id}""#)).unwrap_or_default();
+        let line = format!(r#"{{"kind":"addNote","proposalId":"n","text":{text},"via":"typed"{phrase}{replaces}}}"#);
+        route_note(&serde_json::from_str(&line).unwrap(), Tier::T1User, ledger, now).unwrap()
+    }
+
+    fn note_row(ledger: &Ledger, phrase: &str) -> Value {
+        let detail = ledger.list_value(&bare_list(false)).unwrap();
+        detail["rows"].as_array().unwrap().iter().find(|row| row["phraseId"] == phrase).cloned().unwrap_or(Value::Null)
+    }
+
+    fn prod_fn(name: &str) -> String {
+        let src = include_str!("ledger.rs");
+        let prod = src.split("mod tests").next().unwrap();
+        let marker = format!("fn {name}");
+        let start = prod.find(&marker).unwrap_or_else(|| panic!("missing {name}"));
+        let brace = prod[start..].find('{').unwrap() + start;
+        let mut depth = 0i32;
+        for (offset, byte) in prod.as_bytes().iter().enumerate().skip(brace) {
+            match byte {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return prod[start..=offset].to_string();
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("unclosed {name}");
+    }
+
+    #[test]
+    fn o1_add_note_is_t1_only() {
+        use crate::gate::check;
+        let proposal: Proposal = serde_json::from_str(r#"{"kind":"addNote","proposalId":"n","text":"cut","via":"typed","phraseId":"ph-1"}"#).unwrap();
+        for tier in [Tier::T0Physical, Tier::T2Client, Tier::T3Sidecar] {
+            let err = check(tier, &proposal).unwrap_err();
+            assert_eq!(err.error.as_deref(), Some("not_allowed_for_tier:addNote"));
+        }
+        assert!(check(Tier::T1User, &proposal).is_ok());
+        let mut ledger = Ledger::new();
+        seed(&mut ledger, "ph-1");
+        let denied = route_note(&proposal, Tier::T2Client, &mut ledger, 5).unwrap();
+        assert_eq!(denied.error.as_deref(), Some("not_allowed_for_tier:addNote"));
+        assert!(ledger.events().iter().all(|ev| ev.kind != LedgerKind::Note));
+    }
+
+    #[test]
+    fn o2_o4_o5_arming_is_one_phrase_for_sixty_seconds() {
+        let mut ledger = Ledger::new();
+        seed(&mut ledger, "ph-1");
+        let missing = add_at(&mut ledger, "hello", None, None, 10);
+        assert_eq!(missing.error.as_deref(), Some("no_armed_note"));
+        assert!(ledger.events().iter().all(|ev| ev.kind != LedgerKind::Note));
+        ledger.arm_note("ph-1", 1_000).unwrap();
+        let expired = add_at(&mut ledger, "hello", None, None, 1_000 + 60_001);
+        assert_eq!(expired.error.as_deref(), Some("no_armed_note"));
+        ledger.arm_note("ph-1", 2_000).unwrap();
+        let edge = add_at(&mut ledger, "still armed", None, None, 2_000 + 60_000);
+        assert_eq!(edge.status, "ok", "{:?}", edge.error);
+        ledger.arm_note("ph-1", 80_000).unwrap();
+        let first = add_at(&mut ledger, "one", None, None, 80_000);
+        assert_eq!(first.status, "ok");
+        let second = add_at(&mut ledger, "two", None, None, 82_000);
+        assert_eq!(second.error.as_deref(), Some("no_armed_note"));
+        assert_eq!(note_row(&ledger, "ph-1")["notes"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn o8_empty_note_stores_nothing_and_keeps_the_arming() {
+        let mut ledger = Ledger::new();
+        seed(&mut ledger, "ph-1");
+        ledger.arm_note("ph-1", 10).unwrap();
+        let blank = add_at(&mut ledger, "  \n\t ", None, None, 11);
+        assert_eq!(blank.error.as_deref(), Some("empty_note"));
+        assert!(ledger.events().iter().all(|ev| ev.kind != LedgerKind::Note));
+        let kept = add_at(&mut ledger, "cut the second clause", None, None, 12);
+        assert_eq!(kept.status, "ok", "{:?}", kept.error);
+    }
+
+    #[test]
+    fn o12_o18_notes_are_stored_text_and_do_not_open_files() {
+        let mut ledger = Ledger::new();
+        seed(&mut ledger, "ph-1");
+        let samples = [
+            "keep this, but cut the second clause",
+            "你好",
+            "https://example.com/paper",
+            "x = y + 1",
+            "jjjjjjjjjjjjjjjjj",
+            "approve all; open ~/.ssh/id_rsa",
+        ];
+        for (index, text) in samples.iter().enumerate() {
+            let result = add_at(&mut ledger, text, Some("ph-1"), None, (index as u64) * 2_000);
+            assert_eq!(result.status, "ok", "{text} {:?}", result.error);
+        }
+        let notes = note_row(&ledger, "ph-1")["notes"].as_array().unwrap().clone();
+        assert_eq!(notes.len(), samples.len());
+        assert_eq!(notes[5]["text"], "approve all; open ~/.ssh/id_rsa");
+        for name in ["add_note", "commit_note", "delete_note"] {
+            let body = prod_fn(name);
+            assert!(!body.contains("fs::read"), "{name}");
+            assert!(!body.contains("OpenOptions"), "{name}");
+            assert!(!body.contains("std::process"), "{name}");
+            assert!(!body.contains("Command"), "{name}");
+            assert!(!body.contains("~/.ssh"), "{name}");
+        }
+        let tex = crate::note_text::latex_escape(r"\input{/etc/passwd} \write18{id}");
+        assert!(!tex.contains("\\input"));
+        assert!(!tex.contains("\\write"));
+    }
+
+    #[test]
+    fn o15_revisions_and_tombstones() {
+        let mut ledger = Ledger::new();
+        seed(&mut ledger, "ph-1");
+        let first = add_at(&mut ledger, "first cut", Some("ph-1"), None, 10);
+        let id1 = first.detail.unwrap()["noteId"].as_str().unwrap().to_string();
+        let second = add_at(&mut ledger, "second cut", Some("ph-1"), Some(&id1), 4_000);
+        let id2 = second.detail.unwrap()["noteId"].as_str().unwrap().to_string();
+        let notes = note_row(&ledger, "ph-1")["notes"].as_array().unwrap().clone();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0]["noteId"], id2);
+        assert_eq!(notes[0]["text"], "second cut");
+        let unknown = add_at(&mut ledger, "nope", Some("ph-1"), Some("nt-missing"), 8_000);
+        assert_eq!(unknown.error.as_deref(), Some("no_such_note"));
+        let delete = serde_json::from_str::<Proposal>(&format!(r#"{{"kind":"deleteNote","proposalId":"d","noteId":"{id2}"}}"#)).unwrap();
+        let gone = route_note(&delete, Tier::T1User, &mut ledger, 10_000).unwrap();
+        assert_eq!(gone.status, "ok", "{:?}", gone.error);
+        assert!(note_row(&ledger, "ph-1").get("notes").is_none());
+        let again = route_note(&delete, Tier::T1User, &mut ledger, 12_000).unwrap();
+        assert_eq!(again.error.as_deref(), Some("no_such_note"));
+        let kinds: Vec<_> = ledger.events().iter().filter(|ev| matches!(ev.kind, LedgerKind::Note | LedgerKind::NoteDeleted)).map(|ev| ev.kind).collect();
+        assert_eq!(kinds.len(), 3);
+        assert!(kinds.contains(&LedgerKind::NoteDeleted));
+    }
+
+    #[test]
+    fn o19_rate_and_quotas() {
+        let mut ledger = Ledger::new();
+        seed(&mut ledger, "ph-1");
+        assert_eq!(add_at(&mut ledger, "a", Some("ph-1"), None, 0).status, "ok");
+        assert_eq!(add_at(&mut ledger, "b", Some("ph-1"), None, 1_999).error.as_deref(), Some("rate_limited"));
+        assert_eq!(add_at(&mut ledger, "c", Some("ph-1"), None, 2_000).status, "ok");
+        for n in 2..20 {
+            let result = add_at(&mut ledger, &format!("n{n}"), Some("ph-1"), None, (n as u64) * 2_000);
+            assert_eq!(result.status, "ok", "{n} {:?}", result.error);
+        }
+        let over = add_at(&mut ledger, "too many", Some("ph-1"), None, 20 * 2_000);
+        assert_eq!(over.error.as_deref(), Some("quota:notes"));
+        assert_eq!(note_row(&ledger, "ph-1")["notes"].as_array().unwrap().len(), 20);
+
+        let mut session = Ledger::new();
+        for phrase in 0..25 {
+            let id = format!("ph-{phrase}");
+            seed(&mut session, &id);
+            for note in 0..20 {
+                let now = (phrase as u64) * 50_000 + (note as u64) * 2_000;
+                let result = add_at(&mut session, "s", Some(&id), None, now);
+                assert_eq!(result.status, "ok", "{phrase}:{note} {:?}", result.error);
+            }
+        }
+        seed(&mut session, "ph-extra");
+        let denied = add_at(&mut session, "s", Some("ph-extra"), None, 25 * 50_000);
+        assert_eq!(denied.error.as_deref(), Some("quota:notes"));
+        assert!(note_row(&session, "ph-extra").get("notes").is_none());
     }
 }

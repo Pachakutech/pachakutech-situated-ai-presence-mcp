@@ -21,6 +21,7 @@ pub enum ClickTarget {
     Check,
     Yes,
     No,
+    Note,
 }
 
 /// Tour keys. Ordinary keys are not a variant: the daemon does not watch them.
@@ -33,6 +34,7 @@ pub enum Hotkey {
     Pause,
     Resume,
     Start,
+    Note,
 }
 
 pub enum UiEvent {
@@ -43,6 +45,8 @@ pub enum UiEvent {
     /// Pointer-down on a control square. `ts_ms` is the compositor timestamp.
     Click { phrase_id: String, target: ClickTarget, ts_ms: u64 },
     Hotkey(Hotkey),
+    /// Arms one phrase for the next T1 note. Writes no decision.
+    ArmNote { phrase_id: String },
 }
 
 pub fn apply_ui_event(ledger: &mut Ledger, ev: UiEvent, now_ms: u64) -> Result<u64, LedgerError> {
@@ -55,6 +59,7 @@ pub fn apply_ui_event(ledger: &mut Ledger, ev: UiEvent, now_ms: u64) -> Result<u
         // Clicks and hotkeys are accepted by the task book, which calls back
         // with one of the variants above. This arm writes nothing.
         UiEvent::Click { .. } | UiEvent::Hotkey(_) => return Err(LedgerError::Schema),
+        UiEvent::ArmNote { phrase_id } => return ledger.arm_note(&phrase_id, now_ms).map(|_| 0),
     };
     ledger.append_user(witness, append, now_ms)
 }

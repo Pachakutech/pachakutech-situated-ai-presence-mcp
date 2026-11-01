@@ -13,6 +13,7 @@ import { dirname, join } from "node:path";
 import { getBundledDaemonPath } from "./daemonBinary.js";
 import { socketPath } from "./daemonClient.js";
 import { askCommand } from "./command/ask.js";
+import { noteCommand } from "./command/note.js";
 import { docmapProposal } from "./command/docmap.js";
 import { runLedger } from "./command/ledger.js";
 import { commandSocketPath, connectCommand, openCommand } from "./command/socket.js";
@@ -88,6 +89,10 @@ function usage(): never {
       "                       Parse a sentence, confirm the mode, and send one createTask",
       "                       on command.sock. Empty or y accepts. n drops the ask.",
       "                       explain, select, or approve replaces the parsed mode.",
+      "  note [--editor] [--voice] [--phrase <id>] [--replaces <id>] [text]",
+      "                       Send the user's words as addNote on command.sock.",
+      "                       Enter commits. Esc, Ctrl-C, and Ctrl-D discard.",
+      "                       --editor uses $EDITOR on a 0600 temp file.",
       "  stop <id>            Stop that presence's speech; face returns to neutral",
       "  retire <id>          End the presence, hide its avatar, free its slot",
       "                       The doubled form still works: presence presence speak <id> <text>",
@@ -445,6 +450,16 @@ switch (command) {
     const commandPath = commandSocketPath(socketPath());
     process.exit(
       await askCommand(process.argv.slice(3), {
+        commandPath,
+        writer: { write: (body) => connectCommand(commandPath, body) },
+      }),
+    );
+    break;
+  }
+  case "note": {
+    const commandPath = commandSocketPath(socketPath());
+    process.exit(
+      await noteCommand(process.argv.slice(3), {
         commandPath,
         writer: { write: (body) => connectCommand(commandPath, body) },
       }),

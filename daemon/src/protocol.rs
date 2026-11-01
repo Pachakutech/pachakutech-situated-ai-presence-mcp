@@ -186,6 +186,12 @@ pub enum Proposal {
     /// Read a project. This does not move a page and does not decide.
     #[serde(rename = "queryProject")]
     QueryProject(QueryProjectBody),
+    /// T1 text on a phrase. Without `phraseId`, one live arming is consumed.
+    #[serde(rename = "addNote")]
+    AddNote(AddNoteBody),
+    /// T1 tombstone for one note.
+    #[serde(rename = "deleteNote")]
+    DeleteNote(DeleteNoteBody),
 }
 
 /// Applied on the overlay thread after the socket pump. Not a GPU command.
@@ -234,6 +240,8 @@ impl Proposal {
             Proposal::QueryDocMap(body) => &body.proposal_id,
             Proposal::CreateProject(body) => &body.proposal_id,
             Proposal::QueryProject(body) => &body.proposal_id,
+            Proposal::AddNote(body) => &body.proposal_id,
+            Proposal::DeleteNote(body) => &body.proposal_id,
         }
     }
 
@@ -268,6 +276,8 @@ impl Proposal {
             Proposal::QueryDocMap(_) => "queryDocMap",
             Proposal::CreateProject(_) => "createProject",
             Proposal::QueryProject(_) => "queryProject",
+            Proposal::AddNote(_) => "addNote",
+            Proposal::DeleteNote(_) => "deleteNote",
         }
     }
 }
@@ -605,6 +615,41 @@ pub struct QueryProjectBody {
     pub since_pseq: Option<u64>,
     #[serde(default)]
     pub limit: Option<u32>,
+    #[serde(default, rename = "kind")]
+    pub wire_kind: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NoteVia {
+    Typed,
+    Voice,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AddNoteBody {
+    #[serde(rename = "proposalId")]
+    pub proposal_id: String,
+    pub text: String,
+    pub via: NoteVia,
+    #[serde(default, rename = "phraseId")]
+    pub phrase_id: Option<String>,
+    #[serde(default)]
+    pub replaces: Option<String>,
+    #[serde(default)]
+    pub burst: bool,
+    #[serde(default, rename = "kind")]
+    pub wire_kind: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeleteNoteBody {
+    #[serde(rename = "proposalId")]
+    pub proposal_id: String,
+    #[serde(rename = "noteId")]
+    pub note_id: String,
     #[serde(default, rename = "kind")]
     pub wire_kind: Option<String>,
 }

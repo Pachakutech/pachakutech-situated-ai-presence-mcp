@@ -196,7 +196,9 @@ Anything not listed for a tier is rejected with `error: "not_allowed_for_tier"`.
 
 Reuse `ProposalResult`. Stable machine-readable codes go in `detail.code` or the `error` string:
 
-`not_allowed_for_tier`, `schema`, `no_armed_note`, `empty_note`, `quota:notes`, `path_not_in_granted_root`, `url_not_allowed`, `source_not_in_project`, `source_failed`, `rate_limited`, `quota`, `queue_full`, `no_such_task`, `no_such_presence`, `select_requires_controls`, `approve_takes_no_controls`, `region_denied`, `task_not_active`, `needs_start_confirm`.
+`not_allowed_for_tier`, `schema`, `no_armed_note`, `empty_note`, `quota:notes`, `no_such_phrase`, `no_such_note`, `path_not_in_granted_root`, `url_not_allowed`, `source_not_in_project`, `source_failed`, `rate_limited`, `quota`, `queue_full`, `no_such_task`, `no_such_presence`, `select_requires_controls`, `approve_takes_no_controls`, `region_denied`, `task_not_active`, `needs_start_confirm`.
+
+`addNote` body: `{ proposalId, text, via: typed|voice, phraseId?, replaces?, burst? }`. `burst` is accepted and ignored. `deleteNote` body: `{ proposalId, noteId }`. Success detail is `{ noteId }`. NFC is not applied. Control characters are stripped before the text is stored. JSON output is serde. LaTeX and BibTeX escape `\ { } % $ & # _ ^ ~` with the backslash first, and a BibTeX field stays brace-balanced. `listPhraseFlags` rows and `queryProject` loci include `notes` when the passage has any.
 
 `createTask` success detail:
 ```json
@@ -422,7 +424,7 @@ Daemon socket tests follow the existing style (spawn the daemon in test mode, co
 
 ### O. Notes
 
-See ticket C7b for the full list (O1–O23): tier isolation, clicked-item arming, sanitation (control, bidi, zero-width, tag characters; whitespace; caps), keyboard-mash hold with Keep/Drop, persistence, no gate effect, CSV formula-injection guard.
+See ticket C7b for the full list (O1–O23): tier isolation, clicked-item arming, sanitation limited to what would break JSON, LaTeX, or BibTeX, persistence, no gate effect, CSV formula-injection guard.
 
 ### K. Regression and performance
 
