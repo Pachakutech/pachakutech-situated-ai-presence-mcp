@@ -318,7 +318,7 @@ Accept and deny are two bibliographies, the EPC split between included studies a
 - Included: one entry per work with at least one keep. The fields and the citekey stay as in the row above.
 - Excluded: one entry per work with a T0 discard and no keep. A work that has both a keep and a discard is included only. The discarded locus stays a row in `decisions.csv`.
 - The client still cannot pass a path. The daemon writes only inside `export/`.
-- An existing bibliography is never replaced. The same bytes leave the file that is already there. Different bytes take the next integer, `references-1.bib` and `excluded-1.bib`, then `-2`, and so on. A timestamp in the name is the other acceptable form. The citekey stays on the source either way.
+- An existing bibliography is never replaced but may be updated in place if that update only adds data to the db. The user should be the only one moving or destructively updating that file as it is their work product, if a workflow simply must remove data in an update, then it should be in a new file `references-1.bib` and `excluded-1.bib`, then `-2`, and so on. I doubt we will need that but the citekey stays on the source either way.
 - The `.tex` written for that export points `\bibliography` at the included name, without the `.bib` suffix. When a previous tex file is present, the new one takes the next integer too, so the older document still names its own bib.
 
 N1 still means only keeps appear in the included bib and in the collection. N2's "decisions.csv only" no longer covers the excluded bib.
