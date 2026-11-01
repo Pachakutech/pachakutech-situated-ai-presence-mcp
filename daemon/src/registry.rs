@@ -4,10 +4,12 @@
 
 use crate::actors::gpu_layout::to_gpu_splat;
 use crate::actors::{ControlActor, PresenceActor, SceneMemory};
+use crate::gate::Tier;
 use crate::highlight::{InterestBook, UvBox, MAX_SECS};
 use crate::docmap::DocMap;
 use crate::ledger::Ledger;
 use crate::project::ProjectStore;
+use crate::protocol::{Proposal, ProposalResult};
 use crate::task::TaskBook;
 use crate::pipeline::{SplatPipeline, INACTIVE_SPLAT};
 use std::collections::HashMap;
@@ -91,6 +93,15 @@ impl Registry {
 
     pub fn task_and_ledger(&mut self) -> (&mut TaskBook, &mut Ledger) {
         (&mut self.tasks, &mut self.ledger)
+    }
+
+    /// `selectLoci` reads the project and the doc map together. Other project
+    /// kinds stay on the store route.
+    pub fn route_project_proposal(&mut self, proposal: &Proposal, tier: Tier, now_ms: u64) -> Option<ProposalResult> {
+        if let Some(result) = crate::select::route(proposal, tier, self.ledger.projects_mut(), &self.docmap) {
+            return Some(result);
+        }
+        crate::project::route_project(proposal, tier, self.ledger.projects_mut(), now_ms)
     }
 
     pub fn tick_tasks(&mut self, now_ms: u64) {

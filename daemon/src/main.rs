@@ -16,6 +16,7 @@ mod task;
 mod docmap;
 mod intake;
 mod adapt;
+mod select;
 mod project;
 mod note_text;
 mod registry;

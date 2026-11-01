@@ -21,7 +21,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const PROJECT_CAP: usize = 100;
 const ASK_CAP: usize = 20;
 const SOURCE_CAP: usize = 500;
-const LOCUS_CAP: usize = 5000;
+pub(crate) const LOCUS_CAP: usize = 5000;
 const EVENT_BYTES: u64 = 50 * 1024 * 1024;
 const TITLE_CAP: usize = 200;
 const ASK_CHARS: usize = 500;
@@ -238,6 +238,9 @@ pub struct Locus {
     pub stance_conf: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub match_kind: Option<MatchKind>,
+    /// Stored when a quote missed. Selection does not speak it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub narration: Option<String>,
     #[serde(default)]
     pub ocr_only: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -338,6 +341,7 @@ pub struct LocusInput {
     pub stance_by: Option<Tier>,
     pub stance_conf: Option<f32>,
     pub match_kind: Option<MatchKind>,
+    pub narration: Option<String>,
     pub ocr_only: bool,
     pub view: Option<ViewBox>,
 }
@@ -607,7 +611,8 @@ impl ProjectStore {
         if loaded.project.draft {
             return Err(StoreError::DraftUnconfirmed);
         }
-        if input.words.is_empty() || input.words.chars().count() > WORDS_CAP {
+        let empty_refused = input.words.is_empty() && input.match_kind != Some(MatchKind::None);
+        if empty_refused || input.words.chars().count() > WORDS_CAP {
             return Err(StoreError::Schema);
         }
         if !loaded.project.sources.iter().any(|source| source.source_id == input.source_id) {
@@ -639,6 +644,7 @@ impl ProjectStore {
             stance_by: input.stance_by,
             stance_conf: input.stance_conf,
             match_kind: input.match_kind,
+            narration: input.narration,
             ocr_only: input.ocr_only,
             view: input.view,
         };
@@ -777,6 +783,11 @@ impl ProjectStore {
 
     pub fn get(&self, id: &str) -> Option<&Project> {
         self.projects.get(id).map(|loaded| &loaded.project)
+    }
+
+    pub fn stored_locus_ids(&self, id: &str) -> Result<Vec<String>, StoreError> {
+        let loaded = self.projects.get(id).ok_or(StoreError::NoSuchProject)?;
+        Ok(loaded.loci.iter().map(|row| row.locus.locus_id.clone()).collect())
     }
 
     pub fn loci(&self, id: &str, since_pseq: Option<u64>, limit: Option<u32>) -> Result<Vec<Locus>, StoreError> {
@@ -1468,6 +1479,7 @@ mod tests {
             stance_by: None,
             stance_conf: None,
             match_kind: None,
+            narration: None,
             ocr_only: false,
             view: None,
         }
