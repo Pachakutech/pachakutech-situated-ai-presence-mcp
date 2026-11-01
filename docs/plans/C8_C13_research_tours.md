@@ -55,7 +55,7 @@ Path rules:
 
 File checks for a path that passed the rules: size over 50 MB → `failed(oversize)` on that source, the project still created. A PDF whose first page yields no text from `pdftotext` → `failed(no-text-layer)`. Other files are `pending`. The check reads size and, for a PDF, the first page. It does not build a map.
 
-URL checks: the fetcher records status and `Content-Length` when the server sends it. Unreachable or over 50 MB → `failed(unreachable)` or `failed(oversize)`. A reachable URL stays `pending`. The body is not stored in C8.
+URL checks: the fetcher records status and `Content-Length` when the server sends it. Unreachable or over 50 MB → `failed(unreachable)` or `failed(oversize)`. A reachable URL stays `pending`. The body is not stored in C8. A code outside 200–299 and 300–399 is stored as `http-<status>`, and as `http-<status> challenge` when `cf-mitigated` says so. A host that never answers stays `unreachable`. The trial that collapsed those into one word is `C11_bugfix.md`.
 
 `confirmProject` is T1 only. It is also `UiEvent::Hotkey::ConfirmProject` in tests. There is no grab. Confirming a draft runs these checks and clears `draft`. Confirming an active project is `schema`. A draft still rejects `upsert_locus` and `register_task`.
 

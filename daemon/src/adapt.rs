@@ -212,7 +212,7 @@ fn map_web(
 ) -> Result<(), &'static str> {
     let fetched = match fetch_final(reference, allow_private, probe) {
         Ok(fetched) => fetched,
-        Err(reason) => return mark_failed(store, project_id, source_id, reason),
+        Err(reason) => return mark_failed(store, project_id, source_id, &reason),
     };
     if fetched.body.len() as u64 > intake::MAX_BYTES {
         return mark_failed(store, project_id, source_id, "oversize");
@@ -247,26 +247,46 @@ struct Fetched {
     body: String,
 }
 
-fn fetch_final(start: &str, allow_private: bool, probe: &dyn Probe) -> Result<Fetched, &'static str> {
+fn fetch_final(start: &str, allow_private: bool, probe: &dyn Probe) -> Result<Fetched, String> {
     if !intake::url_allowed(start, allow_private) {
-        return Err("unreachable");
+        intake::log_fetch_failure(start, "unreachable", None, None, None);
+        return Err("unreachable".to_string());
     }
     let mut current = start.to_string();
     for hop in 0..=3 {
         match probe.fetch_body(&current) {
-            BodyReply::Unreachable => return Err("unreachable"),
-            BodyReply::Oversize => return Err("oversize"),
+            BodyReply::Unreachable => {
+                intake::log_fetch_failure(&current, "unreachable", None, None, None);
+                return Err("unreachable".to_string());
+            }
+            BodyReply::Oversize => {
+                intake::log_fetch_failure(&current, "oversize", None, None, None);
+                return Err("oversize".to_string());
+            }
+            BodyReply::Down { class, curl_exit, stderr } => {
+                intake::log_fetch_failure(&current, class, None, curl_exit, stderr.as_deref());
+                return Err(class.to_string());
+            }
             BodyReply::Page(page) => {
                 if page.body.len() as u64 > intake::MAX_BYTES {
-                    return Err("oversize");
+                    intake::log_fetch_failure(&current, "oversize", Some(page.status), None, None);
+                    return Err("oversize".to_string());
                 }
                 if (300..400).contains(&page.status) {
                     if hop == 3 {
-                        return Err("unreachable");
+                        intake::log_fetch_failure(&current, "unreachable", Some(page.status), None, None);
+                        return Err("unreachable".to_string());
                     }
-                    let next = intake::resolve_redirect(&current, page.location.as_deref().unwrap_or("")).map_err(|_| "unreachable")?;
+                    let next = match intake::resolve_redirect(&current, page.location.as_deref().unwrap_or("")) {
+                        Ok(next) => next,
+                        Err(_) => {
+                            intake::log_fetch_failure(&current, "unreachable", Some(page.status), None, None);
+                            return Err("unreachable".to_string());
+                        }
+                    };
                     if !intake::url_allowed(&next, allow_private) {
-                        return Err("unreachable");
+                        intake::log_fetch_failure(&current, "unreachable", Some(page.status), None, None);
+                        return Err("unreachable".to_string());
                     }
                     current = next;
                     continue;
@@ -274,11 +294,14 @@ fn fetch_final(start: &str, allow_private: bool, probe: &dyn Probe) -> Result<Fe
                 if (200..300).contains(&page.status) {
                     return Ok(Fetched { final_url: current, content_type: page.content_type, body: page.body });
                 }
-                return Err("unreachable");
+                let reason = intake::http_reason(page.status, page.challenge);
+                intake::log_fetch_failure(&current, &reason, Some(page.status), None, None);
+                return Err(reason);
             }
         }
     }
-    Err("unreachable")
+    intake::log_fetch_failure(&current, "unreachable", None, None, None);
+    Err("unreachable".to_string())
 }
 
 fn looks_html(content_type: Option<&str>, body: &str) -> bool {
@@ -316,7 +339,7 @@ fn passage_reason(err: &str) -> &'static str {
     }
 }
 
-fn mark_failed(store: &mut ProjectStore, project_id: &str, source_id: &str, reason: &'static str) -> Result<(), &'static str> {
+fn mark_failed(store: &mut ProjectStore, project_id: &str, source_id: &str, reason: &str) -> Result<(), &'static str> {
     store.set_source_status(project_id, source_id, SourceStatus::Failed, Some(reason.to_string())).map_err(|err| err.as_wire())
 }
 
@@ -1376,6 +1399,7 @@ mod tests {
                         status: 200,
                         content_type: Some("text/html".to_string()),
                         location: None,
+                        challenge: false,
                         body: highwire.to_string(),
                     }),
                 ),
@@ -1385,6 +1409,7 @@ mod tests {
                         status: 200,
                         content_type: Some("text/html".to_string()),
                         location: None,
+                        challenge: false,
                         body: bare.to_string(),
                     }),
                 ),
@@ -1587,6 +1612,7 @@ mod tests {
                     status: 302,
                     content_type: None,
                     location: Some("http://127.0.0.1/secret".to_string()),
+                    challenge: false,
                     body: String::new(),
                 }),
             )]),
@@ -1600,5 +1626,46 @@ mod tests {
         assert!(source.doc_key.is_none());
         assert_eq!(probe.hits.take(), vec![start.to_string()]);
         assert!(!bench.root.join("docmap").exists());
+    }
+
+    #[test]
+    fn f6_a_403_page_stores_http_403() {
+        let mut bench = bench("f6");
+        let start = "https://example.test/poem";
+        let probe = HtmlProbe {
+            pages: HashMap::from([(
+                start.to_string(),
+                BodyReply::Page(PageBody {
+                    status: 403,
+                    content_type: Some("text/html".to_string()),
+                    location: None,
+                    challenge: false,
+                    body: "<html><title>Just a moment...</title></html>".to_string(),
+                }),
+            )]),
+            hits: Cell::new(Vec::new()),
+        };
+        let id = project(&mut bench.store, &[web_source(start)]);
+        map_project(&mut bench.store, &mut bench.map, &probe, &id, "2026-10-31", false, &Off).unwrap();
+        let failed = source(&bench.store, &id, 0);
+        assert_eq!(failed.status, SourceStatus::Failed);
+        assert_eq!(failed.reason.as_deref(), Some("http-403"));
+        assert!(failed.doc_key.is_none());
+        let challenged = HtmlProbe {
+            pages: HashMap::from([(
+                start.to_string(),
+                BodyReply::Page(PageBody {
+                    status: 403,
+                    content_type: Some("text/html".to_string()),
+                    location: None,
+                    challenge: true,
+                    body: "<html><title>Just a moment...</title></html>".to_string(),
+                }),
+            )]),
+            hits: Cell::new(Vec::new()),
+        };
+        let again = project(&mut bench.store, &[web_source(start)]);
+        map_project(&mut bench.store, &mut bench.map, &challenged, &again, "2026-10-31", false, &Off).unwrap();
+        assert_eq!(source(&bench.store, &again, 0).reason.as_deref(), Some("http-403 challenge"));
     }
 }
