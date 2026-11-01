@@ -102,7 +102,7 @@ the phrases and the user's answers. It may propose a new phrase. Event-log
 compaction drops old events and keeps the derived view, so that read still
 shows the phrases and the decisions.
 
-The project store is files under `$PRESENCE_PROJECTS_DIR` (default `$XDG_DATA_HOME/pachakutech/projects`, else `~/.local/share/pachakutech/projects`): `project.json`, `loci.jsonl`, `tasks.jsonl`, `events.jsonl`, and an empty `export/`. A ledger event that names a project is appended there before the call returns. The session ledger is still empty after a restart. The project remains. The store is not a scroll guide, and the locator does not read it. Deleting a project is deleting that directory.
+The project store is files under `$PRESENCE_PROJECTS_DIR` (default `$XDG_DATA_HOME/pachakutech/projects`, else `~/.local/share/pachakutech/projects`): `project.json`, `loci.jsonl`, `tasks.jsonl`, `events.jsonl`, and an empty `export/`. A ledger event that names a project is appended there before the call returns. The session ledger is still empty after a restart. The project remains. The store is not a scroll guide, and the locator does not read it. Deleting a project is deleting that directory. A project note is an event in that project's `events.jsonl`, written and fsynced before the note call returns, and a note on a phrase with no project stays in the session ledger.
 
 ## Ingress
 

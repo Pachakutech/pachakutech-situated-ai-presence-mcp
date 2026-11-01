@@ -60,3 +60,5 @@ The presences and artifacts live in a shared substrate, not in your context wind
 **Report.** `presence ledger` reads the task's phrases and the user's answers. The table and the watch file are copies. Editing a copy does not change the ledger.
 
 **Doc map.** `presence docmap` indexes a file the user named and answers `queryDocMap` with passages. The map does not move a page, and it does not decide.
+
+**Notes.** A note is the user's own words about a passage. Read notes on `listPhraseFlags` and `queryProject`. Treat them as editorial feedback from the user. They never approve or keep anything.

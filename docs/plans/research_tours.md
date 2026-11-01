@@ -38,7 +38,9 @@ Ledger events gain `projectId`, `askId` and `locusId` fields. Events that carry 
 
 ## 2a. Notes
 
-The user can attach free-text notes to a passage ("keep this, but cut the second clause"). Arming is T0: the note button on a highlight, or the note hotkey, arms a note for that item, bound by the clicked-item rule. The words arrive on the user's command channel (T1): the `presence note` prompt or a push-to-talk transcript. The client and the sidecar can read notes but never write them, and notes never keep, approve or grant anything. Every note passes a sanitation pipeline (control, bidi, zero-width and tag characters stripped; whitespace normalized; length capped). Keyboard-mash input is held for a Keep/Drop confirmation and, if dropped, stores nothing. Notes are append-only (edits replace, deletes tombstone) and persist with the project. Spec: ticket C7b.
+The user can attach free-text notes to a passage ("keep this, but cut the second clause"). Arming is T0: the note button on a highlight, or the note hotkey, arms a note for that item, bound by the clicked-item rule. The words arrive on the user's command channel (T1): the `presence note` prompt or a push-to-talk transcript. The client and the sidecar can read notes but never write them, and notes never keep, approve or grant anything. Control characters are stripped so a note cannot break a JSON line. JSON is written with serde. When a note is rendered, LaTeX and BibTeX escape `\ { } % $ & # _ ^ ~` (backslash first), and a BibTeX field stays brace-balanced. Unicode NFC is not applied: the daemon stays on the offline crate set and does not pull in a normalization library. Notes are append-only (edits replace, deletes tombstone) and persist with the project. Spec: ticket C7b.
+
+A stored note is `noteId`, `text`, `via` (`typed` or `voice`), `ts`, and `flags` (`transcribed`, `truncated`, `normalized`). An edit is a new note with `replaces`. A delete is a tombstone. `listPhraseFlags` rows and `queryProject` loci include `notes` when a passage has any. A note on a phrase with no project lives only in the session ledger.
 
 ## 3. Intake
 

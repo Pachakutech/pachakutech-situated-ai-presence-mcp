@@ -157,6 +157,7 @@ pub struct TaskBook {
     utterance_stops: u64,
     stop_pending: bool,
     moves_issued: u64,
+    pointer: Option<(i32, i32)>,
 }
 
 impl TaskBook {
@@ -171,6 +172,7 @@ impl TaskBook {
             utterance_stops: 0,
             stop_pending: false,
             moves_issued: 0,
+            pointer: None,
         }
     }
 
@@ -336,7 +338,8 @@ impl TaskBook {
             UiEvent::Hotkey(Hotkey::Pause) => self.pause_active(),
             UiEvent::Hotkey(Hotkey::Resume) => self.resume_active(ledger, now_ms),
             UiEvent::Hotkey(Hotkey::Start) => self.confirm_start(),
-            UiEvent::Acknowledge { .. } | UiEvent::Uncheck { .. } | UiEvent::Approve { .. } | UiEvent::Discard { .. } => false,
+            UiEvent::Hotkey(Hotkey::Note) => self.hotkey_note(ledger, now_ms),
+            UiEvent::ArmNote { .. } | UiEvent::Acknowledge { .. } | UiEvent::Uncheck { .. } | UiEvent::Approve { .. } | UiEvent::Discard { .. } => false,
         }
     }
 
@@ -482,7 +485,9 @@ impl TaskBook {
         }
         let phrase_id = item.phrase_id.clone();
         let drawn = task.drawn;
-        for (target, rect) in place_controls(word, out_w, out_h, drawn) {
+        let placed = place_controls(word, out_w, out_h, drawn);
+        let note = place_note_button(out_w, out_h, &placed);
+        for (target, rect) in placed.into_iter().chain(note) {
             let z = self.next_z;
             self.next_z += 1;
             self.surfaces.push(Surface {
@@ -510,6 +515,7 @@ impl TaskBook {
 
     /// Phrase id of the topmost live control under the pointer.
     pub fn hit(&mut self, x: i32, y: i32, now_ms: u64) -> Option<(String, ClickTarget)> {
+        self.pointer = Some((x, y));
         self.drop_expired(now_ms);
         let mut best: Option<usize> = None;
         for index in 0..self.surfaces.len() {
@@ -535,6 +541,13 @@ impl TaskBook {
         }
         let Some(_task_id) = self.accepts_click(phrase_id, target, now_ms) else { return false };
         let event = match target {
+            ClickTarget::Note => {
+                if apply_ui_event(ledger, UiEvent::ArmNote { phrase_id: phrase_id.to_string() }, now_ms).is_err() {
+                    return false;
+                }
+                self.last_click = Some((ts_ms, phrase_id.to_string(), target));
+                return true;
+            }
             ClickTarget::Check if viewed_name(ledger, phrase_id) == "acknowledged" => {
                 UiEvent::Uncheck { phrase_id: phrase_id.to_string() }
             }
@@ -568,6 +581,7 @@ impl TaskBook {
         let drawn_ok = match (task.drawn, target) {
             (DrawnControls::Check, ClickTarget::Check) => true,
             (DrawnControls::YesNo, ClickTarget::Yes | ClickTarget::No) => true,
+            (DrawnControls::Check | DrawnControls::YesNo, ClickTarget::Note) => true,
             _ => false,
         };
         if drawn_ok { Some(task.id.clone()) } else { None }
@@ -731,6 +745,21 @@ impl TaskBook {
         }
         task.state = TaskState::Paused;
         Ok(())
+    }
+
+    fn hotkey_note(&mut self, ledger: &mut Ledger, now_ms: u64) -> bool {
+        let point = self.pointer;
+        if let Some((x, y)) = point {
+            if let Some((phrase_id, _)) = self.hit(x, y, now_ms) {
+                return apply_ui_event(ledger, UiEvent::ArmNote { phrase_id }, now_ms).is_ok();
+            }
+        }
+        let Some(phrase) = self.tasks.iter().find(|task| live(task.state)).and_then(|task| {
+            task.items.get(task.index).map(|item| item.phrase_id.clone())
+        }) else {
+            return false;
+        };
+        apply_ui_event(ledger, UiEvent::ArmNote { phrase_id: phrase }, now_ms).is_ok()
     }
 
     fn hotkey_ack(&mut self, ledger: &mut Ledger, now_ms: u64) -> bool {
@@ -946,6 +975,22 @@ pub fn place_controls(word: PxRect, out_w: i32, out_h: i32, drawn: DrawnControls
             ]
         }
     }
+}
+
+/// The note square sits further left of the leftmost control already placed.
+/// `control_rects` does not include it.
+pub fn place_note_button(out_w: i32, out_h: i32, existing: &[(ClickTarget, PxRect)]) -> Option<(ClickTarget, PxRect)> {
+    let (first_x, y, right) = existing.iter().fold(None, |acc: Option<(i32, i32, i32)>, (_, rect)| {
+        Some(match acc {
+            None => (rect.x, rect.y, rect.x + rect.w),
+            Some((left, y, right)) => (left.min(rect.x), y, right.max(rect.x + rect.w)),
+        })
+    })?;
+    let preferred = first_x - PAIR_GAP - CONTROL_PX;
+    let x = if preferred >= 0 { preferred } else { right + CONTROL_GAP };
+    let x = x.clamp(0, (out_w - CONTROL_PX).max(0));
+    let y = y.clamp(0, (out_h - CONTROL_PX).max(0));
+    Some((ClickTarget::Note, PxRect { x, y, w: CONTROL_PX, h: CONTROL_PX }))
 }
 
 fn place_block(word: PxRect, out_w: i32, width: i32) -> i32 {
@@ -2596,5 +2641,59 @@ mod tests {
         assert_eq!(book.moves_issued(), 3);
         book.tick(&mut ledger, 10_000);
         assert_eq!(ledger.events().iter().filter(|ev| ev.kind == LedgerKind::Located).count(), 1);
+    }
+
+    #[test]
+    fn o3_note_control_binds_the_clicked_item() {
+        let check = place_controls(word_at(100), 1920, 1080, DrawnControls::Check);
+        let note = place_note_button(1920, 1080, &check).unwrap();
+        assert_eq!(check[0].1.x, 64);
+        assert_eq!(note.1.x, 32);
+        assert_eq!(note.0, ClickTarget::Note);
+
+        let mut opened = open(&task_line("select", "", r#"{"query":"a"},{"query":"b"},{"query":"c"}"#));
+        signal(&mut opened.book, &mut opened.ledger, &opened.id, "begin", 0);
+        let ids = item_ids(&opened.book, &opened.id);
+        place(&mut opened.book, &opened.id, 200, 0);
+        assert!(opened.book.handle_ui(&mut opened.ledger, UiEvent::Hotkey(Hotkey::Skip), 100));
+        place(&mut opened.book, &opened.id, 400, 100);
+        assert!(opened.book.handle_ui(&mut opened.ledger, UiEvent::Hotkey(Hotkey::Skip), 200));
+        place(&mut opened.book, &opened.id, 700, 200);
+        assert_eq!(book_query(&opened.book, &opened.id)["index"], 2);
+        let hit = opened.book.hit(340, 45, 250).unwrap();
+        assert_eq!(hit.0, ids[1]);
+        assert_eq!(hit.1, ClickTarget::Note);
+        assert!(click(&mut opened.book, &mut opened.ledger, &ids[1], ClickTarget::Note, 260));
+        let proposal: Proposal = serde_json::from_str(r#"{"kind":"addNote","proposalId":"n","text":"cut the second clause","via":"typed"}"#).unwrap();
+        let result = crate::ledger::route_note(&proposal, Tier::T1User, &mut opened.ledger, 300).unwrap();
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        assert_eq!(row(&opened.ledger, &ids[1])["notes"][0]["text"], "cut the second clause");
+        assert!(row(&opened.ledger, &ids[2]).get("notes").is_none());
+        let rects = opened.book.control_rects(&opened.id, word_at(100), 1920, 1080);
+        assert_eq!(rects.len(), 1);
+        assert_eq!(rects[0].0, ClickTarget::Check);
+
+        let mut hot = open(&task_line("select", "", r#"{"query":"a"},{"query":"b"},{"query":"c"}"#));
+        signal(&mut hot.book, &mut hot.ledger, &hot.id, "begin", 0);
+        let hot_ids = item_ids(&hot.book, &hot.id);
+        place(&mut hot.book, &hot.id, 200, 0);
+        assert!(hot.book.handle_ui(&mut hot.ledger, UiEvent::Hotkey(Hotkey::Skip), 100));
+        place(&mut hot.book, &hot.id, 400, 100);
+        assert!(hot.book.handle_ui(&mut hot.ledger, UiEvent::Hotkey(Hotkey::Skip), 200));
+        place(&mut hot.book, &hot.id, 700, 200);
+        hot.book.hit(340, 45, 250).unwrap();
+        assert!(hot.book.handle_ui(&mut hot.ledger, UiEvent::Hotkey(Hotkey::Note), 260));
+        let armed = crate::ledger::route_note(&proposal, Tier::T1User, &mut hot.ledger, 300).unwrap();
+        assert_eq!(armed.status, "ok", "{:?}", armed.error);
+        assert_eq!(row(&hot.ledger, &hot_ids[1])["notes"][0]["text"], "cut the second clause");
+
+        let mut active = open(&task_line("select", "", r#"{"query":"a"},{"query":"b"}"#));
+        signal(&mut active.book, &mut active.ledger, &active.id, "begin", 0);
+        let active_ids = item_ids(&active.book, &active.id);
+        assert!(active.book.handle_ui(&mut active.ledger, UiEvent::Hotkey(Hotkey::Note), 10));
+        let on_active = crate::ledger::route_note(&proposal, Tier::T1User, &mut active.ledger, 20).unwrap();
+        assert_eq!(on_active.status, "ok", "{:?}", on_active.error);
+        assert_eq!(row(&active.ledger, &active_ids[0])["notes"][0]["text"], "cut the second clause");
+        assert!(row(&active.ledger, &active_ids[1]).get("notes").is_none());
     }
 }

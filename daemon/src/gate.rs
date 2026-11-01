@@ -62,6 +62,7 @@ pub fn allowed(tier: Tier, proposal: &Proposal) -> bool {
         // T2 create waits for C8. T3 is stored as a draft by the handler.
         Proposal::CreateProject(_) => matches!(tier, Tier::T1User | Tier::T3Sidecar),
         Proposal::QueryProject(_) => matches!(tier, Tier::T1User | Tier::T2Client | Tier::T3Sidecar),
+        Proposal::AddNote(_) | Proposal::DeleteNote(_) => matches!(tier, Tier::T1User),
     }
 }
 
@@ -214,6 +215,7 @@ mod tests {
             .chain(task_samples())
             .chain(docmap_samples())
             .chain(project_samples())
+            .chain(note_samples())
         {
             assert!(!allowed(Tier::T0Physical, &proposal), "{kind}");
             let message = check(Tier::T0Physical, &proposal).unwrap_err().error.expect("error string");
@@ -300,6 +302,33 @@ mod tests {
                 other => panic!("unexpected project kind {other}"),
             }
         }
+        for (proposal, kind) in note_samples() {
+            let t1 = allowed(Tier::T1User, &proposal);
+            let t2 = allowed(Tier::T2Client, &proposal);
+            let t3 = allowed(Tier::T3Sidecar, &proposal);
+            match kind {
+                "addNote" | "deleteNote" => assert!(t1 && !t2 && !t3, "{kind}"),
+                other => panic!("unexpected note kind {other}"),
+            }
+        }
+    }
+
+    fn note_samples() -> Vec<(Proposal, &'static str)> {
+        const LINES: &[(&str, &str)] = &[
+            (
+                r#"{"kind":"addNote","proposalId":"n","text":"cut the second clause","via":"typed"}"#,
+                "addNote",
+            ),
+            (r#"{"kind":"deleteNote","proposalId":"d","noteId":"nt-0000000000000001"}"#, "deleteNote"),
+        ];
+        LINES
+            .iter()
+            .map(|(json, kind)| {
+                let proposal: Proposal = serde_json::from_str(json).unwrap_or_else(|e| panic!("{kind}: {e}"));
+                assert_eq!(proposal.kind_name(), *kind);
+                (proposal, *kind)
+            })
+            .collect()
     }
 
     fn project_samples() -> Vec<(Proposal, &'static str)> {

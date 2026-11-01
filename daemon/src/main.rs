@@ -15,6 +15,7 @@ mod ui_input;
 mod task;
 mod docmap;
 mod project;
+mod note_text;
 mod registry;
 mod socket;
 mod speech;

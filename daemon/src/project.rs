@@ -4,6 +4,7 @@
 
 use crate::gate::Tier;
 use crate::ledger::{LedgerEvent, LedgerKind, ViewedTier};
+use crate::note_text::{self, NoteFact, NoteFlags};
 use crate::protocol::{CreateProjectBody, ProjectAskKind, ProjectSourceIn, Proposal, ProposalResult, QueryProjectBody};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -271,6 +272,16 @@ pub struct ProjectEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
     pub phrase_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaces: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flags: Option<NoteFlags>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -629,6 +640,7 @@ impl ProjectStore {
             };
             (loaded.next_event, due)
         };
+        let note = ev.note.as_ref();
         let record = ProjectEvent {
             pseq,
             run_id: self.run_id.clone(),
@@ -641,6 +653,11 @@ impl ProjectStore {
             ask_id: ev.ask_id.clone(),
             task_id: ev.task_id.clone(),
             phrase_id: ev.phrase_id.clone(),
+            note_id: note.map(|item| item.note_id.clone()),
+            text: note.and_then(|item| item.text.clone()),
+            via: note.and_then(|item| item.via.map(|via| via.wire().to_string())),
+            replaces: note.and_then(|item| item.replaces.clone()),
+            flags: note.and_then(|item| item.flags.clone()),
         };
         let line = serde_json::to_string(&record).map_err(|_| StoreError::Schema)?;
         let path = self.dir_for(id)?.join("events.jsonl");
@@ -652,7 +669,8 @@ impl ProjectStore {
             eprintln!("[project] events tail: {err}");
             return Err(StoreError::Schema);
         }
-        let sync = ev.by == Tier::T0Physical || due;
+        // Notes are T1 text and still fsync before the call returns.
+        let sync = ev.by == Tier::T0Physical || due || matches!(ev.kind, LedgerKind::Note | LedgerKind::NoteDeleted);
         if let Err(err) = append_line(&path, &line, sync) {
             eprintln!("[project] events append: {err}");
             return Err(StoreError::Schema);
@@ -717,6 +735,10 @@ impl ProjectStore {
         Ok(loaded.events.iter().filter(|ev| is_decision(ev)).cloned().collect())
     }
 
+    pub fn count_notes(&self, id: &str) -> usize {
+        self.projects.get(id).map(|loaded| loaded.events.iter().filter(|ev| ev.kind == "note").count()).unwrap_or(0)
+    }
+
     pub fn pseq(&self, id: &str) -> Result<u64, StoreError> {
         let loaded = self.projects.get(id).ok_or(StoreError::NoSuchProject)?;
         Ok(loaded.events.last().map(|ev| ev.pseq).unwrap_or(0))
@@ -728,11 +750,21 @@ impl ProjectStore {
         }
         let project = self.get(id).ok_or(StoreError::NoSuchProject)?;
         let loci = self.loci(id, since_pseq, limit)?;
+        let events = self.projects.get(id).map(|loaded| loaded.events.clone()).unwrap_or_default();
+        let mut loci_json = Vec::with_capacity(loci.len());
+        for locus in &loci {
+            let mut value = serde_json::to_value(locus).map_err(|_| StoreError::Schema)?;
+            let notes = note_text::visible_notes(&facts_for_locus(&events, &locus.locus_id));
+            if !notes.is_empty() {
+                value["notes"] = json!(notes.iter().map(note_text::note_view_json).collect::<Vec<_>>());
+            }
+            loci_json.push(value);
+        }
         let keeps = self.keeps(id)?;
         let pseq = self.pseq(id)?;
         Ok(json!({
             "project": project,
-            "loci": loci,
+            "loci": loci_json,
             "keeps": keeps.iter().map(keep_value).collect::<Vec<_>>(),
             "cursor": project.cursor,
             "pseq": pseq,
@@ -964,7 +996,43 @@ fn kind_name(kind: LedgerKind) -> &'static str {
         LedgerKind::Cleared => "cleared",
         LedgerKind::Mismatch => "mismatch",
         LedgerKind::Tour => "tour",
+        LedgerKind::Note => "note",
+        LedgerKind::NoteDeleted => "noteDeleted",
     }
+}
+
+fn facts_for_locus(events: &[ProjectEvent], locus_id: &str) -> Vec<NoteFact> {
+    let mut facts = Vec::new();
+    for ev in events {
+        if ev.locus_id.as_deref() != Some(locus_id) {
+            continue;
+        }
+        if ev.kind == "note" {
+            let Some(note_id) = &ev.note_id else { continue };
+            let Some(text) = &ev.text else { continue };
+            facts.push(NoteFact {
+                note_id: note_id.clone(),
+                text: text.clone(),
+                via: ev.via.clone().unwrap_or_else(|| "typed".into()),
+                ts_ms: ev.ts_ms,
+                replaces: ev.replaces.clone(),
+                flags: ev.flags.clone().unwrap_or(NoteFlags { transcribed: false, truncated: false, normalized: false }),
+                tombstone: false,
+            });
+        } else if ev.kind == "noteDeleted" {
+            let Some(note_id) = &ev.note_id else { continue };
+            facts.push(NoteFact {
+                note_id: note_id.clone(),
+                text: String::new(),
+                via: String::new(),
+                ts_ms: ev.ts_ms,
+                replaces: None,
+                flags: NoteFlags { transcribed: false, truncated: false, normalized: false },
+                tombstone: true,
+            });
+        }
+    }
+    facts
 }
 
 fn viewed_name(viewed: ViewedTier) -> String {
@@ -1156,7 +1224,7 @@ fn read_jsonl(path: &Path) -> Result<Vec<Value>, String> {
 mod tests {
     use super::*;
     use crate::gate::{self, Tier};
-    use crate::ledger::{route_ledger, Ledger, LedgerEvent, LedgerKind, ViewedTier};
+    use crate::ledger::{route_ledger, route_note, Ledger, LedgerEvent, LedgerKind, ViewedTier};
     use crate::protocol::Proposal;
     use crate::registry::Registry;
     use crate::task::route_task;
@@ -1237,6 +1305,7 @@ mod tests {
             project_id: None,
             ask_id: None,
             locus_id: None,
+            note: None,
         }
     }
 
@@ -1922,5 +1991,102 @@ mod tests {
     fn create_task_body_has_no_project_field() {
         let line = r#"{"kind":"createTask","proposalId":"c","presenceId":"p","mode":"explain","items":[{"query":"the line"}],"projectId":"pj-0123456789abcdef"}"#;
         assert!(serde_json::from_str::<Proposal>(line).is_err());
+    }
+
+    fn add_note(ledger: &mut Ledger, phrase: &str, text: &str, now: u64) -> crate::protocol::ProposalResult {
+        let text = serde_json::to_string(text).unwrap();
+        let line = format!(r#"{{"kind":"addNote","proposalId":"n","text":{text},"via":"typed","phraseId":"{phrase}"}}"#);
+        route_note(&parse(&line), Tier::T1User, ledger, now).unwrap()
+    }
+
+    #[test]
+    fn o16_a_project_note_is_fsynced_before_success() {
+        let prod = include_str!("project.rs").split("mod tests").next().unwrap();
+        assert!(slice_body(prod, "fn append_event").contains("T0Physical"));
+        assert!(slice_body(prod, "fn append_event").contains("LedgerKind::Note"));
+        assert!(slice_body(prod, "fn append_line").contains("sync_all"));
+        let tmp = scratch("o16");
+        let mut ledger = open_ledger(&tmp.0);
+        let (id, locus) = project_with_locus(&mut ledger, "Notes");
+        let extra = format!(r#","projectId":"{id}","locusId":"{locus}""#);
+        observe_at(&mut ledger, "ph-note", &extra, 10);
+        observe_at(&mut ledger, "ph-free", "", 11);
+        let path = tmp.0.join(&id).join("events.jsonl");
+        let before = fs::metadata(&path).unwrap().len();
+        let free = add_note(&mut ledger, "ph-free", "session only", 12);
+        assert_eq!(free.status, "ok", "{:?}", free.error);
+        assert_eq!(fs::metadata(&path).unwrap().len(), before);
+        let bound = add_note(&mut ledger, "ph-note", "keep this", 3_000);
+        assert_eq!(bound.status, "ok", "{:?}", bound.error);
+        let note_id = bound.detail.unwrap()["noteId"].as_str().unwrap().to_string();
+        let output = Command::new("cat").arg(&path).output().unwrap();
+        assert!(output.status.success());
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert!(text.contains(&note_id));
+        assert!(text.contains("keep this"));
+        let pseq = ledger.projects().unwrap().pseq(&id).unwrap();
+        drop(ledger);
+        let mut ledger = open_ledger(&tmp.0);
+        assert!(ledger.events().is_empty());
+        let proposal = parse(&format!(r#"{{"kind":"queryProject","proposalId":"q","projectId":"{id}"}}"#));
+        let result = route_project(&proposal, Tier::T1User, ledger.projects_mut(), 4).unwrap();
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        let detail = result.detail.unwrap();
+        let locus_row = detail["loci"].as_array().unwrap().iter().find(|row| row["locusId"] == locus).unwrap();
+        assert_eq!(locus_row["notes"][0]["noteId"], note_id);
+        assert_eq!(locus_row["notes"][0]["text"], "keep this");
+        assert_eq!(detail["pseq"], pseq);
+        observe_at(&mut ledger, "ph-next", &extra, 20);
+        assert!(ledger.projects().unwrap().pseq(&id).unwrap() > pseq);
+    }
+
+    #[test]
+    fn o17_a_note_does_not_change_keeps_or_decisions() {
+        let tmp = scratch("o17");
+        let mut ledger = open_ledger(&tmp.0);
+        let (id, locus) = project_with_locus(&mut ledger, "Keeps");
+        ledger.projects_mut().unwrap().register_task(&id, "tk-1", "select", Some("ak-1"), Some("sr-1"), 1).unwrap();
+        let extra = format!(r#","projectId":"{id}","locusId":"{locus}","askId":"ak-1","taskId":"tk-1""#);
+        observe_at(&mut ledger, "ph-1", &extra, 10);
+        apply_ui_event(&mut ledger, UiEvent::Acknowledge { phrase_id: "ph-1".into() }, 11).unwrap();
+        let keeps_before = ledger.projects().unwrap().keeps(&id).unwrap();
+        let listed = route_ledger(&parse(r#"{"kind":"listPhraseFlags","proposalId":"p"}"#), Tier::T1User, &mut ledger, 12).unwrap();
+        let row = listed.detail.unwrap()["rows"].as_array().unwrap().iter().find(|row| row["phraseId"] == "ph-1").unwrap().clone();
+        let viewed = row["viewed"].clone();
+        let decision = row["decision"].clone();
+        let decision_by = row["decisionBy"].clone();
+        let result = add_note(&mut ledger, "ph-1", "cut the second clause", 3_000);
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        assert_eq!(ledger.projects().unwrap().keeps(&id).unwrap(), keeps_before);
+        let listed = route_ledger(&parse(r#"{"kind":"listPhraseFlags","proposalId":"p"}"#), Tier::T1User, &mut ledger, 4_000).unwrap();
+        let row = listed.detail.unwrap()["rows"].as_array().unwrap().iter().find(|row| row["phraseId"] == "ph-1").unwrap().clone();
+        assert_eq!(row["viewed"], viewed);
+        assert_eq!(row["decision"], decision);
+        assert_eq!(row["decisionBy"], decision_by);
+        assert_eq!(row["notes"][0]["text"], "cut the second clause");
+    }
+
+    #[test]
+    fn o19_project_note_cap() {
+        let tmp = scratch("o19");
+        let mut ledger = open_ledger(&tmp.0);
+        let (id, locus) = project_with_locus(&mut ledger, "Cap");
+        let extra = format!(r#","projectId":"{id}","locusId":"{locus}""#);
+        for phrase in 0..10 {
+            let name = format!("ph-{phrase}");
+            observe_at(&mut ledger, &name, &extra, 10 + phrase);
+            for note in 0..20 {
+                let now = (phrase as u64) * 50_000 + (note as u64) * 2_000;
+                let result = add_note(&mut ledger, &name, "n", now);
+                assert_eq!(result.status, "ok", "{phrase}:{note} {:?}", result.error);
+            }
+        }
+        assert_eq!(ledger.projects().unwrap().count_notes(&id), 200);
+        observe_at(&mut ledger, "ph-over", &extra, 30);
+        let before = fs::metadata(tmp.0.join(&id).join("events.jsonl")).unwrap().len();
+        let denied = add_note(&mut ledger, "ph-over", "n", 600_000);
+        assert_eq!(denied.error.as_deref(), Some("quota:notes"));
+        assert_eq!(fs::metadata(tmp.0.join(&id).join("events.jsonl")).unwrap().len(), before);
+        assert_eq!(ledger.projects().unwrap().count_notes(&id), 200);
     }
 }

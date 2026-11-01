@@ -481,6 +481,10 @@ fn dispatch(
         return (result, false);
     }
 
+    if let Some(result) = crate::ledger::route_note(&proposal, tier, reg.ledger_mut(), now_ms()) {
+        return (result, false);
+    }
+
     let presence_alive = match &proposal {
         Proposal::CreateTask(body) | Proposal::DraftTask(body) => reg.has_presence(&body.presence_id),
         _ => true,
@@ -563,6 +567,7 @@ fn dispatch(
         | Proposal::TourSignal(_) => ProposalResult::err(&proposal_id, "unrouted task proposal"),
         Proposal::BuildDocMap(_) | Proposal::QueryDocMap(_) => ProposalResult::err(&proposal_id, "unrouted docmap proposal"),
         Proposal::CreateProject(_) | Proposal::QueryProject(_) => ProposalResult::err(&proposal_id, "unrouted project proposal"),
+        Proposal::AddNote(_) | Proposal::DeleteNote(_) => ProposalResult::err(&proposal_id, "unrouted note proposal"),
     };
     (result, false)
 }
