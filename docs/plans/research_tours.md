@@ -10,6 +10,24 @@ Status: plan. Extends the "Citation project" section of `reflex-review.md` and s
 
 Both are a **project**: an ordered list of sources, the loci found in them, and what the user did with each. A project outlives a single tour and a daemon restart.
 
+## 1a. Review, 31 October 2026: live user preferences
+
+The user reviews a list of URLs the model offered as citations, or one plan, or a group of plans, and records preferences while that review is being filled in. The model observes those decisions as they land. That observation is the live user preferences cursor.
+
+The recording store is already on disk. The review is this epic.
+
+**On disk now (C7 and C7b).** A project holds sources, asks, loci, keeps, notes, and a cursor. A keep is a T0 acknowledge in a select task, or a T0 approve in an approve task. A discard, a clear, and a note are events in that project's `events.jsonl`, written before the call returns. `queryProject` on the daemon socket returns the project, the loci, the keeps, the cursor, and `pseq`. Loci include notes. T2 may call that kind. The MCP client has no project tool: `src/` forwards `listPhraseFlags` and `queryTask`, and the session ledger those read is empty after a restart. `createProject` is T1, or T3 as a draft. T2 is refused, so a model cannot submit the URL list. Nothing checks a URL, maps a page, opens a viewer, or walks a list.
+
+**Citation list.** C8 accepts the URLs. C9 and C10 turn each citation into loci (`exact`, `near`, or `none`). C11 walks them. C13's `showCitations` is the model's one call. The user's keeps, discards, and notes on those loci are the preferences.
+
+**One plan, or a group of plans.** A plan is a file source. One plan is one path. A group is several paths, or one directory snapshot taken by T1. T2 submits URLs only. The user submits local plan files. The passages of those files are the loci, and the same keeps, discards, and notes are the preferences. Several asks in one project are several questions over one source list. A group of plan documents is several sources in that same project. One project is one preferences read. A second project is a second `queryProject`.
+
+**Two cursors.** The tour cursor is `(sourceIndex, locusId)`. C11 writes it so a walk resumes. The preferences cursor is the decision record the model reads: keeps, T0 decisions, and notes, in the order the user wrote them. `pseq` moves when one lands. The latest decision names the locus the user just filled. `sincePseq` pages locus rows. The preferences feed is `keeps`, `decisions`, and the notes on the loci.
+
+**How the model observes a review in progress.** `queryProject` is the read, once C13 exposes it. Each tool is one reply. The model re-reads while the user is deciding. A select or approve tour in `wait` pace is the review that fills preferences. An explain tour in `flow` pace is the narrated citation check: it records `matchKind`, and an acknowledgement in that mode is not a keep. `showCitations` keeps `explain` and `flow` when `mode` and `pace` are omitted, and it forwards `mode` and `pace` when the caller sets them. A preference review is `select` and `wait`.
+
+**What the reply has to carry.** Beside the fields C7 already returns, `queryProject` includes `decisions`: each T0 acknowledge, clear, approve, and discard, with locus, ask, time, and `by`. A no is visible on that reply. Notes stay on the loci. The tour cursor remains the resume point.
+
 ## 2. Records
 
 These follow `reflex-review.md` ("Three records") with additions.
@@ -33,6 +51,8 @@ These follow `reflex-review.md` ("Three records") with additions.
 - In a **select** tour, `viewed: acknowledged` (checkbox, highlight click or hotkey). This is the default for research tours, matching your "select a few for collection".
 - In an **approve** tour, `approved`. Use approve when the researcher wants a full audit of yes and no (the review's decision report).
 - Both are T0-only ledger events, so the rule "only the user's hands keep something" carries over unchanged. Unchecking removes a keep. A passage the user passed over is neither kept nor rejected.
+
+The cursor on the project is the tour resume point (section 5). The live user preferences cursor is the keeps, the T0 decisions, and the notes, read back while the review is still being filled (section 1a).
 
 Ledger events gain `projectId`, `askId` and `locusId` fields. Events that carry a `projectId` are **also persisted** into the project store when they are written. The in-memory ledger keeps its caps; the project keeps hundreds of loci.
 
@@ -70,7 +90,7 @@ The sidecar's role here is the conversation and the yes/no judgement. The quote 
 
 ## 5. The multi-source tour
 
-A project tour is **a sequence of per-source tasks**. Each per-source task is an ordinary task within the existing caps (one active, about 12 items, item timeout). The project holds the cursor (which source, which locus) so a tour that times out resumes where it stopped, and the project caps stay separate from the session caps.
+A project tour is **a sequence of per-source tasks**. Each per-source task is an ordinary task within the existing caps (one active, about 12 items, item timeout). The project holds the tour cursor (which source, which locus) so a tour that times out resumes where it stopped, and the project caps stay separate from the session caps. That cursor is the resume point. The preferences the model reads are the keeps, the T0 decisions, and the notes (section 1a).
 
 Per source:
 1. **Open** the source in the viewer window through the existing open paths: Chromium with the URL (the `--uri` path in `src/locate/web.ts`), Evince with the PDF path (`src/locate/pdf.ts`), Writer for a document. This is the new gated capability `openSource` (section 7).
@@ -168,10 +188,10 @@ New proposal kinds (details in `command_layer_protocol.md`):
 | `createProject` | T1, T2; T3 as draft | Title, asks, sources (URLs, paths, directory snapshot from T1), granted roots (T1 only) |
 | `addSources` | T1, T2 | Append to the list, same checks as intake |
 | `startProjectTour` | T1, T2 | `{ projectId, askId?, mode: explain|select|approve, pace }`; T2 needs the T0 start press |
-| `queryProject` | T1, T2, T3 | Sources, status, loci, cursor, keeps |
+| `queryProject` | T1, T2, T3 | Sources, status, loci, tour cursor, keeps, decisions, notes. `decisions` are the T0 acknowledge, clear, approve, and discard rows. Notes are on the loci. `pseq` is the event high-water. `sincePseq` pages loci |
 | `exportProject` | T1, T2 | Rebuilds the export files; returns their paths and counts |
 
-MCP tools mirror these, plus a convenience `showCitations({ answerId?, citations: [{ url, claim, quote? }] })` that creates a project and starts a flow citation walk in one call.
+MCP tools mirror these, plus a convenience `showCitations({ answerId?, citations: [{ url, claim, quote? }], mode?, pace? })` that creates a project, selects loci, and starts a tour in one call. Omitted `mode` and `pace` are `explain` and `flow`, the narrated citation check. A preference review passes `select` and `wait`. The tool shows the T2 start list and does not send Start. The model then re-reads `queryProject` as the user fills keeps, discards, and notes.
 
 The sidecar gets read-only access to `queryProject` and the doc map, and may `createProject` only as a draft.
 
@@ -205,12 +225,12 @@ Following C1 (gate) and C2 (ledger):
 | Ticket | Deliverable |
 |---|---|
 | C7 | Project store (JSONL files), ledger events with `projectId`/`askId`/`locusId` persisted into it |
-| C7b | User notes on highlights: T0 arming, T1 text, sanitation pipeline, suspect-input hold, persistence |
+| C7b | User notes on highlights: T0 arming, T1 text, control-strip and LaTeX/BibTeX escaping, persistence. Landed as `d4a46e5`. The suspect hold was not built |
 | C8 | Intake: list, granted roots, directory snapshot (T1), URL rules for T2, per-source checks |
 | C9 | Text adapters for mapping (Poppler with lines; web DOM text with heading paths; plain text) and citation facts (section 6) |
 | C10 | Locus selection: quote search, shortlist, relevance yes/no, proposed stance |
 | C11 | `openSource` in the gate, viewer isolation, multi-source tour runner with project cursor and source hotkeys |
 | C12 | Exports: `references.bib`, `collection.tex` (escaped), `collection.txt`, `decisions.csv`, `citation_check.csv`; optional md and CSL-JSON |
-| C13 | MCP tools, including `showCitations`; skill text |
+| C13 | MCP tools, including `showCitations` with optional `mode` and `pace`; `queryProject` returns keeps, decisions, and notes; skill text |
 
 Order: C7, then C7b, then C8 and C9 together, then C10 and C11, then C12 and C13. C3 (tasks and controls) must be in before C11. C3, C3b, and C3c have landed. The implementation brief for C7 is `C7_project_store.md`. C7b's brief is `C7b_locus_notes.md`. The implementation briefs for C8 through C13 are `C8_C13_research_tours.md`.

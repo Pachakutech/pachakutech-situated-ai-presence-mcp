@@ -194,12 +194,12 @@ Config: `PRESENCE_LFM3_ENDPOINT`, model id, max crop size, max concurrent jobs (
 | C5 | Ledger export, read-only viewer, webhook or file-watch |
 | C6 | Doc map |
 | C7–C13 | Projects and research tours (`research_tours.md`) |
-| B1 | Sidecar client, T3 endpoint, JSON schema, mapping |
+| B1 | Sidecar client, T3 endpoint, JSON schema, mapping (`B1_sidecar.md`) |
 | B2 | Crop ingest at decision cadence |
 | B3 | Doctor, config, GPU/CPU placement notes |
 | B4 (later) | In-daemon actor, typed head, SFT schema, tighten-only advisor |
 
-Order: C1 and C2 first. C3 needs C1. C3b and C3c follow C3. C4, C5, B1 and C6 can then run in parallel. C7–C13 follow `research_tours.md` section 12; C11 needs C3. The C7 implementation brief is `C7_project_store.md`. C8 through C13 are in `C8_C13_research_tours.md`. Goals and acceptance criteria for C3, C3b, and C3c are in `C3_tasks_tours_moves.md`. Goals and acceptance criteria for C4, C5, and C6 are in `C4_C5_C6_command_report_map.md`.
+Order: C1 and C2 first. C3 needs C1. C3b and C3c follow C3. C4, C5, B1 and C6 can then run in parallel. C7–C13 follow `research_tours.md` section 12; C11 needs C3. The C7 implementation brief is `C7_project_store.md`. C8 through C13 are in `C8_C13_research_tours.md`. The B1 implementation brief is `B1_sidecar.md`. Goals and acceptance criteria for C3, C3b, and C3c are in `C3_tasks_tours_moves.md`. Goals and acceptance criteria for C4, C5, and C6 are in `C4_C5_C6_command_report_map.md`. An exploration of an armed voice command, and of what B1 should leave alone, is `voice_command.md`. It is not a ticket and it does not reorder this list.
 
 ## 10. Addendum: constraints from the running system
 
