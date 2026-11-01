@@ -1088,7 +1088,7 @@ fn prepared_from(row: intake::Prepared) -> PreparedSource {
         },
         reference: row.reference,
         status: if row.reason.is_some() { SourceStatus::Failed } else { SourceStatus::Pending },
-        reason: row.reason.map(str::to_string),
+        reason: row.reason,
         claim: row.claim,
         quote: row.quote,
     }

@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub const MAX_BYTES: u64 = 50 * 1024 * 1024;
+/// Cloudflare serves a 403 challenge to curl's default User-Agent.
+pub const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 const REF_CAP: usize = 2000;
 const TEXT_CAP: usize = 500;
 const SOURCE_CAP: usize = 500;
@@ -55,15 +57,18 @@ pub enum SourceClass {
 pub struct Prepared {
     pub class: SourceClass,
     pub reference: String,
-    pub reason: Option<&'static str>,
+    pub reason: Option<String>,
     pub claim: Option<String>,
     pub quote: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FetchReply {
-    Response { status: u16, content_length: Option<u64>, location: Option<String> },
+    Response { status: u16, content_length: Option<u64>, location: Option<String>, challenge: bool },
+    /// No HTTP status. Scripted probes use this for a host that never answered.
     Unreachable,
+    /// Transport failure. `class` is `unreachable`, `dns`, `timeout`, or `spawn`.
+    Down { class: &'static str, curl_exit: Option<i32>, stderr: Option<String> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,6 +82,7 @@ pub struct PageBody {
     pub status: u16,
     pub content_type: Option<String>,
     pub location: Option<String>,
+    pub challenge: bool,
     pub body: String,
 }
 
@@ -85,6 +91,8 @@ pub enum BodyReply {
     Page(PageBody),
     Unreachable,
     Oversize,
+    /// `class` is `unreachable`, `dns`, `timeout`, or `spawn`.
+    Down { class: &'static str, curl_exit: Option<i32>, stderr: Option<String> },
 }
 
 pub trait Probe {
@@ -101,39 +109,23 @@ pub struct LiveProbe;
 
 impl Probe for LiveProbe {
     fn fetch(&self, url: &str) -> FetchReply {
-        let output = match Command::new("curl")
-            .args([
-                "-sS",
-                "-D",
-                "-",
-                "-o",
-                "/dev/null",
-                "--max-redirs",
-                "0",
-                "--max-filesize",
-                "52428800",
-                "--max-time",
-                "20",
-                "--proto",
-                "=http,https",
-                "--url",
-            ])
-            .arg(url)
-            .output()
-        {
+        let output = match Command::new("curl").args(curl_args("-", "/dev/null")).arg("--url").arg(url).output() {
             Ok(output) => output,
-            Err(_) => return FetchReply::Unreachable,
+            Err(_) => return down_fetch("spawn", None, None),
         };
         let text = String::from_utf8_lossy(&output.stdout);
-        let (status, content_length, location) = parse_curl_headers(&text);
-        let over = output.status.code() == Some(63) || content_length.is_some_and(|len| len > MAX_BYTES);
+        let (status, content_length, location, challenge) = parse_curl_headers(&text);
+        let code = output.status.code();
+        let over = code == Some(63) || content_length.is_some_and(|len| len > MAX_BYTES);
         if status == 0 && !over {
-            return FetchReply::Unreachable;
+            let fail = transport_fail(code, &output.stderr);
+            return down_fetch(fail.class, fail.curl_exit, fail.stderr);
         }
         FetchReply::Response {
             status: if status == 0 { 200 } else { status },
             content_length: if over { Some(content_length.unwrap_or(MAX_BYTES + 1)) } else { content_length },
             location,
+            challenge,
         }
     }
 
@@ -158,42 +150,30 @@ impl Probe for LiveProbe {
         let _headers = TempFile(&headers_path);
         let _body = TempFile(&body_path);
         let output = Command::new("curl")
-            .args([
-                "-sS",
-                "-D",
-                headers_path.to_str().unwrap_or(""),
-                "-o",
-                body_path.to_str().unwrap_or(""),
-                "--max-redirs",
-                "0",
-                "--max-filesize",
-                "52428800",
-                "--max-time",
-                "20",
-                "--proto",
-                "=http,https",
-                "--url",
-            ])
+            .args(curl_args(headers_path.to_str().unwrap_or(""), body_path.to_str().unwrap_or("")))
+            .arg("--url")
             .arg(url)
             .output();
         let Ok(output) = output else {
-            return BodyReply::Unreachable;
+            return down_body("spawn", None, None);
         };
         let header_text = std::fs::read_to_string(&headers_path).unwrap_or_default();
-        let (status, content_length, location, content_type) = parse_curl_body_headers(&header_text);
-        let over = output.status.code() == Some(63) || content_length.is_some_and(|len| len > MAX_BYTES);
+        let (status, content_length, location, content_type, challenge) = parse_curl_body_headers(&header_text);
+        let code = output.status.code();
+        let over = code == Some(63) || content_length.is_some_and(|len| len > MAX_BYTES);
         if over {
             return BodyReply::Oversize;
         }
         if status == 0 {
-            return BodyReply::Unreachable;
+            let fail = transport_fail(code, &output.stderr);
+            return down_body(fail.class, fail.curl_exit, fail.stderr);
         }
         let len = std::fs::metadata(&body_path).map(|meta| meta.len()).unwrap_or(0);
         if len > MAX_BYTES {
             return BodyReply::Oversize;
         }
         let body = std::fs::read(&body_path).map(|bytes| String::from_utf8_lossy(&bytes).into_owned()).unwrap_or_default();
-        BodyReply::Page(PageBody { status, content_type, location, body })
+        BodyReply::Page(PageBody { status, content_type, location, challenge, body })
     }
 }
 
@@ -240,13 +220,13 @@ pub fn check_items(
     let mut prepared = Vec::with_capacity(candidates.len());
     for candidate in candidates {
         let reason = if let Some(reason) = candidate.pre_fail {
-            Some(reason)
+            Some(reason.to_string())
         } else if candidate.web {
             fetch_url(&candidate.reference, allow_private, probe)?
         } else if candidate.pdf {
             match probe.pdf_first_page(Path::new(&candidate.reference)) {
                 PdfReply::Text(text) if !text.trim().is_empty() => None,
-                _ => Some("no-text-layer"),
+                _ => Some("no-text-layer".to_string()),
             }
         } else {
             None
@@ -380,21 +360,122 @@ fn under_root(root: &str, file: &Path) -> bool {
     file.starts_with(&root) && file != root
 }
 
-fn fetch_url(start: &str, allow_private: bool, probe: &dyn Probe) -> Result<Option<&'static str>, CheckError> {
+fn curl_args(header_dest: &str, body_dest: &str) -> Vec<String> {
+    vec![
+        "-sS".to_string(),
+        "-D".to_string(),
+        header_dest.to_string(),
+        "-o".to_string(),
+        body_dest.to_string(),
+        "--max-redirs".to_string(),
+        "0".to_string(),
+        "--max-filesize".to_string(),
+        MAX_BYTES.to_string(),
+        "--max-time".to_string(),
+        "20".to_string(),
+        "--proto".to_string(),
+        "=http,https".to_string(),
+        "-A".to_string(),
+        BROWSER_USER_AGENT.to_string(),
+    ]
+}
+
+struct TransportFail {
+    class: &'static str,
+    curl_exit: Option<i32>,
+    stderr: Option<String>,
+}
+
+fn transport_fail(code: Option<i32>, stderr: &[u8]) -> TransportFail {
+    let note = String::from_utf8_lossy(stderr).trim().to_string();
+    let stderr = if note.is_empty() { None } else { Some(note) };
+    let class = match code {
+        Some(6) => "dns",
+        Some(28) => "timeout",
+        _ => "unreachable",
+    };
+    TransportFail { class, curl_exit: code, stderr }
+}
+
+fn down_fetch(class: &'static str, curl_exit: Option<i32>, stderr: Option<String>) -> FetchReply {
+    FetchReply::Down { class, curl_exit, stderr }
+}
+
+fn down_body(class: &'static str, curl_exit: Option<i32>, stderr: Option<String>) -> BodyReply {
+    BodyReply::Down { class, curl_exit, stderr }
+}
+
+pub(crate) fn http_reason(status: u16, challenge: bool) -> String {
+    let mut reason = format!("http-{status}");
+    if challenge {
+        reason.push_str(" challenge");
+    }
+    if reason.len() > 64 {
+        reason.truncate(64);
+    }
+    reason
+}
+
+fn clip_stderr(class: &str, note: &str) -> Option<String> {
+    if !matches!(class, "dns" | "timeout" | "spawn" | "unreachable") {
+        return None;
+    }
+    let mut clipped = String::new();
+    for ch in note.chars() {
+        if ch == '\n' || ch == '\r' {
+            break;
+        }
+        if clipped.chars().count() == 120 {
+            break;
+        }
+        clipped.push(ch);
+    }
+    let clipped = clipped.trim().to_string();
+    if clipped.is_empty() { None } else { Some(clipped) }
+}
+
+pub(crate) fn intake_log_line(url: &str, class: &str, status: Option<u16>, curl_exit: Option<i32>, stderr: Option<&str>) -> String {
+    let mut line = format!("[intake] {url} {class}");
+    if let Some(status) = status {
+        line.push_str(&format!(" status={status}"));
+    }
+    if let Some(code) = curl_exit {
+        line.push_str(&format!(" curl={code}"));
+    }
+    if let Some(note) = stderr.and_then(|note| clip_stderr(class, note)) {
+        line.push(' ');
+        line.push_str(&note);
+    }
+    line
+}
+
+pub(crate) fn log_fetch_failure(url: &str, class: &str, status: Option<u16>, curl_exit: Option<i32>, stderr: Option<&str>) {
+    eprintln!("{}", intake_log_line(url, class, status, curl_exit, stderr));
+}
+
+fn fail_fetch(url: &str, class: &str, status: Option<u16>, curl_exit: Option<i32>, stderr: Option<&str>) -> String {
+    log_fetch_failure(url, class, status, curl_exit, stderr);
+    class.to_string()
+}
+
+fn fetch_url(start: &str, allow_private: bool, probe: &dyn Probe) -> Result<Option<String>, CheckError> {
     if !url_allowed(start, allow_private) {
         return Err(CheckError::UrlNotAllowed);
     }
     let mut current = start.to_string();
     for hop in 0..=3 {
         match probe.fetch(&current) {
-            FetchReply::Unreachable => return Ok(Some("unreachable")),
-            FetchReply::Response { status, content_length, location } => {
+            FetchReply::Unreachable => return Ok(Some(fail_fetch(&current, "unreachable", None, None, None))),
+            FetchReply::Down { class, curl_exit, stderr } => {
+                return Ok(Some(fail_fetch(&current, class, None, curl_exit, stderr.as_deref())));
+            }
+            FetchReply::Response { status, content_length, location, challenge } => {
                 if content_length.is_some_and(|len| len > MAX_BYTES) {
-                    return Ok(Some("oversize"));
+                    return Ok(Some(fail_fetch(&current, "oversize", Some(status), None, None)));
                 }
                 if (300..400).contains(&status) {
                     if hop == 3 {
-                        return Ok(Some("unreachable"));
+                        return Ok(Some(fail_fetch(&current, "unreachable", Some(status), None, None)));
                     }
                     let next = resolve_redirect(&current, location.as_deref().unwrap_or(""))?;
                     if !url_allowed(&next, allow_private) {
@@ -406,11 +487,13 @@ fn fetch_url(start: &str, allow_private: bool, probe: &dyn Probe) -> Result<Opti
                 if (200..300).contains(&status) {
                     return Ok(None);
                 }
-                return Ok(Some("unreachable"));
+                let reason = http_reason(status, challenge);
+                log_fetch_failure(&current, &reason, Some(status), None, None);
+                return Ok(Some(reason));
             }
         }
     }
-    Ok(Some("unreachable"))
+    Ok(Some(fail_fetch(&current, "unreachable", None, None, None)))
 }
 
 pub(crate) fn resolve_redirect(current: &str, location: &str) -> Result<String, CheckError> {
@@ -559,11 +642,16 @@ fn optional_text(value: Option<&str>) -> Result<Option<String>, CheckError> {
     }
 }
 
-fn parse_curl_body_headers(text: &str) -> (u16, Option<u64>, Option<String>, Option<String>) {
+fn header_is_challenge(name: &str, value: &str) -> bool {
+    name.eq_ignore_ascii_case("cf-mitigated") && value.to_ascii_lowercase().contains("challenge")
+}
+
+fn parse_curl_body_headers(text: &str) -> (u16, Option<u64>, Option<String>, Option<String>, bool) {
     let mut status = 0u16;
     let mut length = None;
     let mut location = None;
     let mut content_type = None;
+    let mut challenge = false;
     for line in text.lines() {
         let line = line.trim_end_matches('\r');
         if let Some(rest) = line.strip_prefix("HTTP/") {
@@ -571,6 +659,7 @@ fn parse_curl_body_headers(text: &str) -> (u16, Option<u64>, Option<String>, Opt
             length = None;
             location = None;
             content_type = None;
+            challenge = false;
         } else if let Some((name, value)) = line.split_once(':') {
             if name.eq_ignore_ascii_case("content-length") {
                 length = value.trim().parse().ok();
@@ -578,31 +667,17 @@ fn parse_curl_body_headers(text: &str) -> (u16, Option<u64>, Option<String>, Opt
                 location = Some(value.trim().to_string());
             } else if name.eq_ignore_ascii_case("content-type") {
                 content_type = Some(value.trim().to_string());
+            } else if header_is_challenge(name, value) {
+                challenge = true;
             }
         }
     }
-    (status, length, location, content_type)
+    (status, length, location, content_type, challenge)
 }
 
-fn parse_curl_headers(text: &str) -> (u16, Option<u64>, Option<String>) {
-    let mut status = 0u16;
-    let mut length = None;
-    let mut location = None;
-    for line in text.lines() {
-        let line = line.trim_end_matches('\r');
-        if let Some(rest) = line.strip_prefix("HTTP/") {
-            status = rest.split_whitespace().nth(1).and_then(|code| code.parse().ok()).unwrap_or(0);
-            length = None;
-            location = None;
-        } else if let Some((name, value)) = line.split_once(':') {
-            if name.eq_ignore_ascii_case("content-length") {
-                length = value.trim().parse().ok();
-            } else if name.eq_ignore_ascii_case("location") {
-                location = Some(value.trim().to_string());
-            }
-        }
-    }
-    (status, length, location)
+fn parse_curl_headers(text: &str) -> (u16, Option<u64>, Option<String>, bool) {
+    let (status, length, location, _, challenge) = parse_curl_body_headers(text);
+    (status, length, location, challenge)
 }
 
 #[cfg(test)]
@@ -654,7 +729,7 @@ mod tests {
     fn http_ok(url: &str) -> (String, FetchReply) {
         (
             url.to_string(),
-            FetchReply::Response { status: 200, content_length: Some(4), location: None },
+            FetchReply::Response { status: 200, content_length: Some(4), location: None, challenge: false },
         )
     }
 
@@ -756,20 +831,20 @@ mod tests {
         let mut http = HashMap::new();
         http.insert(
             "https://example.com/go".into(),
-            FetchReply::Response { status: 302, content_length: None, location: Some("http://127.0.0.1/hidden".into()) },
+            FetchReply::Response { status: 302, content_length: None, location: Some("http://127.0.0.1/hidden".into()), challenge: false },
         );
         http.insert(http_ok("https://example.com/a").0, http_ok("https://example.com/a").1);
         http.insert(
             "https://example.com/a".into(),
-            FetchReply::Response { status: 302, content_length: None, location: Some("https://example.com/b".into()) },
+            FetchReply::Response { status: 302, content_length: None, location: Some("https://example.com/b".into()), challenge: false },
         );
         http.insert(
             "https://example.com/b".into(),
-            FetchReply::Response { status: 302, content_length: None, location: Some("https://example.com/c".into()) },
+            FetchReply::Response { status: 302, content_length: None, location: Some("https://example.com/c".into()), challenge: false },
         );
         http.insert(
             "https://example.com/c".into(),
-            FetchReply::Response { status: 302, content_length: None, location: Some("https://example.com/d".into()) },
+            FetchReply::Response { status: 302, content_length: None, location: Some("https://example.com/d".into()), challenge: false },
         );
         http.insert(http_ok("https://example.com/d").0, http_ok("https://example.com/d").1);
         let probe = ScriptProbe { http, pdf: HashMap::new(), hits: Cell::new(0) };
@@ -1057,5 +1132,131 @@ mod tests {
         assert_eq!(store.get(&id).unwrap().sources.len(), 3);
         let t3 = route(&mut store, Tier::T3Sidecar, &added, &probe);
         assert_eq!(t3.error.as_deref(), Some("not_allowed_for_tier:addSources"));
+    }
+
+    fn scripted(status: u16, challenge: bool) -> ScriptProbe {
+        let mut http = HashMap::new();
+        http.insert(
+            "https://example.com/poem".to_string(),
+            FetchReply::Response { status, content_length: Some(12), location: None, challenge },
+        );
+        ScriptProbe { http, pdf: HashMap::new(), hits: Cell::new(0) }
+    }
+
+    #[test]
+    fn f1_http_403_stores_the_status_and_keeps_the_next_record() {
+        let tmp = scratch("f1");
+        let root = tmp.0.join("store");
+        let next = tmp.0.join("next.txt");
+        fs::write(&next, b"next").unwrap();
+        let mut store = ProjectStore::open(&root).unwrap();
+        let probe = scripted(403, false);
+        let sources = format!(r#"{{"url":"https://example.com/poem"}},{{"path":"{}"}}"#, next.display());
+        let created = route(&mut store, Tier::T1User, &create_json("Poem", "", &sources), &probe);
+        assert_eq!(created.status, "ok", "{:?}", created.error);
+        let id = created.detail.unwrap()["projectId"].as_str().unwrap().to_string();
+        let got = &store.get(&id).unwrap().sources;
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].status, SourceStatus::Failed);
+        assert_eq!(got[0].reason.as_deref(), Some("http-403"));
+        assert_eq!(got[1].status, SourceStatus::Pending);
+        assert!(got[1].reason.is_none());
+        assert!(got[1].reference.ends_with("next.txt"));
+    }
+
+    #[test]
+    fn f2_a_cloudflare_challenge_names_the_class() {
+        let tmp = scratch("f2");
+        let root = tmp.0.join("store");
+        let mut store = ProjectStore::open(&root).unwrap();
+        let probe = scripted(403, true);
+        let created = route(&mut store, Tier::T1User, &create_json("Poem", "", r#"{"url":"https://example.com/poem"}"#), &probe);
+        assert_eq!(created.status, "ok", "{:?}", created.error);
+        let id = created.detail.unwrap()["projectId"].as_str().unwrap().to_string();
+        let source = &store.get(&id).unwrap().sources[0];
+        assert_eq!(source.status, SourceStatus::Failed);
+        assert_eq!(source.reason.as_deref(), Some("http-403 challenge"));
+        let (status, _, _, challenge) = parse_curl_headers("HTTP/2 403 \r\ncf-mitigated: challenge\r\nserver: cloudflare\r\n");
+        assert_eq!(status, 403);
+        assert!(challenge);
+        let (status, _, _, challenge) = parse_curl_headers("HTTP/2 403 \r\nCF-Mitigated: Challenge\r\n");
+        assert_eq!(status, 403);
+        assert!(challenge);
+        let (status, _, _, challenge) = parse_curl_headers("HTTP/2 403 \r\ncf-mitigated: challenge\r\n\r\nHTTP/2 200 \r\n");
+        assert_eq!(status, 200);
+        assert!(!challenge);
+        let (_, _, _, content_type, challenge) = parse_curl_body_headers("HTTP/2 403 \r\ncontent-type: text/html\r\ncf-mitigated: challenge\r\n");
+        assert_eq!(content_type.as_deref(), Some("text/html"));
+        assert!(challenge);
+    }
+
+    #[test]
+    fn f3_a_probe_miss_stays_unreachable() {
+        let tmp = scratch("f3");
+        let root = tmp.0.join("store");
+        let next = tmp.0.join("next.txt");
+        fs::write(&next, b"next").unwrap();
+        let mut store = ProjectStore::open(&root).unwrap();
+        let probe = probe_ok(&[]);
+        let sources = format!(r#"{{"url":"https://example.com/missing"}},{{"path":"{}"}}"#, next.display());
+        let created = route(&mut store, Tier::T1User, &create_json("Miss", "", &sources), &probe);
+        assert_eq!(created.status, "ok", "{:?}", created.error);
+        let id = created.detail.unwrap()["projectId"].as_str().unwrap().to_string();
+        let got = &store.get(&id).unwrap().sources;
+        assert_eq!(got[0].status, SourceStatus::Failed);
+        assert_eq!(got[0].reason.as_deref(), Some("unreachable"));
+        assert_eq!(got[1].status, SourceStatus::Pending);
+    }
+
+    #[test]
+    fn f4_status_200_stays_pending() {
+        let tmp = scratch("f4");
+        let root = tmp.0.join("store");
+        let mut store = ProjectStore::open(&root).unwrap();
+        let probe = scripted(200, false);
+        let created = route(&mut store, Tier::T1User, &create_json("Ok", "", r#"{"url":"https://example.com/poem"}"#), &probe);
+        assert_eq!(created.status, "ok", "{:?}", created.error);
+        let id = created.detail.unwrap()["projectId"].as_str().unwrap().to_string();
+        let source = &store.get(&id).unwrap().sources[0];
+        assert_eq!(source.status, SourceStatus::Pending);
+        assert!(source.reason.is_none());
+    }
+
+    #[test]
+    fn f5_both_curls_share_a_browser_user_agent() {
+        let args = curl_args("-", "/dev/null");
+        assert!(args.windows(2).any(|pair| pair[0] == "-A" && pair[1] == BROWSER_USER_AGENT));
+        let proto = args.windows(2).find(|pair| pair[0] == "--proto").unwrap();
+        assert_eq!(proto[1], "=http,https");
+        assert!(!args.iter().any(|arg| arg == "-f" || arg == "--fail"));
+        let prod = include_str!("intake.rs").split("mod tests").next().unwrap();
+        assert_eq!(prod.matches(".args(curl_args(").count(), 2);
+    }
+
+    #[test]
+    fn f7_log_line_names_the_challenge_and_skips_the_body() {
+        let body = "<html><title>Just a moment...</title></html>";
+        let line = intake_log_line(
+            "https://www.poetryfoundation.org/poems/47311/the-waste-land",
+            "http-403 challenge",
+            Some(403),
+            Some(0),
+            Some(body),
+        );
+        assert!(line.starts_with("[intake] "));
+        assert!(line.contains("https://www.poetryfoundation.org/poems/47311/the-waste-land"));
+        assert!(line.contains("http-403 challenge"));
+        assert!(line.contains("status=403"));
+        assert!(!line.contains("Just a moment"));
+        assert!(!line.contains("<html>"));
+        let note = format!("could not resolve host {}\nsecond line", "x".repeat(200));
+        let dns = intake_log_line("https://example.com/missing", "dns", None, Some(6), Some(&note));
+        assert!(dns.contains("[intake]"));
+        assert!(dns.contains("dns"));
+        assert!(dns.contains("curl=6"));
+        assert!(dns.contains("could not resolve host "));
+        assert!(!dns.contains('\n'));
+        assert!(!dns.contains(&"x".repeat(121)));
+        assert!(!dns.contains("second line"));
     }
 }

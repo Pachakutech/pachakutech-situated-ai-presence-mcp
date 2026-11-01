@@ -245,7 +245,8 @@ Following C1 (gate) and C2 (ledger):
 | C9 | Text adapters for mapping (Poppler with lines; web DOM text with heading paths; plain text) and citation facts (section 6) |
 | C10 | Locus selection: quote search, shortlist, relevance yes/no, proposed stance |
 | C11 | `openSource` in the gate, viewer isolation, multi-source tour runner with project cursor and source hotkeys |
+| C11-bugfix | The intake fetch stores a short failure class and writes one log line. Both curls send a browser User-Agent. Brief: `C11_bugfix.md`. Follows the live trial; does not reorder C12 or C13 |
 | C12 | Exports: `references.bib`, `collection.tex` (escaped), `collection.txt`, `decisions.csv`, `citation_check.csv`; optional md and CSL-JSON |
 | C13 | MCP tools, including `showCitations` with optional `mode` and `pace`; `queryProject` returns keeps, decisions, and notes; skill text |
 
-Order: C7, then C7b, then C8 and C9 together, then C10 and C11, then C12 and C13. C3 (tasks and controls) must be in before C11. C3, C3b, and C3c have landed. The implementation brief for C7 is `C7_project_store.md`. C7b's brief is `C7b_locus_notes.md`. The implementation briefs for C8 through C13 are `C8_C13_research_tours.md`.
+Order: C7, then C7b, then C8 and C9 together, then C10 and C11, then C12 and C13. C3 (tasks and controls) must be in before C11. C3, C3b, and C3c have landed. The implementation brief for C7 is `C7_project_store.md`. C7b's brief is `C7b_locus_notes.md`. The implementation briefs for C8 through C13 are `C8_C13_research_tours.md`. C11-bugfix follows the live trial of C11 and does not reorder C12 or C13. Its brief is `C11_bugfix.md`.
