@@ -11,6 +11,7 @@ use crate::ledger::Ledger;
 use crate::project::ProjectStore;
 use crate::protocol::{Proposal, ProposalResult};
 use crate::task::TaskBook;
+use crate::tour::TourDesk;
 use crate::pipeline::{SplatPipeline, INACTIVE_SPLAT};
 use std::collections::HashMap;
 use std::time::Instant;
@@ -40,6 +41,8 @@ pub struct Registry {
     tasks: TaskBook,
     /// Passage index. The directory is created on a successful build, not here.
     docmap: DocMap,
+    /// The project tour for this run. The cursor itself lives on the project.
+    tour: TourDesk,
 }
 
 impl Registry {
@@ -58,6 +61,7 @@ impl Registry {
             ledger: Ledger::new(),
             tasks: TaskBook::new(),
             docmap: DocMap::new(crate::docmap::docmap_root_from_env()),
+            tour: TourDesk::default(),
         }
     }
 
@@ -95,6 +99,24 @@ impl Registry {
         (&mut self.tasks, &mut self.ledger)
     }
 
+    /// `startProjectTour` needs the task book and the project store in sequence.
+    pub fn route_tour_proposal(&mut self, proposal: &Proposal, tier: Tier, now_ms: u64) -> Option<ProposalResult> {
+        let Proposal::StartProjectTour(body) = proposal else {
+            return None;
+        };
+        if !crate::gate::allowed(tier, proposal) {
+            return Some(ProposalResult::err(
+                &body.proposal_id,
+                format!("not_allowed_for_tier:{}", proposal.kind_name()),
+            ));
+        }
+        let planned = match self.ledger.projects_mut() {
+            Some(store) => crate::tour::route_start(body, tier, store, &mut self.tour, now_ms),
+            None => return Some(ProposalResult::err(&body.proposal_id, "projects_unavailable")),
+        };
+        Some(crate::tour::commit(planned, &mut self.tasks, &mut self.ledger, &mut self.tour, now_ms))
+    }
+
     /// `selectLoci` reads the project and the doc map together. Other project
     /// kinds stay on the store route.
     pub fn route_project_proposal(&mut self, proposal: &Proposal, tier: Tier, now_ms: u64) -> Option<ProposalResult> {
@@ -106,6 +128,27 @@ impl Registry {
 
     pub fn tick_tasks(&mut self, now_ms: u64) {
         self.tasks.tick(&mut self.ledger, now_ms);
+        let done = match crate::tour::task_id(&self.tour) {
+            Some(id) => self.tasks.query_value(id).is_some_and(|view| view["state"] == "done"),
+            None => false,
+        };
+        if !done {
+            return;
+        }
+        let seed = {
+            let Some(store) = self.ledger.projects_mut() else {
+                return;
+            };
+            let mut opener = crate::tour::AllowOpener;
+            crate::tour::plan_follow(&mut self.tour, store, &mut opener, now_ms)
+        };
+        let Some(seed) = seed else {
+            return;
+        };
+        let locus_ids = seed.locus_ids.clone();
+        if let Ok(id) = self.tasks.insert_tour_chunk(&mut self.ledger, seed, now_ms) {
+            crate::tour::remember_chunk(&mut self.tour, id, locus_ids);
+        }
     }
 
     pub fn note_task_highlight(&mut self, presence_id: &str, now_ms: u64) {

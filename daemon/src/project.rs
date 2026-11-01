@@ -790,6 +790,16 @@ impl ProjectStore {
         Ok(loaded.loci.iter().map(|row| row.locus.locus_id.clone()).collect())
     }
 
+    pub(crate) fn loci_for(&self, id: &str, source_id: &str) -> Result<Vec<Locus>, StoreError> {
+        let loaded = self.projects.get(id).ok_or(StoreError::NoSuchProject)?;
+        Ok(loaded
+            .loci
+            .iter()
+            .filter(|row| row.locus.source_id == source_id)
+            .map(|row| row.locus.clone())
+            .collect())
+    }
+
     pub fn loci(&self, id: &str, since_pseq: Option<u64>, limit: Option<u32>) -> Result<Vec<Locus>, StoreError> {
         let loaded = self.projects.get(id).ok_or(StoreError::NoSuchProject)?;
         let since = since_pseq.unwrap_or(0);

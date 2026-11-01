@@ -22,6 +22,23 @@ pub const DOUBLE_CLICK_MS: u64 = 250;
 pub const MOVE_WAIT_MS: u64 = 1500;
 pub const MOVE_ATTEMPTS: u8 = 3;
 pub const NUDGE_PX: i32 = 80;
+
+/// One chunk of a project tour. Built by the tour, inserted here.
+pub struct TourSeed {
+    pub origin_user: bool,
+    pub mode: crate::protocol::TaskMode,
+    pub pace: crate::protocol::TaskPace,
+    pub doc_key: Option<String>,
+    pub items: Vec<TourSeedItem>,
+    /// Locus ids in this chunk, in item order. The task book does not read them.
+    pub locus_ids: Vec<String>,
+}
+
+pub struct TourSeedItem {
+    pub query: String,
+    pub narration: String,
+    pub page: Option<u32>,
+}
 pub const CONTROL_PX: i32 = 28;
 pub const CONTROL_GAP: i32 = 8;
 pub const PAIR_GAP: i32 = 4;
@@ -184,6 +201,68 @@ impl TaskBook {
         self.moves_issued
     }
 
+    pub fn has_awaiting_start(&self) -> bool {
+        self.tasks.iter().any(|task| task.state == TaskState::AwaitingStart)
+    }
+
+    /// A project-tour chunk. Scroll items stay `pending`. This path does not use the T2 start-card rule.
+    pub fn insert_tour_chunk(&mut self, ledger: &mut Ledger, seed: TourSeed, now_ms: u64) -> Result<String, TaskError> {
+        if seed.items.is_empty() || seed.items.len() > ITEM_CAP {
+            return Err(TaskError::Schema);
+        }
+        if self.runnable_count() >= QUEUE_CAP {
+            return Err(TaskError::QueueFull);
+        }
+        let drawn = resolve_presentation(seed.mode, None)?;
+        let mut items = Vec::with_capacity(seed.items.len());
+        for raw in &seed.items {
+            let phrase_id = ledger.mint_and_hold().map_err(ledger_err)?;
+            items.push(Item {
+                phrase_id,
+                query: Some(cut(&raw.query, crate::ledger::TEXT_CAP)),
+                narration: cut(&raw.narration, NARRATION_CAP),
+                scroll: true,
+                page: raw.page,
+                matched: ItemMatch::Pending,
+                attempts: 0,
+            });
+        }
+        let id = self.mint_task_id();
+        self.tasks.push(Task {
+            id: id.clone(),
+            presence_id: "project-tour".into(),
+            origin: if seed.origin_user { Origin::User } else { Origin::Agent },
+            mode: seed.mode,
+            pace: seed.pace,
+            drawn,
+            state: TaskState::Pending,
+            prompt: String::new(),
+            ttl_seconds: DEFAULT_TTL_S,
+            item_timeout_seconds: DEFAULT_ITEM_TIMEOUT_S,
+            deadline_ms: now_ms.saturating_add(u64::from(DEFAULT_TTL_S) * 1000),
+            doc_key: seed.doc_key,
+            items,
+            index: 0,
+            entered_ms: None,
+            narration_done: false,
+            last_move_ms: None,
+        });
+        Ok(id)
+    }
+
+    /// Ends the per-source task. Writes no phrase decision.
+    pub fn end_without_decision(&mut self, task_id: &str) -> bool {
+        let Some(pos) = self.tasks.iter().position(|task| task.id == task_id) else {
+            return false;
+        };
+        if !open_for_end(self.tasks[pos].state) {
+            return false;
+        }
+        self.tasks[pos].state = TaskState::Dismissed;
+        self.clear_shown_for(task_id);
+        true
+    }
+
     /// The move the active item may take. Does not issue it.
     pub fn planned_move(&self, task_id: &str) -> Result<ViewerMove, MoveError> {
         let task = self.task(task_id).ok_or(MoveError::NoActiveTour)?;
@@ -340,7 +419,8 @@ impl TaskBook {
             UiEvent::Hotkey(Hotkey::Start) => self.confirm_start(),
             UiEvent::Hotkey(Hotkey::Note) => self.hotkey_note(ledger, now_ms),
             // Project confirm is applied on the project store. Start still promotes a task.
-            UiEvent::Hotkey(Hotkey::ConfirmProject) => false,
+            // Source keys are applied by the project tour, which also ends the per-source task.
+            UiEvent::Hotkey(Hotkey::ConfirmProject) | UiEvent::Hotkey(Hotkey::NextSource) | UiEvent::Hotkey(Hotkey::PrevSource) => false,
             UiEvent::ArmNote { .. } | UiEvent::Acknowledge { .. } | UiEvent::Uncheck { .. } | UiEvent::Approve { .. } | UiEvent::Discard { .. } => false,
         }
     }

@@ -65,6 +65,7 @@ pub fn allowed(tier: Tier, proposal: &Proposal) -> bool {
         Proposal::ConfirmProject(_) => matches!(tier, Tier::T1User),
         Proposal::QueryProject(_) => matches!(tier, Tier::T1User | Tier::T2Client | Tier::T3Sidecar),
         Proposal::SelectLoci(_) => matches!(tier, Tier::T1User | Tier::T2Client),
+        Proposal::StartProjectTour(_) => matches!(tier, Tier::T1User | Tier::T2Client),
         Proposal::AddNote(_) | Proposal::DeleteNote(_) => matches!(tier, Tier::T1User),
     }
 }
@@ -305,6 +306,7 @@ mod tests {
                 "confirmProject" => assert!(t1 && !t2 && !t3, "{kind}"),
                 "queryProject" => assert!(t1 && t2 && t3, "{kind}"),
                 "selectLoci" => assert!(t1 && t2 && !t3, "{kind}"),
+                "startProjectTour" => assert!(t1 && t2 && !t3, "{kind}"),
                 other => panic!("unexpected project kind {other}"),
             }
         }
@@ -358,6 +360,10 @@ mod tests {
             (
                 r#"{"kind":"selectLoci","proposalId":"s","projectId":"pj-0123456789abcdef","askId":"ak-1"}"#,
                 "selectLoci",
+            ),
+            (
+                r#"{"kind":"startProjectTour","proposalId":"g","projectId":"pj-0123456789abcdef","mode":"explain"}"#,
+                "startProjectTour",
             ),
         ];
         LINES
