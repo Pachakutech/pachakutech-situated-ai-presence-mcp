@@ -137,7 +137,7 @@ The viseme failure `GLB lacks viseme_aa` stays. No new crate. `samples()` stays 
 
 The rest of the middle, outside C12 and C13:
 
-1. **The window.** C11's brief says the production opener is the locate Chromium, profile `$XDG_RUNTIME_DIR/pachakutech/locate-chromium`, port 9222, or Evince for a PDF. The code on the tour path is `AllowOpener` (`tour.rs`): `open` returns `Ok(())` and starts neither program. `src/locate/openSource.ts` and `src/locate/tour.ts` have no production caller. C3c scrolls a window that is already up. A project tour has no window until a real opener exists. `highlight_loci` and `ViewerMove` stay as C11 wrote them.
+1. **The window.** Written up as `C11c_tour_window.md`. The daemon parks the spec. Node launches the locate Chromium or Evince. This ticket does not.
 2. **The durable answer.** `Ledger::push` copies a T0 event into `events.jsonl` when the phrase is already bound to a project locus. `insert_tour_chunk` mints phrase ids and does not bind them. `register_task` is what lets `keeps()` see an approve-mode task, and its callers are the store tests. A yes or a no on the tour stays in the session ledger. The `decisions` array on `queryProject`, and the MCP tool that reads a project, are C13.
 3. **The cued narrative.** Deferred by the user to a later sidecar note. B1 is the judge. This ticket does not write that note and does not speak a narration.
 4. **B1b and C11b.** Retrieval failover, and the pause-time highlight, stay their own briefs.
