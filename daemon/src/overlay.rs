@@ -2894,6 +2894,8 @@ pub fn run(
         }
     }
     server.attach_projects_from_env();
+    let map_ends = server.take_map_ends();
+    server.queue_pending_sources();
     let _pid = crate::socket::PidFile::create(socket_path).map_err(|e| format!("pid file: {e}"))?;
     server.set_avatar_available(avatar.is_some());
 
@@ -2927,6 +2929,9 @@ pub fn run(
 
     let use_dmabuf = vk.supports_zero_copy_capture();
     crate::screen_text::spawn(text_memory.clone(), capture_enabled.clone());
+    if let Some(ends) = map_ends {
+        crate::map_worker::spawn(ends);
+    }
 
     // --- Unified capture thread (dmabuf preferred, SHM fallback) ---
     // L1: pauses when `capture_enabled` is false (session inactive).

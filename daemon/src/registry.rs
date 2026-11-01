@@ -8,6 +8,7 @@ use crate::gate::Tier;
 use crate::highlight::{InterestBook, UvBox, MAX_SECS};
 use crate::docmap::DocMap;
 use crate::ledger::Ledger;
+use crate::map_worker::{self, MapInbox};
 use crate::project::ProjectStore;
 use crate::protocol::{Proposal, ProposalResult};
 use crate::task::TaskBook;
@@ -43,6 +44,8 @@ pub struct Registry {
     docmap: DocMap,
     /// The project tour for this run. The cursor itself lives on the project.
     tour: TourDesk,
+    /// Descriptors for the map worker. Prepare runs on that thread.
+    map_inbox: MapInbox,
 }
 
 impl Registry {
@@ -62,6 +65,35 @@ impl Registry {
             tasks: TaskBook::new(),
             docmap: DocMap::new(crate::docmap::docmap_root_from_env()),
             tour: TourDesk::default(),
+            map_inbox: MapInbox::open(),
+        }
+    }
+
+    /// The worker end. The overlay starts the thread. A second call returns nothing.
+    pub fn take_map_ends(&mut self) -> Option<map_worker::WorkerEnds> {
+        let root = self.docmap.root().to_path_buf();
+        self.map_inbox.take_worker(root)
+    }
+
+    /// After a successful create, add, or confirm. A draft is not queued.
+    pub fn note_project_sources(&mut self, proposal: &Proposal, result: &ProposalResult) {
+        let jobs = {
+            let Some(store) = self.ledger.projects_mut() else { return };
+            map_worker::jobs_for_success(proposal, result, store)
+        };
+        for job in jobs {
+            self.map_inbox.enqueue(job);
+        }
+    }
+
+    /// Pending sources already on disk. Mapped and failed sources are absent.
+    pub fn queue_pending_sources(&mut self) {
+        let jobs = {
+            let Some(store) = self.ledger.projects_mut() else { return };
+            map_worker::startup_jobs(store)
+        };
+        for job in jobs {
+            self.map_inbox.enqueue(job);
         }
     }
 
@@ -127,6 +159,7 @@ impl Registry {
     }
 
     pub fn tick_tasks(&mut self, now_ms: u64) {
+        self.apply_finished_maps();
         self.tasks.tick(&mut self.ledger, now_ms);
         let done = match crate::tour::task_id(&self.tour) {
             Some(id) => self.tasks.query_value(id).is_some_and(|view| view["state"] == "done"),
@@ -148,6 +181,20 @@ impl Registry {
         let locus_ids = seed.locus_ids.clone();
         if let Ok(id) = self.tasks.insert_tour_chunk(&mut self.ledger, seed, now_ms) {
             crate::tour::remember_chunk(&mut self.tour, id, locus_ids);
+        }
+    }
+
+    fn apply_finished_maps(&mut self) {
+        let reports = self.map_inbox.drain();
+        for report in reports {
+            let project_id = report.project_id.clone();
+            let source_id = report.source_id.clone();
+            if let Some(store) = self.ledger.projects_mut() {
+                if let Err(err) = crate::adapt::apply(store, &project_id, &source_id, report.prepared) {
+                    eprintln!("[map] {project_id} {source_id} failed {err}");
+                }
+            }
+            self.map_inbox.forget(&project_id, &source_id);
         }
     }
 
@@ -329,5 +376,51 @@ impl Registry {
         if let Err(e) = pipeline.tick(self.frame, 600) {
             eprintln!("[registry] tick after retire {artifact_id}: {e}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gate::Tier;
+    use serde_json::json;
+
+    #[test]
+    fn a_successful_create_is_noted_onto_the_queue_and_a_draft_is_not() {
+        let root = std::env::temp_dir().join(format!("presence-c9b-reg-{}-{}", std::process::id(), line!()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut reg = Registry::new();
+        reg.open_projects(&root.join("projects")).unwrap();
+        let path = root.join("page.txt");
+        std::fs::write(&path, "hello\n").unwrap();
+        let create = json!({
+            "kind": "createProject",
+            "proposalId": "c",
+            "title": "Direct",
+            "asks": [{ "text": "a question", "kind": "question" }],
+            "sources": [{ "path": path.display().to_string() }],
+        });
+        let proposal: Proposal = serde_json::from_value(create).unwrap();
+        let result = reg.route_project_proposal(&proposal, Tier::T1User, 1).unwrap();
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        reg.note_project_sources(&proposal, &result);
+        let job = reg.map_inbox.pop().unwrap();
+        assert_eq!(job.source_id, "sr-1");
+        assert!(reg.map_inbox.pop().is_none());
+
+        let draft_body = json!({
+            "kind": "createProject",
+            "proposalId": "d",
+            "title": "Draft",
+            "asks": [{ "text": "a question", "kind": "question" }],
+            "sources": [{ "url": "https://example.com/c9b-draft" }],
+        });
+        let draft: Proposal = serde_json::from_value(draft_body).unwrap();
+        let drafted = reg.route_project_proposal(&draft, Tier::T3Sidecar, 2).unwrap();
+        assert_eq!(drafted.status, "ok", "{:?}", drafted.error);
+        reg.note_project_sources(&draft, &drafted);
+        assert!(reg.map_inbox.pop().is_none());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -57,6 +57,10 @@ impl DocMap {
         self.root = root;
     }
 
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     pub fn build(&mut self, tier: Tier, source: &DocSource) -> Result<Value, String> {
         match tier {
             Tier::T2Client => return Err("path_not_in_granted_root".to_string()),

@@ -62,6 +62,12 @@ pub fn handle(
         return ProposalResult::err(&body.proposal_id, StoreError::NoSuchAsk.as_wire());
     };
     let ask_text = ask.text.clone();
+    let pending: Vec<String> = project
+        .sources
+        .iter()
+        .filter(|source| source.status == SourceStatus::Pending)
+        .map(|source| source.source_id.clone())
+        .collect();
     let mut chosen = if citation_mode(&project) {
         cite(&project, docmap, &ask_text)
     } else {
@@ -86,14 +92,15 @@ pub fn handle(
             Err(err) => return ProposalResult::err(&body.proposal_id, err.as_wire()),
         }
     }
-    ProposalResult::ok(
-        &body.proposal_id,
-        Some(json!({
-            "projectId": body.project_id,
-            "askId": body.ask_id,
-            "locusIds": ids,
-        })),
-    )
+    let mut detail = json!({
+        "projectId": body.project_id,
+        "askId": body.ask_id,
+        "locusIds": ids,
+    });
+    if !pending.is_empty() {
+        detail["pending"] = json!(pending);
+    }
+    ProposalResult::ok(&body.proposal_id, Some(detail))
 }
 
 struct Chosen {
@@ -165,7 +172,7 @@ fn citation_mode(project: &Project) -> bool {
 fn cite(project: &Project, docmap: &DocMap, ask: &str) -> Vec<Chosen> {
     let mut out = Vec::new();
     for source in &project.sources {
-        if source.status == SourceStatus::Failed {
+        if source.status == SourceStatus::Failed || source.status == SourceStatus::Pending {
             continue;
         }
         out.push(cite_source(source, &load_passages(docmap, &source.doc_key), ask));
@@ -750,7 +757,9 @@ mod tests {
             .unwrap();
         let result = select(&mut scratch, &id, "ak-1", Tier::T1User, &KeepJudge);
         assert_eq!(result.status, "ok", "{:?}", result.error);
-        let ids = result.detail.unwrap()["locusIds"].as_array().unwrap().clone();
+        let detail = result.detail.unwrap();
+        assert_eq!(detail["pending"], json!(["sr-11"]));
+        let ids = detail["locusIds"].as_array().unwrap().clone();
         assert_eq!(ids.len(), 40);
         let loci = scratch.store.loci(&id, None, Some(500)).unwrap();
         assert_eq!(loci.len(), 40);
@@ -957,6 +966,71 @@ mod tests {
         assert_eq!(quota.error.as_deref(), Some("quota:loci"));
         assert_eq!(scratch.store.stored_locus_ids(&id).unwrap().len(), count);
         assert_eq!(loci_file_len(&scratch, &id), bytes);
+    }
+
+    #[test]
+    fn w4_a_pending_citation_source_writes_no_locus() {
+        let mut scratch = scratch("w4");
+        let pending_path = scratch.root.join("pending.txt");
+        let mapped_path = scratch.root.join("mapped.txt");
+        fs::write(&pending_path, "The refund policy is waiting.\n").unwrap();
+        fs::write(&mapped_path, "The refund policy is stated here.\n").unwrap();
+        let wire = json!({
+            "kind": "createProject",
+            "proposalId": "c",
+            "title": "Cite",
+            "asks": [{ "text": "where is the refund policy", "kind": "question" }],
+            "sources": [
+                { "path": pending_path.display().to_string(), "quote": "refund policy" },
+                { "path": mapped_path.display().to_string(), "quote": "refund policy" },
+            ],
+        });
+        let proposal: Proposal = serde_json::from_value(wire).unwrap();
+        let created = route_project_with(&proposal, Tier::T1User, Some(&mut scratch.store), 1, &Silent).unwrap();
+        let id = created.detail.unwrap()["projectId"].as_str().unwrap().to_string();
+        map_it(&mut scratch, &id);
+        scratch.store.set_source_status(&id, "sr-1", SourceStatus::Pending, None).unwrap();
+        let result = select(&mut scratch, &id, "ak-1", Tier::T1User, &KeepJudge);
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        let detail = result.detail.unwrap();
+        assert_eq!(detail["pending"], json!(["sr-1"]));
+        let loci = scratch.store.loci(&id, None, Some(20)).unwrap();
+        assert_eq!(loci.len(), 1);
+        assert_eq!(loci[0].source_id, "sr-2");
+        assert_eq!(detail["locusIds"], json!([loci[0].locus_id]));
+        assert!(loci.iter().all(|locus| locus.source_id != "sr-1"));
+    }
+
+    #[test]
+    fn w6_two_pending_citation_sources_store_no_shared_locus() {
+        let mut scratch = scratch("w6");
+        let first = scratch.root.join("one.txt");
+        let second = scratch.root.join("two.txt");
+        fs::write(&first, "hollow men\n").unwrap();
+        fs::write(&second, "prufrock\n").unwrap();
+        let wire = json!({
+            "kind": "createProject",
+            "proposalId": "c",
+            "title": "Cite",
+            "asks": [{ "text": "symbolic language", "kind": "claim" }],
+            "sources": [
+                { "path": first.display().to_string(), "claim": "symbolic language" },
+                { "path": second.display().to_string(), "claim": "symbolic language" },
+            ],
+        });
+        let proposal: Proposal = serde_json::from_value(wire).unwrap();
+        let created = route_project_with(&proposal, Tier::T1User, Some(&mut scratch.store), 1, &Silent).unwrap();
+        let id = created.detail.unwrap()["projectId"].as_str().unwrap().to_string();
+        let result = select(&mut scratch, &id, "ak-1", Tier::T2Client, &KeepJudge);
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        let detail = result.detail.unwrap();
+        assert_eq!(detail["pending"], json!(["sr-1", "sr-2"]));
+        assert_eq!(detail["locusIds"].as_array().unwrap().len(), 0);
+        assert!(scratch.store.stored_locus_ids(&id).unwrap().is_empty());
+        let empty_id = project::locus_id("", 0, 0, "");
+        assert_eq!(empty_id, "lc-211494ba41a6a1bc");
+        let loci = fs::read_to_string(scratch.root.join("projects").join(&id).join("loci.jsonl")).unwrap_or_default();
+        assert!(!loci.contains(&empty_id));
     }
 
     #[test]
