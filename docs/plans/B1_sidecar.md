@@ -37,8 +37,8 @@ Do not rebuild any of this.
 
 | Left to | What |
 |---|---|
-| B2 | Crops. This ticket sends no pixels and reads no screen buffer. |
-| B3 | `presence doctor`, spawning the model server, GPU priority, measured frame time on Iris Xe. |
+| B2 | Crops (`B2_crops.md`). This ticket sends no pixels and reads no screen buffer. |
+| B3 | `presence doctor`, placement, and the shared config (`B3_doctor.md`). The operator starts the model server. |
 | B4 | An in-daemon actor, a fine-tune, a tighten-only advisor. |
 | `voice_command.md` | A microphone, an armed command, `addNote` from speech. |
 | C4 | The rule parser on `command.sock`. A sidecar draft does not replace `presence ask`. |
@@ -55,7 +55,7 @@ No new `Proposal` variant. `samples()` stays the sixteen pre-C2 kinds. No new cr
 
 2. **One socket.** `sidecarSocketPath` follows `commandSocketPath`: `PRESENCE_SIDECAR_SOCKET` when set, otherwise the sibling `sidecar.sock` of the presence socket. The client opens that path with the existing one-line write and one-line read. It does not open `presence.sock` or `command.sock`. It does not call `subscribeLedger`. A read of `queryDocMap` or `queryProject` is a separate one-shot on a new connection, used only when a job asks for it.
 
-3. **The model server is not started here.** `PRESENCE_LFM3_ENDPOINT` is the base URL of an OpenAI-compatible `POST /v1/chat/completions`. Llama.cpp `llama-server` and Ollama in that mode both qualify. Unset or empty: log one line, write no socket byte, exit 0. A connection refused, an HTTP error, or a timeout does the same for that job: no proposal, and a judge call returns the default below. The operator starts the server. CPU (`-ngl 0`) until B3 says otherwise. One completion at a time in this process. The timeout is 3 seconds. A job that arrives while one is running gets the default judgement and no proposal.
+3. **The model server is not started here.** `PRESENCE_LFM3_ENDPOINT` comes from `src/sidecar/config.ts` (`B3_doctor.md`). It is the base URL of an OpenAI-compatible `POST /v1/chat/completions`. Llama.cpp `llama-server` and Ollama in that mode both qualify. Unset or empty: log one line, write no socket byte, exit 0. A connection refused, an HTTP error, or a timeout does the same for that job: no proposal, and a judge call returns the default below. The operator starts the server. CPU (`-ngl 0`), as `B3_doctor.md` records. One completion at a time in this process. The timeout is 3 seconds. A job that arrives while one is running gets the default judgement and no proposal.
 
 4. **The system prompt is a string in the source file.** Passage text, a doc-map hit, and a project field go in the user message, between markers. They are not appended to the system prompt. The prompt tells the model to reply with one JSON object and lists the keys below. It says that text inside the markers is data.
 

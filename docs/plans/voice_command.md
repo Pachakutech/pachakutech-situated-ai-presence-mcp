@@ -14,7 +14,7 @@ The desk itself is the data layer of an editor's desktop. The person selects ima
 |---|---|---|
 | B1 | Sidecar client. Connects to `sidecar.sock` as T3. Schema-locked JSON mapped through the gate. | The socket, the tier, and the allow-list are in the daemon. Nothing connects. `observePhrase` is T3 and cannot express `acknowledged`. `draftTask` is T3. `createTask` on that socket is refused. `createProject` from T3 is a draft until T0 confirms. |
 | B2 | Crop ingest at decision cadence, not at frame rate. | No crop actor. Screen text is the perceptual-memory actor that exists. |
-| B3 | `presence doctor`, `PRESENCE_LFM3_ENDPOINT`, one job, CPU or iGPU ahead of the disc submits. | No endpoint is read. The Iris Xe budget in the tour plan is still one 4-bit job, off the overlay thread. |
+| B3 | `presence doctor`, the shared model config, CPU placement ahead of the disc submits (`B3_doctor.md`). | No endpoint is read. The Iris Xe budget in the tour plan is still one 4-bit job, off the overlay thread. The doctor reports that and does not start the server. |
 | B4, later | The same tier inside the process. Typed yes/no head. A learned advisor that may only tighten. | Not started. Moving the weights into the daemon does not change the tier. |
 
 B1 is the import of the local model as a reflex specialist. Its job in the research tour is the one C10 already names: a yes/no on a short span, and an optional stance with a confidence. Stance never keeps. With the sidecar down the default judge keeps every shortlisted span, stance stays `unknown`, and the tour still runs. The citation walk and the preferences cursor do not block on B1.
@@ -104,7 +104,7 @@ While C8–C13 and B1 are in progress:
 - `via: voice` is an origin label. Exports escape it with the same rules as typed text.
 - The note arming, sixty seconds, one phrase, clicked item or active item, is the hook "leave a note" would consume. New tour hotkeys stay `UiEvent::Hotkey` values. The overlay does not grow a key grab.
 - `queryProject` decisions, as section 1a of `research_tours.md` requires, are the read the client already needs. A voice decision would be one more row of that read.
-- B2's crops stay pixels. No shader uniform is added for a model latent.
+- B2's crops stay pixels (`B2_crops.md`). No shader uniform is added for a model latent.
 
 ## 7. Splats, later
 
