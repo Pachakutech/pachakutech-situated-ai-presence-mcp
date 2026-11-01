@@ -139,6 +139,16 @@ impl SocketServer {
         }
     }
 
+    /// Hands the map thread its channel. The overlay starts that thread.
+    pub fn take_map_ends(&self) -> Option<crate::map_worker::WorkerEnds> {
+        self.registry.lock().expect("registry mutex poisoned").take_map_ends()
+    }
+
+    /// Pending sources already stored. Called once after the project directory is open.
+    pub fn queue_pending_sources(&self) {
+        self.registry.lock().expect("registry mutex poisoned").queue_pending_sources();
+    }
+
     /// The watch file is attached after the registry exists. `Ledger::new` does not open it.
     pub fn attach_ledger_watch(&self, path: &str) {
         self.registry.lock().expect("registry mutex poisoned").ledger_mut().attach_watch(path);
@@ -503,6 +513,9 @@ fn dispatch(
     }
 
     if let Some(result) = reg.route_project_proposal(&proposal, tier, now_ms()) {
+        if result.status == "ok" {
+            reg.note_project_sources(&proposal, &result);
+        }
         return (result, false);
     }
 

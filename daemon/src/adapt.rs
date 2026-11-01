@@ -1,7 +1,9 @@
 //! Map one pending project source at a time into the C6 doc map.
 //! Citation facts come from the file or the page. A missing fact stays missing.
-//! This is not called from the socket pump or the overlay thread. It does not
-//! open a viewer and it does not emit a move.
+//! `map_pending` runs on the caller's thread. The socket pump and the overlay
+//! thread do not call it. Prepare fetches and writes the passage files. Apply
+//! records status and spawns nothing. This module does not open a viewer and
+//! it does not emit a move.
 
 use crate::docmap::{self, DocMap, IndexedPassage};
 use crate::intake::{self, BodyReply, Probe};
@@ -49,6 +51,23 @@ pub fn crossref_enabled() -> bool {
     std::env::var("PRESENCE_CROSSREF").ok().as_deref() == Some("1")
 }
 
+/// One source the worker can prepare without the project store.
+#[derive(Debug, Clone)]
+pub struct MapJob {
+    pub project_id: String,
+    pub source_id: String,
+    pub kind: SourceKind,
+    pub reference: String,
+    pub allow_private: bool,
+}
+
+/// Passage files are already on disk when this is `Mapped`.
+#[derive(Debug)]
+pub enum Prepared {
+    Mapped { doc_key: String, meta: CitationMeta },
+    Failed { reason: String },
+}
+
 /// Production entry. Reads `PRESENCE_CROSSREF` and does not run on the overlay thread.
 pub fn map_pending(
     store: &mut ProjectStore,
@@ -81,105 +100,117 @@ pub fn map_project(
         .map(|source| (source.source_id.clone(), source.kind, source.reference.clone()))
         .collect();
     for (source_id, kind, reference) in pending {
-        map_one(store, docmap, probe, crossref, project_id, &source_id, kind, &reference, allow_private, accessed, enrich)?;
+        let job = MapJob {
+            project_id: project_id.to_string(),
+            source_id: source_id.clone(),
+            kind,
+            reference,
+            allow_private,
+        };
+        let prepared = prepare(&job, docmap, probe, crossref, accessed, enrich)?;
+        apply(store, project_id, &source_id, prepared)?;
     }
     Ok(())
 }
 
-fn map_one(
-    store: &mut ProjectStore,
+/// Fetch, extract, and write passage files. The project store is not an argument.
+pub fn prepare(
+    job: &MapJob,
     docmap: &mut DocMap,
     probe: &dyn Probe,
     crossref: &dyn Crossref,
-    project_id: &str,
-    source_id: &str,
-    kind: SourceKind,
-    reference: &str,
-    allow_private: bool,
     accessed: &str,
     enrich: bool,
-) -> Result<(), &'static str> {
-    match kind {
-        SourceKind::Web => map_web(store, docmap, probe, crossref, project_id, source_id, reference, allow_private, accessed, enrich),
-        SourceKind::File => map_file(store, docmap, crossref, project_id, source_id, reference, accessed, enrich),
-        SourceKind::Dir => mark_failed(store, project_id, source_id, "no-text-layer"),
+) -> Result<Prepared, &'static str> {
+    match job.kind {
+        SourceKind::Web => map_web(docmap, probe, crossref, &job.reference, job.allow_private, accessed, enrich),
+        SourceKind::File => map_file(docmap, crossref, &job.reference, enrich),
+        SourceKind::Dir => Ok(Prepared::Failed { reason: "no-text-layer".to_string() }),
     }
 }
 
-fn map_file(
-    store: &mut ProjectStore,
-    docmap: &mut DocMap,
-    crossref: &dyn Crossref,
-    project_id: &str,
-    source_id: &str,
-    reference: &str,
-    _accessed: &str,
-    enrich: bool,
-) -> Result<(), &'static str> {
+/// Status write. A source that is no longer pending is left as it is.
+pub fn apply(store: &mut ProjectStore, project_id: &str, source_id: &str, prepared: Prepared) -> Result<(), &'static str> {
+    let still_pending = store
+        .get(project_id)
+        .and_then(|project| project.sources.iter().find(|source| source.source_id == source_id))
+        .is_some_and(|source| source.status == SourceStatus::Pending);
+    if !still_pending {
+        return Ok(());
+    }
+    match prepared {
+        Prepared::Mapped { doc_key, meta } => {
+            store.set_source_meta(project_id, source_id, Some(doc_key), meta).map_err(|err| err.as_wire())?;
+            store.set_source_status(project_id, source_id, SourceStatus::Mapped, None).map_err(|err| err.as_wire())
+        }
+        Prepared::Failed { reason } => {
+            store.set_source_status(project_id, source_id, SourceStatus::Failed, Some(reason)).map_err(|err| err.as_wire())
+        }
+    }
+}
+
+fn map_file(docmap: &mut DocMap, crossref: &dyn Crossref, reference: &str, enrich: bool) -> Result<Prepared, &'static str> {
     let path = Path::new(reference);
     let meta = match std::fs::metadata(path) {
         Ok(meta) => meta,
-        Err(_) => return mark_failed(store, project_id, source_id, "unreachable"),
+        Err(_) => return Ok(Prepared::Failed { reason: "unreachable".to_string() }),
     };
     if !meta.is_file() {
-        return mark_failed(store, project_id, source_id, "no-text-layer");
+        return Ok(Prepared::Failed { reason: "no-text-layer".to_string() });
     }
     if meta.len() > intake::MAX_BYTES {
-        return mark_failed(store, project_id, source_id, "oversize");
+        return Ok(Prepared::Failed { reason: "oversize".to_string() });
     }
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
-        Err(_) => return mark_failed(store, project_id, source_id, "unreachable"),
+        Err(_) => return Ok(Prepared::Failed { reason: "unreachable".to_string() }),
     };
     let key = docmap::sha256_hex(&bytes);
     let ext = path.extension().and_then(|ext| ext.to_str()).map(|ext| ext.to_ascii_lowercase());
     if ext.as_deref() == Some("pdf") {
-        return map_pdf(store, docmap, crossref, project_id, source_id, path, &bytes, &key, enrich);
+        return map_pdf(docmap, crossref, path, &bytes, &key, enrich);
     }
     let text = String::from_utf8_lossy(&bytes).into_owned();
     if matches!(ext.as_deref(), Some("html" | "htm" | "xhtml")) {
         let passages = match docmap::html_passages(&text) {
             Ok(passages) => passages,
-            Err(err) => return mark_failed(store, project_id, source_id, passage_reason(&err)),
+            Err(err) => return Ok(Prepared::Failed { reason: passage_reason(&err).to_string() }),
         };
         let mut citation = citation_from_html(&text);
         apply_crossref(&mut citation, enrich, crossref);
         docmap.write_if_absent(&key, "html", &passages).map_err(|_| "schema")?;
-        return mark_mapped(store, project_id, source_id, key, citation);
+        return Ok(Prepared::Mapped { doc_key: key, meta: citation });
     }
     let passages = match docmap::plain_passages(&text) {
         Ok(passages) => passages,
-        Err(err) => return mark_failed(store, project_id, source_id, passage_reason(&err)),
+        Err(err) => return Ok(Prepared::Failed { reason: passage_reason(&err).to_string() }),
     };
     docmap.write_if_absent(&key, "file", &passages).map_err(|_| "schema")?;
-    mark_mapped(store, project_id, source_id, key, CitationMeta::default())
+    Ok(Prepared::Mapped { doc_key: key, meta: CitationMeta::default() })
 }
 
 fn map_pdf(
-    store: &mut ProjectStore,
     docmap: &mut DocMap,
     crossref: &dyn Crossref,
-    project_id: &str,
-    source_id: &str,
     path: &Path,
     bytes: &[u8],
     key: &str,
     enrich: bool,
-) -> Result<(), &'static str> {
+) -> Result<Prepared, &'static str> {
     let extracted = match docmap::pdf_bbox_text(path) {
         Ok(text) if !text.trim().is_empty() => text,
-        Ok(_) => return mark_failed(store, project_id, source_id, "no-text-layer"),
+        Ok(_) => return Ok(Prepared::Failed { reason: "no-text-layer".to_string() }),
         Err(err) => {
             if err.contains("missing") {
                 eprintln!("[adapt] pdftotext missing");
             }
-            return mark_failed(store, project_id, source_id, "no-text-layer");
+            return Ok(Prepared::Failed { reason: "no-text-layer".to_string() });
         }
     };
     let passages = match docmap::bbox_passages(&extracted) {
         Ok(passages) if !passages.is_empty() => passages,
-        Ok(_) => return mark_failed(store, project_id, source_id, "no-text-layer"),
-        Err(err) => return mark_failed(store, project_id, source_id, passage_reason(&err)),
+        Ok(_) => return Ok(Prepared::Failed { reason: "no-text-layer".to_string() }),
+        Err(err) => return Ok(Prepared::Failed { reason: passage_reason(&err).to_string() }),
     };
     let mut citation = CitationMeta::default();
     let mut any = fill_patch(&mut citation, pdf_xmp(bytes));
@@ -195,33 +226,30 @@ fn map_pdf(
     }
     apply_crossref(&mut citation, enrich, crossref);
     docmap.write_if_absent(key, "pdf", &passages).map_err(|_| "schema")?;
-    mark_mapped(store, project_id, source_id, key.to_string(), citation)
+    Ok(Prepared::Mapped { doc_key: key.to_string(), meta: citation })
 }
 
 fn map_web(
-    store: &mut ProjectStore,
     docmap: &mut DocMap,
     probe: &dyn Probe,
     crossref: &dyn Crossref,
-    project_id: &str,
-    source_id: &str,
     reference: &str,
     allow_private: bool,
     accessed: &str,
     enrich: bool,
-) -> Result<(), &'static str> {
+) -> Result<Prepared, &'static str> {
     let fetched = match fetch_final(reference, allow_private, probe) {
         Ok(fetched) => fetched,
-        Err(reason) => return mark_failed(store, project_id, source_id, &reason),
+        Err(reason) => return Ok(Prepared::Failed { reason }),
     };
     if fetched.body.len() as u64 > intake::MAX_BYTES {
-        return mark_failed(store, project_id, source_id, "oversize");
+        return Ok(Prepared::Failed { reason: "oversize".to_string() });
     }
     let html = looks_html(fetched.content_type.as_deref(), &fetched.body);
     let passages = if html { docmap::html_passages(&fetched.body) } else { docmap::plain_passages(&fetched.body) };
     let passages = match passages {
         Ok(passages) => passages,
-        Err(err) => return mark_failed(store, project_id, source_id, passage_reason(&err)),
+        Err(err) => return Ok(Prepared::Failed { reason: passage_reason(&err).to_string() }),
     };
     let mut citation = if html { citation_from_html(&fetched.body) } else { CitationMeta::default() };
     if citation.url.is_none() {
@@ -238,7 +266,7 @@ fn map_web(
     let canonical = citation.canonical_url.clone().unwrap_or_else(|| fetched.final_url.clone());
     let key = url_doc_key(&fetched.body, &canonical);
     docmap.write_if_absent(&key, "url", &passages).map_err(|_| "schema")?;
-    mark_mapped(store, project_id, source_id, key, citation)
+    Ok(Prepared::Mapped { doc_key: key, meta: citation })
 }
 
 struct Fetched {
@@ -337,15 +365,6 @@ fn passage_reason(err: &str) -> &'static str {
     } else {
         "unreachable"
     }
-}
-
-fn mark_failed(store: &mut ProjectStore, project_id: &str, source_id: &str, reason: &str) -> Result<(), &'static str> {
-    store.set_source_status(project_id, source_id, SourceStatus::Failed, Some(reason.to_string())).map_err(|err| err.as_wire())
-}
-
-fn mark_mapped(store: &mut ProjectStore, project_id: &str, source_id: &str, doc_key: String, meta: CitationMeta) -> Result<(), &'static str> {
-    store.set_source_meta(project_id, source_id, Some(doc_key), meta).map_err(|err| err.as_wire())?;
-    store.set_source_status(project_id, source_id, SourceStatus::Mapped, None).map_err(|err| err.as_wire())
 }
 
 fn apply_crossref(meta: &mut CitationMeta, enrich: bool, crossref: &dyn Crossref) {

@@ -16,6 +16,7 @@ mod task;
 mod docmap;
 mod intake;
 mod adapt;
+mod map_worker;
 mod select;
 mod tour;
 mod project;

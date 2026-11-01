@@ -785,6 +785,10 @@ impl ProjectStore {
         self.projects.get(id).map(|loaded| &loaded.project)
     }
 
+    pub fn projects(&self) -> Vec<&Project> {
+        self.projects.values().map(|loaded| &loaded.project).collect()
+    }
+
     pub fn stored_locus_ids(&self, id: &str) -> Result<Vec<String>, StoreError> {
         let loaded = self.projects.get(id).ok_or(StoreError::NoSuchProject)?;
         Ok(loaded.loci.iter().map(|row| row.locus.locus_id.clone()).collect())
