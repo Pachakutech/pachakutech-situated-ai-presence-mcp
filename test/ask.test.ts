@@ -222,14 +222,14 @@ test("P10 thirteen quoted spans writes nothing and prints schema", async () => {
   assert.deepEqual(lines, ["schema"]);
 });
 
-test("P11 hotkey enum is the tour keys plus Note, and overlay has no get_keyboard", () => {
+test("P11 hotkey enum is the tour keys plus Note and ConfirmProject, and overlay has no get_keyboard", () => {
   const ui = readFileSync(join(root, "daemon/src/ui_input.rs"), "utf8");
   const start = ui.indexOf("pub enum Hotkey {");
   assert.ok(start >= 0);
   const end = ui.indexOf("}", start);
   const body = ui.slice(start, end);
   const names = [...body.matchAll(/^\s*([A-Z][A-Za-z0-9]+),/gm)].map((m) => m[1]);
-  assert.deepEqual(names, ["Ack", "Stop", "Skip", "Back", "Pause", "Resume", "Start", "Note"]);
+  assert.deepEqual(names, ["Ack", "Stop", "Skip", "Back", "Pause", "Resume", "Start", "Note", "ConfirmProject"]);
   assert.equal(body.includes("Ordinary"), false);
   const overlay = readFileSync(join(root, "daemon/src/overlay.rs"), "utf8");
   assert.equal(overlay.includes("get_keyboard"), false);

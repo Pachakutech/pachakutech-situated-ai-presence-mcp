@@ -3,9 +3,11 @@
 //! Nothing here moves a page.
 
 use crate::gate::Tier;
+use crate::intake::{self, Probe};
 use crate::ledger::{LedgerEvent, LedgerKind, ViewedTier};
 use crate::note_text::{self, NoteFact, NoteFlags};
-use crate::protocol::{CreateProjectBody, ProjectAskKind, ProjectSourceIn, Proposal, ProposalResult, QueryProjectBody};
+use crate::protocol::{AddSourcesBody, ConfirmProjectBody, CreateProjectBody, ProjectAskKind, Proposal, ProposalResult, QueryProjectBody};
+use crate::ui_input::Hotkey;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -171,6 +173,11 @@ pub struct Source {
     pub status: SourceStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Kept for a later citation walk. Intake does not read them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quote: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -193,6 +200,9 @@ pub struct Project {
     pub sources: Vec<Source>,
     pub cursor: Cursor,
     pub granted_roots: Vec<String>,
+    /// Set by T1. A loopback or private URL is checked only when this is set.
+    #[serde(default)]
+    pub allow_private_network: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -304,6 +314,15 @@ pub struct SourceInput {
     pub reference: String,
 }
 
+struct PreparedSource {
+    kind: SourceKind,
+    reference: String,
+    status: SourceStatus,
+    reason: Option<String>,
+    claim: Option<String>,
+    quote: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct LocusInput {
     pub source_id: String,
@@ -390,8 +409,32 @@ impl ProjectStore {
         granted_roots: &[String],
         now_ms: u64,
     ) -> Result<String, StoreError> {
+        let prepared = sources
+            .iter()
+            .map(|source| PreparedSource {
+                kind: source.kind,
+                reference: source.reference.clone(),
+                status: SourceStatus::Pending,
+                reason: None,
+                claim: None,
+                quote: None,
+            })
+            .collect::<Vec<_>>();
+        self.write_new(by, title, asks, &prepared, granted_roots, false, now_ms)
+    }
+
+    fn write_new(
+        &mut self,
+        by: Tier,
+        title: &str,
+        asks: &[AskInput],
+        sources: &[PreparedSource],
+        granted_roots: &[String],
+        allow_private: bool,
+        now_ms: u64,
+    ) -> Result<String, StoreError> {
         let draft = match by {
-            Tier::T1User => false,
+            Tier::T1User | Tier::T2Client => false,
             Tier::T3Sidecar => true,
             _ => return Err(StoreError::NotAllowed),
         };
@@ -434,21 +477,10 @@ impl ProjectStore {
                     kind: ask.kind,
                 })
                 .collect(),
-            sources: sources
-                .iter()
-                .enumerate()
-                .map(|(index, source)| Source {
-                    source_id: format!("sr-{}", index + 1),
-                    kind: source.kind,
-                    reference: source.reference.clone(),
-                    doc_key: None,
-                    meta: CitationMeta::default(),
-                    status: SourceStatus::Pending,
-                    reason: None,
-                })
-                .collect(),
+            sources: source_records(sources),
             cursor: Cursor { source_index: 0, locus_id: None, updated_at: now_ms },
             granted_roots: granted_roots.to_vec(),
+            allow_private_network: allow_private && !draft,
         };
         if let Err(err) = write_project_dir(&dir, &project) {
             let _ = fs::remove_dir_all(&dir);
@@ -470,6 +502,21 @@ impl ProjectStore {
     }
 
     pub fn add_sources(&mut self, id: &str, sources: &[SourceInput]) -> Result<Vec<String>, StoreError> {
+        let prepared = sources
+            .iter()
+            .map(|source| PreparedSource {
+                kind: source.kind,
+                reference: source.reference.clone(),
+                status: SourceStatus::Pending,
+                reason: None,
+                claim: None,
+                quote: None,
+            })
+            .collect::<Vec<_>>();
+        self.add_prepared(id, &prepared)
+    }
+
+    fn add_prepared(&mut self, id: &str, sources: &[PreparedSource]) -> Result<Vec<String>, StoreError> {
         self.ensure(id)?;
         if sources.is_empty() {
             return Err(StoreError::Schema);
@@ -484,23 +531,53 @@ impl ProjectStore {
             return Err(StoreError::QuotaSources);
         }
         let start = loaded.project.sources.len();
-        let mut ids = Vec::new();
-        for (offset, source) in sources.iter().enumerate() {
-            let source_id = format!("sr-{}", start + offset + 1);
-            ids.push(source_id.clone());
-            let loaded = self.projects.get_mut(id).ok_or(StoreError::NoSuchProject)?;
-            loaded.project.sources.push(Source {
-                source_id,
-                kind: source.kind,
-                reference: source.reference.clone(),
-                doc_key: None,
-                meta: CitationMeta::default(),
-                status: SourceStatus::Pending,
-                reason: None,
-            });
+        let mut records = source_records(sources);
+        for (offset, source) in records.iter_mut().enumerate() {
+            source.source_id = format!("sr-{}", start + offset + 1);
         }
+        let ids = records.iter().map(|source| source.source_id.clone()).collect();
+        self.projects.get_mut(id).ok_or(StoreError::NoSuchProject)?.project.sources.extend(records);
         self.rewrite(id)?;
         Ok(ids)
+    }
+
+    fn activate_draft(&mut self, id: &str, sources: &[PreparedSource]) -> Result<(), StoreError> {
+        self.ensure(id)?;
+        if sources.len() > SOURCE_CAP {
+            return Err(StoreError::QuotaSources);
+        }
+        for source in sources {
+            if source.reference.is_empty() || source.reference.chars().count() > REF_CAP {
+                return Err(StoreError::Schema);
+            }
+        }
+        {
+            let loaded = self.projects.get_mut(id).ok_or(StoreError::NoSuchProject)?;
+            if !loaded.project.draft {
+                return Err(StoreError::Schema);
+            }
+            loaded.project.draft = false;
+            loaded.project.sources = source_records(sources);
+        }
+        self.rewrite(id)
+    }
+
+    fn oldest_draft_id(&self) -> Option<String> {
+        self.projects
+            .values()
+            .filter(|loaded| loaded.project.draft)
+            .min_by(|left, right| {
+                left.project.created_at.cmp(&right.project.created_at).then_with(|| left.project.project_id.cmp(&right.project.project_id))
+            })
+            .map(|loaded| loaded.project.project_id.clone())
+    }
+
+    pub fn confirm_hotkey(&mut self, hotkey: Hotkey, probe: &dyn Probe, _now_ms: u64) -> bool {
+        if hotkey != Hotkey::ConfirmProject {
+            return false;
+        }
+        let Some(id) = self.oldest_draft_id() else { return false };
+        confirm_id(self, &id, probe).is_ok()
     }
 
     pub fn set_source_status(&mut self, id: &str, source_id: &str, status: SourceStatus, reason: Option<String>) -> Result<(), StoreError> {
@@ -836,41 +913,182 @@ impl ProjectStore {
 }
 
 pub fn route_project(proposal: &Proposal, tier: Tier, store: Option<&mut ProjectStore>, now_ms: u64) -> Option<ProposalResult> {
+    route_project_with(proposal, tier, store, now_ms, &intake::LiveProbe)
+}
+
+pub fn route_project_with(
+    proposal: &Proposal,
+    tier: Tier,
+    store: Option<&mut ProjectStore>,
+    now_ms: u64,
+    probe: &dyn Probe,
+) -> Option<ProposalResult> {
     match proposal {
-        Proposal::CreateProject(body) => Some(route_create(tier, store, body, now_ms)),
+        Proposal::CreateProject(body) => Some(route_create(tier, store, body, now_ms, probe)),
+        Proposal::AddSources(body) => Some(route_add(tier, store, body, probe)),
+        Proposal::ConfirmProject(body) => Some(route_confirm(tier, store, body, probe)),
         Proposal::QueryProject(body) => Some(route_query(tier, store, body)),
         _ => None,
     }
 }
 
-fn route_create(tier: Tier, store: Option<&mut ProjectStore>, body: &CreateProjectBody, now_ms: u64) -> ProposalResult {
-    if !matches!(tier, Tier::T1User | Tier::T3Sidecar) {
+fn route_create(tier: Tier, store: Option<&mut ProjectStore>, body: &CreateProjectBody, now_ms: u64, probe: &dyn Probe) -> ProposalResult {
+    if !matches!(tier, Tier::T1User | Tier::T2Client | Tier::T3Sidecar) {
         return ProposalResult::err(&body.proposal_id, "not_allowed_for_tier:createProject");
     }
     let Some(store) = store else {
         return ProposalResult::err(&body.proposal_id, "projects_unavailable");
     };
-    let mut asks = Vec::new();
-    for ask in &body.asks {
-        match ask_input(ask) {
-            Ok(ask) => asks.push(ask),
+    let asks = match ask_list(&body.asks) {
+        Ok(asks) => asks,
+        Err(err) => return ProposalResult::err(&body.proposal_id, err.as_wire()),
+    };
+    if tier == Tier::T3Sidecar {
+        let prepared = match intake::shape_draft(&body.sources) {
+            Ok(rows) => rows.into_iter().map(prepared_from).collect::<Vec<_>>(),
             Err(err) => return ProposalResult::err(&body.proposal_id, err.as_wire()),
+        };
+        return finish_create(store, tier, &body.title, &asks, &prepared, &[], false, now_ms, &body.proposal_id);
+    }
+    if tier == Tier::T2Client && (body.allow_private_network.is_some() || body.granted_roots.is_some()) {
+        return ProposalResult::err(&body.proposal_id, "schema");
+    }
+    let allow_private = tier == Tier::T1User && body.allow_private_network == Some(true);
+    let mut roots = Vec::new();
+    if tier == Tier::T1User {
+        for root in body.granted_roots.clone().unwrap_or_default() {
+            match intake::canon_dir(&root) {
+                Ok(path) => roots.push(path),
+                Err(err) => return ProposalResult::err(&body.proposal_id, err.as_wire()),
+            }
         }
     }
-    let mut sources = Vec::new();
-    for source in &body.sources {
-        match source_input(source) {
-            Ok(source) => sources.push(source),
-            Err(err) => return ProposalResult::err(&body.proposal_id, err.as_wire()),
-        }
+    let role = if tier == Tier::T2Client { intake::Role::T2 } else { intake::Role::T1 };
+    let prepared = match intake::check_wire(role, &body.sources, &roots, allow_private, 0, probe) {
+        Ok(rows) => rows.into_iter().map(prepared_from).collect::<Vec<_>>(),
+        Err(err) => return ProposalResult::err(&body.proposal_id, err.as_wire()),
+    };
+    finish_create(store, tier, &body.title, &asks, &prepared, &roots, allow_private, now_ms, &body.proposal_id)
+}
+
+fn route_add(tier: Tier, store: Option<&mut ProjectStore>, body: &AddSourcesBody, probe: &dyn Probe) -> ProposalResult {
+    if !matches!(tier, Tier::T1User | Tier::T2Client) {
+        return ProposalResult::err(&body.proposal_id, "not_allowed_for_tier:addSources");
     }
-    match store.create(tier, &body.title, &asks, &sources, &body.granted_roots, now_ms) {
-        Ok(project_id) => {
-            let draft = store.get(&project_id).is_some_and(|project| project.draft);
-            ProposalResult::ok(&body.proposal_id, Some(json!({ "projectId": project_id, "draft": draft })))
-        }
+    let Some(store) = store else {
+        return ProposalResult::err(&body.proposal_id, "projects_unavailable");
+    };
+    let Some(project) = store.get(&body.project_id).cloned() else {
+        return ProposalResult::err(&body.proposal_id, StoreError::NoSuchProject.as_wire());
+    };
+    if project.draft {
+        return ProposalResult::err(&body.proposal_id, StoreError::DraftUnconfirmed.as_wire());
+    }
+    let role = if tier == Tier::T2Client { intake::Role::T2 } else { intake::Role::T1 };
+    let prepared = match intake::check_wire(role, &body.sources, &project.granted_roots, project.allow_private_network, project.sources.len(), probe) {
+        Ok(rows) => rows.into_iter().map(prepared_from).collect::<Vec<_>>(),
+        Err(err) => return ProposalResult::err(&body.proposal_id, err.as_wire()),
+    };
+    match store.add_prepared(&body.project_id, &prepared) {
+        Ok(ids) => ProposalResult::ok(&body.proposal_id, Some(json!({ "projectId": body.project_id, "sourceIds": ids }))),
         Err(err) => ProposalResult::err(&body.proposal_id, err.as_wire()),
     }
+}
+
+fn route_confirm(tier: Tier, store: Option<&mut ProjectStore>, body: &ConfirmProjectBody, probe: &dyn Probe) -> ProposalResult {
+    if tier != Tier::T1User {
+        return ProposalResult::err(&body.proposal_id, "not_allowed_for_tier:confirmProject");
+    }
+    let Some(store) = store else {
+        return ProposalResult::err(&body.proposal_id, "projects_unavailable");
+    };
+    match confirm_id(store, &body.project_id, probe) {
+        Ok(()) => ProposalResult::ok(&body.proposal_id, Some(json!({ "projectId": body.project_id, "draft": false }))),
+        Err(err) => ProposalResult::err(&body.proposal_id, err),
+    }
+}
+
+fn finish_create(
+    store: &mut ProjectStore,
+    tier: Tier,
+    title: &str,
+    asks: &[AskInput],
+    sources: &[PreparedSource],
+    roots: &[String],
+    allow_private: bool,
+    now_ms: u64,
+    proposal_id: &str,
+) -> ProposalResult {
+    match store.write_new(tier, title, asks, sources, roots, allow_private, now_ms) {
+        Ok(project_id) => {
+            let draft = store.get(&project_id).is_some_and(|project| project.draft);
+            ProposalResult::ok(proposal_id, Some(json!({ "projectId": project_id, "draft": draft })))
+        }
+        Err(err) => ProposalResult::err(proposal_id, err.as_wire()),
+    }
+}
+
+fn confirm_id(store: &mut ProjectStore, id: &str, probe: &dyn Probe) -> Result<(), &'static str> {
+    let Some(project) = store.get(id).cloned() else {
+        return Err(StoreError::NoSuchProject.as_wire());
+    };
+    if !project.draft {
+        return Err(StoreError::Schema.as_wire());
+    }
+    let items = project
+        .sources
+        .iter()
+        .map(|source| match source.kind {
+            SourceKind::Web => intake::Item::Url { url: source.reference.clone(), claim: source.claim.clone(), quote: source.quote.clone() },
+            SourceKind::File => intake::Item::Path { path: source.reference.clone(), claim: source.claim.clone(), quote: source.quote.clone() },
+            SourceKind::Dir => intake::Item::Dir { path: source.reference.clone() },
+        })
+        .collect::<Vec<_>>();
+    let prepared = intake::check_items(intake::Role::T1, &items, &project.granted_roots, project.allow_private_network, 0, probe)
+        .map_err(intake::CheckError::as_wire)?;
+    let rows = prepared.into_iter().map(prepared_from).collect::<Vec<_>>();
+    store.activate_draft(id, &rows).map_err(StoreError::as_wire)
+}
+
+fn ask_list(asks: &[crate::protocol::ProjectAskIn]) -> Result<Vec<AskInput>, StoreError> {
+    let mut out = Vec::with_capacity(asks.len());
+    for ask in asks {
+        out.push(ask_input(ask)?);
+    }
+    Ok(out)
+}
+
+fn prepared_from(row: intake::Prepared) -> PreparedSource {
+    PreparedSource {
+        kind: match row.class {
+            intake::SourceClass::Web => SourceKind::Web,
+            intake::SourceClass::File => SourceKind::File,
+            intake::SourceClass::Dir => SourceKind::Dir,
+        },
+        reference: row.reference,
+        status: if row.reason.is_some() { SourceStatus::Failed } else { SourceStatus::Pending },
+        reason: row.reason.map(str::to_string),
+        claim: row.claim,
+        quote: row.quote,
+    }
+}
+
+fn source_records(sources: &[PreparedSource]) -> Vec<Source> {
+    sources
+        .iter()
+        .enumerate()
+        .map(|(index, source)| Source {
+            source_id: format!("sr-{}", index + 1),
+            kind: source.kind,
+            reference: source.reference.clone(),
+            doc_key: None,
+            meta: CitationMeta::default(),
+            status: source.status,
+            reason: if source.status == SourceStatus::Failed { source.reason.clone() } else { None },
+            claim: source.claim.clone(),
+            quote: source.quote.clone(),
+        })
+        .collect()
 }
 
 fn route_query(tier: Tier, store: Option<&mut ProjectStore>, body: &QueryProjectBody) -> ProposalResult {
@@ -895,27 +1113,6 @@ fn ask_input(ask: &crate::protocol::ProjectAskIn) -> Result<AskInput, StoreError
         ProjectAskKind::Question => AskKind::Question,
     };
     Ok(AskInput { text: ask.text.clone(), kind })
-}
-
-fn source_input(source: &ProjectSourceIn) -> Result<SourceInput, StoreError> {
-    let mut found = Vec::new();
-    if let Some(url) = &source.url {
-        found.push((SourceKind::Web, url.clone()));
-    }
-    if let Some(path) = &source.path {
-        found.push((SourceKind::File, path.clone()));
-    }
-    if let Some(dir) = &source.dir {
-        found.push((SourceKind::Dir, dir.clone()));
-    }
-    if found.len() != 1 {
-        return Err(StoreError::Schema);
-    }
-    let (kind, reference) = found.remove(0);
-    if reference.is_empty() || reference.chars().count() > REF_CAP {
-        return Err(StoreError::Schema);
-    }
-    Ok(SourceInput { kind, reference })
 }
 
 fn keep_for(events: &[&ProjectEvent], tasks: &[TaskRec], locus: &Locus, via: KeepVia) -> Option<Keep> {
@@ -1791,17 +1988,22 @@ mod tests {
     fn create_project_tiers() {
         let tmp = scratch("s15");
         let mut store = ProjectStore::open(&tmp.0).unwrap();
-        let proposal = parse(r#"{"kind":"createProject","proposalId":"c","title":"Tiers","asks":[],"sources":[{"path":"a.txt"}]}"#);
-        let denied = gate::check(Tier::T2Client, &proposal).unwrap_err();
-        assert_eq!(denied.error.as_deref(), Some("not_allowed_for_tier:createProject"));
+        let file = tmp.0.join("a.txt");
+        fs::write(&file, b"hello").unwrap();
+        let proposal = parse(&format!(
+            r#"{{"kind":"createProject","proposalId":"c","title":"Tiers","asks":[],"sources":[{{"path":"{}"}}]}}"#,
+            file.display()
+        ));
+        assert!(gate::check(Tier::T2Client, &proposal).is_ok());
         let routed = route_project(&proposal, Tier::T2Client, Some(&mut store), 1).unwrap();
-        assert_eq!(routed.error.as_deref(), Some("not_allowed_for_tier:createProject"));
-        assert_eq!(store.create(Tier::T2Client, "Tiers", &[], &[], &[], 1).unwrap_err(), StoreError::NotAllowed);
-        assert_eq!(fs::read_dir(&tmp.0).unwrap().count(), 0);
+        assert_eq!(routed.error.as_deref(), Some("path_not_in_granted_root"));
+        assert_eq!(fs::read_dir(&tmp.0).unwrap().filter(|entry| entry.as_ref().unwrap().path().is_dir()).count(), 0);
+        let t2 = store.create(Tier::T2Client, "Direct", &[], &[], &[], 1).unwrap();
+        assert!(!store.get(&t2).unwrap().draft);
         let t1 = route_project(&proposal, Tier::T1User, Some(&mut store), 2).unwrap();
         assert_eq!(t1.status, "ok", "{:?}", t1.error);
         assert_eq!(t1.detail.unwrap()["draft"], false);
-        let t3_body = parse(r#"{"kind":"createProject","proposalId":"d","title":"Draft","asks":[],"sources":[{"path":"a.txt"}]}"#);
+        let t3_body = parse(r#"{"kind":"createProject","proposalId":"d","title":"Draft","asks":[],"sources":[{"path":"/no/such/intake-file"}]}"#);
         let t3 = route_project(&t3_body, Tier::T3Sidecar, Some(&mut store), 3).unwrap();
         assert_eq!(t3.status, "ok", "{:?}", t3.error);
         let detail = t3.detail.unwrap();

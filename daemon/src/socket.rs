@@ -566,7 +566,9 @@ fn dispatch(
         | Proposal::ResolveItem(_)
         | Proposal::TourSignal(_) => ProposalResult::err(&proposal_id, "unrouted task proposal"),
         Proposal::BuildDocMap(_) | Proposal::QueryDocMap(_) => ProposalResult::err(&proposal_id, "unrouted docmap proposal"),
-        Proposal::CreateProject(_) | Proposal::QueryProject(_) => ProposalResult::err(&proposal_id, "unrouted project proposal"),
+        Proposal::CreateProject(_) | Proposal::AddSources(_) | Proposal::ConfirmProject(_) | Proposal::QueryProject(_) => {
+            ProposalResult::err(&proposal_id, "unrouted project proposal")
+        }
         Proposal::AddNote(_) | Proposal::DeleteNote(_) => ProposalResult::err(&proposal_id, "unrouted note proposal"),
     };
     (result, false)

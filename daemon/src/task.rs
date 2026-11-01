@@ -339,6 +339,8 @@ impl TaskBook {
             UiEvent::Hotkey(Hotkey::Resume) => self.resume_active(ledger, now_ms),
             UiEvent::Hotkey(Hotkey::Start) => self.confirm_start(),
             UiEvent::Hotkey(Hotkey::Note) => self.hotkey_note(ledger, now_ms),
+            // Project confirm is applied on the project store. Start still promotes a task.
+            UiEvent::Hotkey(Hotkey::ConfirmProject) => false,
             UiEvent::ArmNote { .. } | UiEvent::Acknowledge { .. } | UiEvent::Uncheck { .. } | UiEvent::Approve { .. } | UiEvent::Discard { .. } => false,
         }
     }

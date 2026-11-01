@@ -35,6 +35,7 @@ pub enum Hotkey {
     Resume,
     Start,
     Note,
+    ConfirmProject,
 }
 
 pub enum UiEvent {

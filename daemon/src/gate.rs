@@ -59,8 +59,10 @@ pub fn allowed(tier: Tier, proposal: &Proposal) -> bool {
         Proposal::ResolveItem(_) | Proposal::TourSignal(_) => matches!(tier, Tier::T1User | Tier::T2Client),
         Proposal::BuildDocMap(_) => matches!(tier, Tier::T1User | Tier::T2Client),
         Proposal::QueryDocMap(_) => matches!(tier, Tier::T1User | Tier::T2Client | Tier::T3Sidecar),
-        // T2 create waits for C8. T3 is stored as a draft by the handler.
-        Proposal::CreateProject(_) => matches!(tier, Tier::T1User | Tier::T3Sidecar),
+        // T2 is checked in the handler: public URLs, and a path only under a T1 root.
+        Proposal::CreateProject(_) => matches!(tier, Tier::T1User | Tier::T2Client | Tier::T3Sidecar),
+        Proposal::AddSources(_) => matches!(tier, Tier::T1User | Tier::T2Client),
+        Proposal::ConfirmProject(_) => matches!(tier, Tier::T1User),
         Proposal::QueryProject(_) => matches!(tier, Tier::T1User | Tier::T2Client | Tier::T3Sidecar),
         Proposal::AddNote(_) | Proposal::DeleteNote(_) => matches!(tier, Tier::T1User),
     }
@@ -297,7 +299,9 @@ mod tests {
             let t2 = allowed(Tier::T2Client, &proposal);
             let t3 = allowed(Tier::T3Sidecar, &proposal);
             match kind {
-                "createProject" => assert!(t1 && !t2 && t3, "{kind}"),
+                "createProject" => assert!(t1 && t2 && t3, "{kind}"),
+                "addSources" => assert!(t1 && t2 && !t3, "{kind}"),
+                "confirmProject" => assert!(t1 && !t2 && !t3, "{kind}"),
                 "queryProject" => assert!(t1 && t2 && t3, "{kind}"),
                 other => panic!("unexpected project kind {other}"),
             }
@@ -336,6 +340,14 @@ mod tests {
             (
                 r#"{"kind":"createProject","proposalId":"c","title":"t","asks":[],"sources":[]}"#,
                 "createProject",
+            ),
+            (
+                r#"{"kind":"addSources","proposalId":"a","projectId":"pj-0123456789abcdef","sources":[{"url":"https://example.com/a"}]}"#,
+                "addSources",
+            ),
+            (
+                r#"{"kind":"confirmProject","proposalId":"k","projectId":"pj-0123456789abcdef"}"#,
+                "confirmProject",
             ),
             (
                 r#"{"kind":"queryProject","proposalId":"q","projectId":"pj-0123456789abcdef"}"#,
