@@ -72,9 +72,29 @@ pub enum PdfReply {
     NoText,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PageBody {
+    pub status: u16,
+    pub content_type: Option<String>,
+    pub location: Option<String>,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BodyReply {
+    Page(PageBody),
+    Unreachable,
+    Oversize,
+}
+
 pub trait Probe {
     fn fetch(&self, url: &str) -> FetchReply;
     fn pdf_first_page(&self, path: &Path) -> PdfReply;
+    /// The page body. Intake checks use [`Probe::fetch`] and discard the body.
+    fn fetch_body(&self, url: &str) -> BodyReply {
+        let _ = url;
+        BodyReply::Unreachable
+    }
 }
 
 pub struct LiveProbe;
@@ -128,6 +148,60 @@ impl Probe for LiveProbe {
         } else {
             PdfReply::NoText
         }
+    }
+
+    fn fetch_body(&self, url: &str) -> BodyReply {
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+        let dir = std::env::temp_dir();
+        let headers_path = dir.join(format!("presence-curl-h-{}-{stamp}", std::process::id()));
+        let body_path = dir.join(format!("presence-curl-b-{}-{stamp}", std::process::id()));
+        let _headers = TempFile(&headers_path);
+        let _body = TempFile(&body_path);
+        let output = Command::new("curl")
+            .args([
+                "-sS",
+                "-D",
+                headers_path.to_str().unwrap_or(""),
+                "-o",
+                body_path.to_str().unwrap_or(""),
+                "--max-redirs",
+                "0",
+                "--max-filesize",
+                "52428800",
+                "--max-time",
+                "20",
+                "--proto",
+                "=http,https",
+                "--url",
+            ])
+            .arg(url)
+            .output();
+        let Ok(output) = output else {
+            return BodyReply::Unreachable;
+        };
+        let header_text = std::fs::read_to_string(&headers_path).unwrap_or_default();
+        let (status, content_length, location, content_type) = parse_curl_body_headers(&header_text);
+        let over = output.status.code() == Some(63) || content_length.is_some_and(|len| len > MAX_BYTES);
+        if over {
+            return BodyReply::Oversize;
+        }
+        if status == 0 {
+            return BodyReply::Unreachable;
+        }
+        let len = std::fs::metadata(&body_path).map(|meta| meta.len()).unwrap_or(0);
+        if len > MAX_BYTES {
+            return BodyReply::Oversize;
+        }
+        let body = std::fs::read(&body_path).map(|bytes| String::from_utf8_lossy(&bytes).into_owned()).unwrap_or_default();
+        BodyReply::Page(PageBody { status, content_type, location, body })
+    }
+}
+
+struct TempFile<'a>(&'a Path);
+
+impl Drop for TempFile<'_> {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(self.0);
     }
 }
 
@@ -339,7 +413,7 @@ fn fetch_url(start: &str, allow_private: bool, probe: &dyn Probe) -> Result<Opti
     Ok(Some("unreachable"))
 }
 
-fn resolve_redirect(current: &str, location: &str) -> Result<String, CheckError> {
+pub(crate) fn resolve_redirect(current: &str, location: &str) -> Result<String, CheckError> {
     let location = location.trim();
     if location.is_empty() || location.chars().count() > REF_CAP {
         return Err(CheckError::UrlNotAllowed);
@@ -366,7 +440,7 @@ fn resolve_redirect(current: &str, location: &str) -> Result<String, CheckError>
     Ok(format!("{origin}{prefix}{location}"))
 }
 
-fn url_allowed(raw: &str, allow_private: bool) -> bool {
+pub(crate) fn url_allowed(raw: &str, allow_private: bool) -> bool {
     if raw.is_empty() || raw.chars().count() > REF_CAP {
         return false;
     }
@@ -483,6 +557,31 @@ fn optional_text(value: Option<&str>) -> Result<Option<String>, CheckError> {
         Some(text) if text.chars().count() > TEXT_CAP => Err(CheckError::Schema),
         Some(text) => Ok(Some(text.to_string())),
     }
+}
+
+fn parse_curl_body_headers(text: &str) -> (u16, Option<u64>, Option<String>, Option<String>) {
+    let mut status = 0u16;
+    let mut length = None;
+    let mut location = None;
+    let mut content_type = None;
+    for line in text.lines() {
+        let line = line.trim_end_matches('\r');
+        if let Some(rest) = line.strip_prefix("HTTP/") {
+            status = rest.split_whitespace().nth(1).and_then(|code| code.parse().ok()).unwrap_or(0);
+            length = None;
+            location = None;
+            content_type = None;
+        } else if let Some((name, value)) = line.split_once(':') {
+            if name.eq_ignore_ascii_case("content-length") {
+                length = value.trim().parse().ok();
+            } else if name.eq_ignore_ascii_case("location") {
+                location = Some(value.trim().to_string());
+            } else if name.eq_ignore_ascii_case("content-type") {
+                content_type = Some(value.trim().to_string());
+            }
+        }
+    }
+    (status, length, location, content_type)
 }
 
 fn parse_curl_headers(text: &str) -> (u16, Option<u64>, Option<String>) {

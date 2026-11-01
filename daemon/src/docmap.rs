@@ -1,5 +1,7 @@
-//! Passage index for one file the user named. The map is document text.
+//! Passage index for one document the user named. The map is document text.
 //! It does not create a task, write the ledger, or produce a move.
+//! A project adapter writes a `url` map and PDF bbox line numbers into this
+//! same directory. `buildDocMap` still answers `schema` for a url source.
 
 use crate::gate::Tier;
 use crate::protocol::{DocSource, Proposal, ProposalResult};
@@ -85,10 +87,11 @@ impl DocMap {
             return Ok(json!({ "docKey": key, "passages": n }));
         }
         let passages = match which {
-            Which::Plain => passages_from_plain(&String::from_utf8_lossy(&bytes))?,
-            Which::Html => passages_from_html(&String::from_utf8_lossy(&bytes))?,
-            Which::Pdf => passages_from_pdf_text(&pdftotext_to_string("pdftotext", &canon)?)?,
+            Which::Plain => passages_from_plain(&String::from_utf8_lossy(&bytes)),
+            Which::Html => passages_from_html(&String::from_utf8_lossy(&bytes)),
+            Which::Pdf => pdftotext_to_string("pdftotext", &canon).and_then(|text| passages_from_pdf_text(&text)),
         };
+        let passages = passages.map_err(build_err)?;
         self.store(&key, kind_name, &passages)?;
         Ok(json!({ "docKey": key, "passages": passages.len() }))
     }
@@ -153,6 +156,49 @@ impl DocMap {
         atomic_write(&dir, "meta.json", meta.to_string().as_bytes())?;
         Ok(())
     }
+
+    pub fn has_map(&self, key: &str) -> bool {
+        valid_doc_key(key) && self.root.join(key).join("meta.json").is_file() && self.root.join(key).join("passages.jsonl").is_file()
+    }
+
+    pub fn read_passages(&self, key: &str) -> Result<Vec<IndexedPassage>, String> {
+        if !valid_doc_key(key) {
+            return Err("schema".to_string());
+        }
+        let path = self.root.join(key).join("passages.jsonl");
+        let raw = fs::read_to_string(&path).map_err(|_| "no_such_doc".to_string())?;
+        let mut out = Vec::new();
+        for line in raw.lines() {
+            if line.is_empty() {
+                continue;
+            }
+            let value: Value = serde_json::from_str(line).map_err(|_| "schema".to_string())?;
+            out.push(IndexedPassage {
+                passage_id: json_string(&value, "passageId"),
+                text: json_string(&value, "text"),
+                page: value.get("page").and_then(|item| item.as_u64()).map(|n| n as u32),
+                line: value.get("line").and_then(|item| item.as_u64()).unwrap_or(0) as u32,
+                heading_path: value
+                    .get("headingPath")
+                    .and_then(|item| item.as_array())
+                    .map(|items| items.iter().filter_map(|item| item.as_str().map(str::to_string)).collect())
+                    .unwrap_or_default(),
+            });
+        }
+        Ok(out)
+    }
+
+    /// Writes the passage files when this docKey is new. An existing map is left as it is.
+    pub fn write_if_absent(&mut self, key: &str, kind_name: &str, passages: &[IndexedPassage]) -> Result<(), String> {
+        if !valid_doc_key(key) {
+            return Err("schema".to_string());
+        }
+        if self.has_map(key) {
+            return Ok(());
+        }
+        let owned: Vec<Passage> = passages.iter().cloned().map(passage_from_indexed).collect();
+        self.store(key, kind_name, &owned)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -204,6 +250,62 @@ fn atomic_write(dir: &Path, name: &str, bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IndexedPassage {
+    pub passage_id: String,
+    pub text: String,
+    pub page: Option<u32>,
+    pub line: u32,
+    pub heading_path: Vec<String>,
+}
+
+fn build_err(err: String) -> String {
+    if err == "quota" {
+        "schema".to_string()
+    } else {
+        err
+    }
+}
+
+fn json_string(value: &Value, key: &str) -> String {
+    value.get(key).and_then(|item| item.as_str()).unwrap_or("").to_string()
+}
+
+fn to_indexed(passages: Vec<Passage>) -> Vec<IndexedPassage> {
+    passages
+        .into_iter()
+        .map(|passage| IndexedPassage {
+            passage_id: passage.passage_id,
+            text: passage.text,
+            page: passage.page,
+            line: passage.line,
+            heading_path: passage.heading_path,
+        })
+        .collect()
+}
+
+fn passage_from_indexed(passage: IndexedPassage) -> Passage {
+    Passage {
+        passage_id: passage.passage_id,
+        text: passage.text,
+        page: passage.page,
+        line: passage.line,
+        heading_path: passage.heading_path,
+    }
+}
+
+pub fn plain_passages(text: &str) -> Result<Vec<IndexedPassage>, String> {
+    passages_from_plain(text).map(to_indexed)
+}
+
+pub fn html_passages(text: &str) -> Result<Vec<IndexedPassage>, String> {
+    passages_from_html(text).map(to_indexed)
+}
+
+pub fn bbox_passages(text: &str) -> Result<Vec<IndexedPassage>, String> {
+    passages_from_bbox(text).map(to_indexed)
+}
+
 pub fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     let mut out = String::with_capacity(digest.len() * 2);
@@ -240,7 +342,7 @@ fn push_passage(passages: &mut Vec<Passage>, text: &str, page: Option<u32>, line
         return Ok(());
     }
     if text.chars().count() > MAX_PASSAGE_CHARS || passages.len() >= MAX_PASSAGES {
-        return Err("schema".to_string());
+        return Err("quota".to_string());
     }
     passages.push(Passage {
         passage_id: format!("p-{}", passages.len() + 1),
@@ -260,6 +362,110 @@ fn passages_from_plain(text: &str) -> Result<Vec<Passage>, String> {
     Ok(passages)
 }
 
+fn passages_from_bbox(text: &str) -> Result<Vec<Passage>, String> {
+    let mut passages = Vec::new();
+    let mut page = 0u32;
+    let mut line_no = 0u32;
+    let mut words: Vec<String> = Vec::new();
+    let mut i = 0usize;
+    let bytes = text.as_bytes();
+    while i < bytes.len() {
+        if bytes[i] != b'<' {
+            i += 1;
+            continue;
+        }
+        if starts_with_tag(bytes, i, b"page") {
+            page = page.saturating_add(1);
+            line_no = 0;
+            i += 5;
+            continue;
+        }
+        if text[i..].starts_with("</line>") {
+            line_no = line_no.saturating_add(1);
+            let joined = words.join(" ");
+            words.clear();
+            if page > 0 {
+                push_passage(&mut passages, &joined, Some(page), line_no, &[])?;
+            }
+            i += "</line>".len();
+            continue;
+        }
+        if starts_with_tag(bytes, i, b"word") {
+            let Some(rel) = text[i..].find('>') else {
+                break;
+            };
+            let start = i + rel + 1;
+            let Some(close) = text[start..].find("</word>") else {
+                break;
+            };
+            words.push(decode_entities(&text[start..start + close]));
+            i = start + close + "</word>".len();
+            continue;
+        }
+        i += 1;
+    }
+    Ok(passages)
+}
+
+fn starts_with_tag(bytes: &[u8], i: usize, name: &[u8]) -> bool {
+    let rest = &bytes[i + 1..];
+    if rest.len() < name.len() || !rest.starts_with(name) {
+        return false;
+    }
+    match rest.get(name.len()) {
+        None => true,
+        Some(b' ' | b'>' | b'\n' | b'\r' | b'\t' | b'/') => true,
+        Some(_) => false,
+    }
+}
+
+pub(crate) fn decode_entities(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(at) = rest.find('&') {
+        out.push_str(&rest[..at]);
+        rest = &rest[at..];
+        let Some(end) = rest.find(';') else {
+            out.push_str(rest);
+            return out;
+        };
+        if end > 12 {
+            out.push('&');
+            rest = &rest[1..];
+            continue;
+        }
+        let token = &rest[1..end];
+        let ch = if token == "amp" {
+            Some('&')
+        } else if token == "lt" {
+            Some('<')
+        } else if token == "gt" {
+            Some('>')
+        } else if token == "quot" {
+            Some('"')
+        } else if token == "apos" {
+            Some('\'')
+        } else if let Some(num) = token.strip_prefix('#') {
+            if let Some(hex) = num.strip_prefix(['x', 'X']) {
+                u32::from_str_radix(hex, 16).ok().and_then(char::from_u32)
+            } else {
+                num.parse::<u32>().ok().and_then(char::from_u32)
+            }
+        } else {
+            None
+        };
+        if let Some(ch) = ch {
+            out.push(ch);
+            rest = &rest[end + 1..];
+        } else {
+            out.push('&');
+            rest = &rest[1..];
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 fn passages_from_pdf_text(text: &str) -> Result<Vec<Passage>, String> {
     let mut passages = Vec::new();
     let pages: Vec<&str> = text.split('\u{c}').collect();
@@ -272,6 +478,25 @@ fn passages_from_pdf_text(text: &str) -> Result<Vec<Passage>, String> {
         }
     }
     Ok(passages)
+}
+
+pub fn pdf_bbox_text(path: &Path) -> Result<String, String> {
+    match Command::new("pdftotext").arg("-bbox-layout").arg(path).arg("-").output() {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("[docmap] pdftotext missing");
+            Err("docmap: pdftotext missing".to_string())
+        }
+        Err(err) => {
+            eprintln!("[docmap] pdftotext: {err}");
+            Err("docmap: pdftotext missing".to_string())
+        }
+        Ok(output) if output.status.code() == Some(127) => {
+            eprintln!("[docmap] pdftotext missing");
+            Err("docmap: pdftotext missing".to_string())
+        }
+        Ok(output) if !output.status.success() => Err("schema".to_string()),
+        Ok(output) => Ok(String::from_utf8_lossy(&output.stdout).into_owned()),
+    }
 }
 
 pub fn pdftotext_to_string(bin: &str, path: &Path) -> Result<String, String> {
@@ -716,6 +941,24 @@ mod tests {
         assert!(hit["line"].as_u64().is_some());
         assert!(hit["headingPath"].as_array().unwrap().is_empty());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bbox_layout_records_page_and_line() {
+        let text = r#"<doc><page width="300" height="144">
+        <line xMin="1"><word xMin="1">refund</word><word xMin="2">policy</word></line>
+        <line xMin="1"><word xMin="1">second</word></line>
+        </page><page width="300" height="144"><line><word>next</word></line></page></doc>"#;
+        let passages = bbox_passages(text).unwrap();
+        assert_eq!(passages.len(), 3);
+        assert_eq!(passages[0].text, "refund policy");
+        assert_eq!(passages[0].page, Some(1));
+        assert_eq!(passages[0].line, 1);
+        assert!(passages[0].heading_path.is_empty());
+        assert_eq!(passages[1].line, 2);
+        assert_eq!(passages[2].page, Some(2));
+        assert_eq!(passages[2].line, 1);
+        assert_eq!(passages[2].text, "next");
     }
 
     fn fn_body(src: &str, name: &str) -> String {
