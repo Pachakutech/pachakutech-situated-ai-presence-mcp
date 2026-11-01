@@ -212,7 +212,7 @@ Not a `Proposal` variant. A type-level test holds the enum to these two. There i
 
 The opener is a trait. Production:
 
-- Web: the `--uri` path in `src/locate/web.ts`, Chromium profile `$XDG_RUNTIME_DIR/pachakutech/locate-chromium`, port 9222. A second Chromium on that profile is not started.
+- Web: the `--uri` path in `src/locate/web.ts`, Chromium profile `$XDG_RUNTIME_DIR/pachakutech/locate-chromium`, port 9222. A second Chromium on that profile is not started. The process that launches this window is `C11c_tour_window.md`. This brief's opener is the spec.
 - PDF: the Evince open in `src/locate/pdf.ts`.
 - Any other type: `failed(no-opener)`, spoken in one line by the runner, and the source is skipped. This ticket does not add a Writer launcher.
 
@@ -276,7 +276,7 @@ T1 and T2. T3 is `not_allowed_for_tier:exportProject`. Optional `formats` is a s
 
 | File | Rows |
 |---|---|
-| `references.bib` | One BibTeX entry per work that has at least one kept locus. `@article` when `container` is set, otherwise `@misc`. Fields that are empty are omitted. Citekey `authorYearFirstword`, else `domainYear`, with `a` and `b` on collision. The key is stored on the source and reused on the next rebuild |
+| `references.bib` | One BibTeX entry per work that has at least one kept locus. `@article` when `container` is set, otherwise `@misc`. Fields that are empty are omitted. Citekey `authorYearFirstword`, else `domainYear`, with `a` and `b` on collision. The key is stored on the source and reused on the next rebuild. The file name, and the excluded twin, are the 1 November note below |
 | `collection.tex` | One `\section` per ask. Subsections are `Proposed: supporting` and the other stance labels. Kept loci only, in a `quote` environment, then `\cite[p.~N]{key}` when a page exists. A web locus puts the heading path in a trailing `% heading:` comment and cites no page. Notes, when C7b stored any, follow as `\emph{Note:} …` |
 | `collection.txt` | The same groups. The span, then the citation line, then the citekey in brackets. Notes follow as `Note:` lines |
 | `decisions.csv` | One row per acknowledge, clear, approve, and discard: source ref, page or heading path, line, phrase, event, stance, time, `by`, notes |
@@ -310,6 +310,18 @@ The write is tmp, fsync, rename, inside that export directory. A path in the req
 | N12 | T3 `exportProject` is `not_allowed_for_tier:exportProject` |
 
 Compiling the tex with `pdflatex` is a manual check when the binary is installed. The automated gate is N4.
+
+### Bibliographies, 1 November 2026
+
+Accept and deny are two bibliographies, the EPC split between included studies and excluded studies. This amends the `references.bib` row, N2, and N9.
+
+- Included: one entry per work with at least one keep. The fields and the citekey stay as in the row above.
+- Excluded: one entry per work with a T0 discard and no keep. A work that has both a keep and a discard is included only. The discarded locus stays a row in `decisions.csv`.
+- The client still cannot pass a path. The daemon writes only inside `export/`.
+- An existing bibliography is never replaced. The same bytes leave the file that is already there. Different bytes take the next integer, `references-1.bib` and `excluded-1.bib`, then `-2`, and so on. A timestamp in the name is the other acceptable form. The citekey stays on the source either way.
+- The `.tex` written for that export points `\bibliography` at the included name, without the `.bib` suffix. When a previous tex file is present, the new one takes the next integer too, so the older document still names its own bib.
+
+N1 still means only keeps appear in the included bib and in the collection. N2's "decisions.csv only" no longer covers the excluded bib.
 
 ### Out of scope
 
