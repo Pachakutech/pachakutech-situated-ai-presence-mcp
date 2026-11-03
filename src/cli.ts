@@ -19,6 +19,7 @@ import { runLedger } from "./command/ledger.js";
 import { commandSocketPath, connectCommand, openCommand } from "./command/socket.js";
 import { sendProposal, socketReachable, startDaemon, statusDaemon, stopDaemon } from "./daemonControl.js";
 import { cueFollowMain } from "./locate/cues.js";
+import { tourDriveCommand } from "./locate/driveTour.js";
 import { fuseCommand, locateCommand, screenTextCommand } from "./locate/run.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -43,6 +44,9 @@ function usage(): never {
       "  speak <id> <text>    That presence speaks: local TTS, audio, synced mouth",
       "  highlight <id> <u> <v> <w> <h> [seconds]",
       "                       Tint that UV box (top-left, v down, 0..1). Default 5s, max 360",
+      "  tour-drive <projectId> [--presence <id>]",
+      "                       Poll the parked source and open that window.",
+      "                       Does not press Start and does not create a project.",
       "  locate --source web|pdf|terminal|doc|ide --query <phrase>",
       "                       [--uri URL_or_path] [--page N] [--pad 0] [--timeout-s 15]",
       "                       [--no-open] [--window-class RE] [--window-title RE] [--verify]",
@@ -390,6 +394,9 @@ switch (command) {
     break;
   case "avatar":
     process.exit(await avatarCommand(process.argv.slice(3)));
+    break;
+  case "tour-drive":
+    process.exit(await tourDriveCommand(process.argv.slice(3)));
     break;
   case "locate":
     process.exit(await locateCommand(process.argv.slice(3)));

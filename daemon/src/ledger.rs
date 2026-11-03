@@ -40,6 +40,10 @@ pub enum LedgerKind {
     Tour,
     Note,
     NoteDeleted,
+    /// Hand on the highlight. Latest row for the locus is the condition.
+    Skip,
+    Accept,
+    Deny,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,6 +84,12 @@ struct PhraseBind {
     ask_id: Option<String>,
 }
 
+/// One `bind_shown_locus` call. `undo_shown` puts the previous association back.
+pub(crate) struct BindingPlant {
+    phrase_id: String,
+    previous: Option<PhraseBind>,
+}
+
 /// Socket-visible observations. This enum cannot represent an acknowledgement,
 /// an approval, a discard, or a clear.
 #[derive(Debug, Clone)]
@@ -118,6 +128,10 @@ pub enum UserAppend {
     Approved { phrase_id: String },
     Discarded { phrase_id: String },
     Cleared { phrase_id: String },
+    /// Tint gestures. These do not stamp `viewed: acknowledged`.
+    Skip { phrase_id: String },
+    Accept { phrase_id: String },
+    Deny { phrase_id: String },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -191,6 +205,14 @@ impl Ledger {
         self.projects.as_mut()
     }
 
+    pub(crate) fn take_projects(&mut self) -> Option<crate::project::ProjectStore> {
+        self.projects.take()
+    }
+
+    pub(crate) fn give_projects(&mut self, store: crate::project::ProjectStore) {
+        self.projects = Some(store);
+    }
+
     pub fn association_len(&self) -> usize {
         self.assoc.len()
     }
@@ -214,6 +236,50 @@ impl Ledger {
             None => {
                 self.assoc.remove(phrase_id);
             }
+        }
+    }
+
+    /// Phrase id and locus id are the same string. The tour commit is the caller.
+    pub fn bind_shown_locus(
+        &mut self,
+        phrase_id: &str,
+        project_id: &str,
+        locus_id: &str,
+        ask_id: Option<String>,
+    ) -> Result<BindingPlant, LedgerError> {
+        if phrase_id.is_empty() || project_id.is_empty() || phrase_id != locus_id {
+            return Err(LedgerError::Schema);
+        }
+        let previous = self.assoc.get(phrase_id).cloned();
+        self.remember_binding(phrase_id, project_id.to_string(), locus_id.to_string(), ask_id);
+        Ok(BindingPlant { phrase_id: phrase_id.to_string(), previous })
+    }
+
+    pub(crate) fn undo_shown(&mut self, plants: &[BindingPlant]) {
+        for plant in plants.iter().rev() {
+            self.restore_binding(&plant.phrase_id, plant.previous.clone());
+        }
+    }
+
+    /// Latest hand row for this phrase. The session log wins when it has one.
+    /// After a restart that log is empty, so the project record supplies the color.
+    pub fn latest_hand(&self, phrase_id: &str) -> Option<LedgerKind> {
+        let phrase_id = cut(phrase_id.to_string());
+        if let Some(kind) = self
+            .events
+            .iter()
+            .rev()
+            .find(|ev| ev.phrase_id == phrase_id && is_hand(ev.kind))
+            .map(|ev| ev.kind)
+        {
+            return Some(kind);
+        }
+        let bind = self.assoc.get(&phrase_id)?;
+        let store = self.projects.as_ref()?;
+        match store.latest_hand_wire(&bind.project_id, &bind.locus_id)? {
+            "accept" => Some(LedgerKind::Accept),
+            "deny" => Some(LedgerKind::Deny),
+            _ => Some(LedgerKind::Skip),
         }
     }
 
@@ -339,6 +405,9 @@ impl Ledger {
             UserAppend::Approved { phrase_id } => (phrase_id, LedgerKind::Approved, None),
             UserAppend::Discarded { phrase_id } => (phrase_id, LedgerKind::Discarded, None),
             UserAppend::Cleared { phrase_id } => (phrase_id, LedgerKind::Cleared, Some(ViewedTier::Acknowledged)),
+            UserAppend::Skip { phrase_id } => (phrase_id, LedgerKind::Skip, None),
+            UserAppend::Accept { phrase_id } => (phrase_id, LedgerKind::Accept, None),
+            UserAppend::Deny { phrase_id } => (phrase_id, LedgerKind::Deny, None),
         };
         let task_id = self.latest_task_id(&phrase_id);
         self.push(phrase_id, task_id, None, None, kind, viewed, None, None, None, Tier::T0Physical, now_ms, None)
@@ -1008,6 +1077,10 @@ fn cut(text: String) -> String {
     text.chars().take(TEXT_CAP).collect()
 }
 
+fn is_hand(kind: LedgerKind) -> bool {
+    matches!(kind, LedgerKind::Skip | LedgerKind::Accept | LedgerKind::Deny)
+}
+
 fn kind_wire(kind: LedgerKind) -> &'static str {
     match kind {
         LedgerKind::Located => "located",
@@ -1019,6 +1092,9 @@ fn kind_wire(kind: LedgerKind) -> &'static str {
         LedgerKind::Tour => "tour",
         LedgerKind::Note => "note",
         LedgerKind::NoteDeleted => "noteDeleted",
+        LedgerKind::Skip => "skip",
+        LedgerKind::Accept => "accept",
+        LedgerKind::Deny => "deny",
     }
 }
 
@@ -1110,6 +1186,18 @@ fn derive_phrase(events: &[&LedgerEvent]) -> Derived {
                 row.decision = Some("discarded");
                 row.decision_by = Some(ev.by);
             }
+            LedgerKind::Accept => {
+                row.decision = Some("accept");
+                row.decision_by = Some(ev.by);
+            }
+            LedgerKind::Deny => {
+                row.decision = Some("deny");
+                row.decision_by = Some(ev.by);
+            }
+            LedgerKind::Skip => {
+                row.decision = None;
+                row.decision_by = None;
+            }
             LedgerKind::Located | LedgerKind::Mismatch | LedgerKind::Tour => {}
             LedgerKind::Note | LedgerKind::NoteDeleted => {}
         }
@@ -1175,7 +1263,12 @@ fn seqs_to_keep(events: &[&LedgerEvent]) -> HashSet<u64> {
             keep.insert(ev.seq);
         }
     }
-    if let Some(ev) = events.iter().rev().find(|ev| matches!(ev.kind, LedgerKind::Approved | LedgerKind::Discarded)) {
+    if let Some(ev) = events.iter().rev().find(|ev| {
+        matches!(
+            ev.kind,
+            LedgerKind::Approved | LedgerKind::Discarded | LedgerKind::Skip | LedgerKind::Accept | LedgerKind::Deny
+        )
+    }) {
         keep.insert(ev.seq);
     }
     let derived = derive_phrase(events);

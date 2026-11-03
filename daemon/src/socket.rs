@@ -163,6 +163,19 @@ impl SocketServer {
         self.registry.lock().expect("registry mutex poisoned").tick_tasks(now_ms());
     }
 
+    /// Tint samples already carry the daemon clock from dispatch.
+    pub fn apply_tint_samples(&self, samples: Vec<crate::task::TintSample>) {
+        if samples.is_empty() {
+            return;
+        }
+        self.registry.lock().expect("registry mutex poisoned").apply_tint_samples(samples);
+    }
+
+    /// Colors the task book stored for visible marks. Yellow when a mark has none yet.
+    pub fn mark_colors(&self) -> Vec<(String, crate::highlight::MarkColor)> {
+        self.registry.lock().expect("registry mutex poisoned").mark_colors()
+    }
+
     /// UV boxes whose mark should be on screen. The overlay thread calls this.
     pub fn visible_interests(&self) -> Vec<(String, crate::highlight::UvBox)> {
         self.registry.lock().expect("registry mutex poisoned").visible_interests(Instant::now())
@@ -327,7 +340,7 @@ fn read_client(
 }
 
 /// Second value is true when the overlay loop should exit after this reply.
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_millis() as u64)
@@ -588,7 +601,8 @@ fn dispatch(
         | Proposal::ConfirmProject(_)
         | Proposal::QueryProject(_)
         | Proposal::SelectLoci(_)
-        | Proposal::StartProjectTour(_) => ProposalResult::err(&proposal_id, "unrouted project proposal"),
+        | Proposal::StartProjectTour(_)
+        | Proposal::ReportSourceOpen(_) => ProposalResult::err(&proposal_id, "unrouted project proposal"),
         Proposal::AddNote(_) | Proposal::DeleteNote(_) => ProposalResult::err(&proposal_id, "unrouted note proposal"),
     };
     (result, false)

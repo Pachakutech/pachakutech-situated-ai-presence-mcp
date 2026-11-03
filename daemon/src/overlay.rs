@@ -22,7 +22,8 @@
 //! (no `zwp_linux_dmabuf_v1`, no GBM, etc.) never causes a black screen.
 
 use crate::actors::ingress::screen_dmabuf::DmabufScreenSource;
-use crate::highlight::{paint_mark, to_pixels, UvBox};
+use crate::highlight::{paint_mark, to_pixels, MarkColor, UvBox};
+use crate::task::{TintMark, TintSample};
 use crate::actors::ingress::screen_wlr::WlrScreenSource;
 use crate::actors::ingress::webcam_dmabuf::{self, WebcamMsg, WEBCAM_YIELD_ACK};
 use crate::actors::ingress::{DmabufFrame, DmabufPlane, FrameSource, IngressFrame, DRM_FORMAT_RG88};
@@ -40,7 +41,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use wayland_client::protocol::{
-    wl_buffer, wl_compositor, wl_output, wl_region, wl_registry, wl_shm, wl_shm_pool, wl_surface,
+    wl_buffer, wl_compositor, wl_output, wl_pointer, wl_region, wl_registry, wl_shm, wl_shm_pool, wl_surface,
 };
 use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum};
 use wayland_protocols_wlr::layer_shell::v1::client::{
@@ -107,6 +108,11 @@ pub struct OverlayState {
     output_width: u32,
     output_height: u32,
     seat: Option<wl_seat::WlSeat>,
+    pointer: Option<wl_pointer::WlPointer>,
+    /// Mark under the pointer. Absent when the pointer is on the disc or off every mark.
+    pointer_on: Option<PointerOn>,
+    /// Stamped during dispatch, drained by the frame loop.
+    tint_samples: Vec<TintSample>,
     idle_notifier: Option<ext_idle_notifier_v1::ExtIdleNotifierV1>,
     idle: bool,
     width: u32,
@@ -118,11 +124,18 @@ pub struct OverlayState {
     marks: Vec<Mark>,
 }
 
+struct PointerOn {
+    id: String,
+    generation: u64,
+}
+
 /// One ephemeral highlight. The layer is Top, under the Overlay disc.
 /// `key` is the Wayland user data, so a configure here is not the disc's.
 struct Mark {
     id: String,
     key: String,
+    generation: u64,
+    color: MarkColor,
     x: i32,
     y: i32,
     w: i32,
@@ -207,6 +220,9 @@ impl Overlay {
             output_width: 0,
             output_height: 0,
             seat: None,
+            pointer: None,
+            pointer_on: None,
+            tint_samples: Vec::new(),
             idle_notifier: None,
             idle: false,
             width: 0,
@@ -524,7 +540,11 @@ impl Overlay {
     /// Show one Top-layer surface per visible box. An empty list removes them.
     /// Returns the pixel rects (up to three) for the heat mask. Width of 0 is none.
     /// `in_rect` ignores a width of 1 or less, so a 1px box is masked as 2.
-    fn sync_marks(&mut self, boxes: &[(String, UvBox)]) -> [[f32; 4]; 3] {
+    fn take_tint_samples(&mut self) -> Vec<TintSample> {
+        std::mem::take(&mut self.state.tint_samples)
+    }
+
+    fn sync_marks(&mut self, boxes: &[(String, UvBox)], colors: &[(String, MarkColor)]) -> [[f32; 4]; 3] {
         let (sw, sh) = (self.state.output_width, self.state.output_height);
         let desired: Vec<(String, i32, i32, i32, i32)> = boxes
             .iter()
@@ -560,6 +580,10 @@ impl Overlay {
             }
         }
         for i in kill {
+            let generation = self.state.marks[i].generation;
+            if self.state.pointer_on.as_ref().is_some_and(|on| on.generation == generation) {
+                self.state.pointer_on = None;
+            }
             let mark = &mut self.state.marks[i];
             eprintln!("[highlight] {} down", mark.id);
             mark.dying = true;
@@ -597,6 +621,14 @@ impl Overlay {
                 eprintln!("[highlight] configure: {e}");
             }
         }
+        for mark in &mut self.state.marks {
+            if let Some((_, color)) = colors.iter().find(|(id, _)| id == &mark.id) {
+                if mark.color != *color {
+                    mark.color = *color;
+                    mark.last_paint = None;
+                }
+            }
+        }
         self.paint_marks();
         self.sweep_marks();
 
@@ -618,9 +650,12 @@ impl Overlay {
         let key = format!("{id}:{}", self.mark_seq);
         let surface = compositor.create_surface(&qh, ());
         let region = compositor.create_region(&qh, ());
+        region.add(0, 0, w.max(1), h.max(1));
         surface.set_input_region(Some(&region));
-        surface.set_opaque_region(Some(&region));
+        let opaque = compositor.create_region(&qh, ());
+        surface.set_opaque_region(Some(&opaque));
         region.destroy();
+        opaque.destroy();
         let layer = shell.get_layer_surface(
             &surface,
             output.as_ref(),
@@ -638,6 +673,8 @@ impl Overlay {
         self.state.marks.push(Mark {
             id: id.to_string(),
             key,
+            generation: u64::from(self.mark_seq),
+            color: MarkColor::Yellow,
             x,
             y,
             w,
@@ -734,8 +771,9 @@ impl Overlay {
     fn blit_mark(&mut self, i: usize, bw: i32, bh: i32, phase: f32) {
         {
             let mark = &mut self.state.marks[i];
+            let color = mark.color;
             let Some(map) = mark.map.as_mut() else { return };
-            paint_mark(map.bytes(), bw, bh, mark.stride, phase);
+            paint_mark(map.bytes(), bw, bh, mark.stride, phase, color);
         }
         {
             let mark = &self.state.marks[i];
@@ -932,7 +970,64 @@ impl Dispatch<ext_idle_notification_v1::ExtIdleNotificationV1, ()> for OverlaySt
 wayland_client::delegate_noop!(OverlayState: ignore wl_compositor::WlCompositor);
 wayland_client::delegate_noop!(OverlayState: ignore wl_surface::WlSurface);
 wayland_client::delegate_noop!(OverlayState: ignore wl_region::WlRegion);
-wayland_client::delegate_noop!(OverlayState: ignore wl_seat::WlSeat);
+impl Dispatch<wl_seat::WlSeat, ()> for OverlayState {
+    fn event(
+        state: &mut Self,
+        seat: &wl_seat::WlSeat,
+        event: wl_seat::Event,
+        _data: &(),
+        _conn: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        if let wl_seat::Event::Capabilities { capabilities } = event {
+            let caps = match capabilities {
+                WEnum::Value(caps) => caps,
+                WEnum::Unknown(raw) => wl_seat::Capability::from_bits_truncate(raw),
+            };
+            if caps.contains(wl_seat::Capability::Pointer) && state.pointer.is_none() {
+                state.pointer = Some(seat.get_pointer(qh, ()));
+            }
+        }
+    }
+}
+
+impl Dispatch<wl_pointer::WlPointer, ()> for OverlayState {
+    fn event(
+        state: &mut Self,
+        _pointer: &wl_pointer::WlPointer,
+        event: wl_pointer::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_pointer::Event::Enter { surface, .. } => {
+                state.pointer_on = state.marks.iter().find(|mark| !mark.dying && mark.surface.as_ref() == Some(&surface)).map(|mark| {
+                    PointerOn { id: mark.id.clone(), generation: mark.generation }
+                });
+            }
+            wl_pointer::Event::Leave { .. } => {
+                state.pointer_on = None;
+            }
+            wl_pointer::Event::Button { button, state: button_state, .. } => {
+                let down = matches!(button_state, WEnum::Value(wl_pointer::ButtonState::Pressed));
+                let up = matches!(button_state, WEnum::Value(wl_pointer::ButtonState::Released));
+                if !down && !up {
+                    return;
+                }
+                let mark = state.pointer_on.as_ref().map(|on| TintMark { id: on.id.clone(), generation: on.generation });
+                state.tint_samples.push(TintSample {
+                    down,
+                    button,
+                    ts_ms: crate::socket::now_ms(),
+                    mark,
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
 wayland_client::delegate_noop!(OverlayState: ignore ext_idle_notifier_v1::ExtIdleNotifierV1);
 wayland_client::delegate_noop!(OverlayState: ignore wl_shm::WlShm);
 wayland_client::delegate_noop!(OverlayState: ignore wl_shm_pool::WlShmPool);
@@ -3058,6 +3153,8 @@ pub fn run(
             break;
         }
         overlay.flush_and_dispatch()?;
+        let samples = overlay.take_tint_samples();
+        server.apply_tint_samples(samples);
         if overlay.take_dirty() {
             let extent = overlay.extent();
             if extent.width != gpu.extent.width || extent.height != gpu.extent.height {
@@ -3087,10 +3184,11 @@ pub fn run(
             sleeping.load(Ordering::Relaxed),
         );
         let mark_rects = if hide {
-            overlay.sync_marks(&[])
+            overlay.sync_marks(&[], &[])
         } else {
             let boxes = server.visible_interests();
-            overlay.sync_marks(&boxes)
+            let colors = server.mark_colors();
+            overlay.sync_marks(&boxes, &colors)
         };
         gpu.set_heat_marks(mark_rects);
 

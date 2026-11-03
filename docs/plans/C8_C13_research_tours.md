@@ -268,7 +268,7 @@ M1 through M13 pass. Commit title: `daemon: openSource and the multi-source tour
 
 ### Goal
 
-`exportProject` rebuilds the files under `projects/<id>/export/` from keeps, decisions, loci, and citation facts. Editing a file does not change a keep. A client cannot choose the directory or the names. The acknowledge message and the approve message this brief still names are one accept under `highlight_switch.md`. This ticket, when written, reads a review tour's accepts as the keeps. The switch is not painted here.
+`exportProject` rebuilds the files under `projects/<id>/export/` from keeps, decisions, loci, and citation facts. Editing a file does not change a keep. A client cannot choose the directory or the names. The acknowledge message and the approve message this brief still names are one accept under `highlight_switch.md`. The switch is not painted here.
 
 ### Files
 
@@ -335,7 +335,7 @@ N1 through N12 pass. Commit title: `daemon: project export files (C12)`.
 
 ### Goal
 
-The outer client can create a project, read it, start a tour, and export it, through the MCP tools on `presence.sock`. The daemon still enforces the tier. The skill tells the client what it may not write. The report the frontier model gives when asked how the review stands is this read: the accept, deny, and abstain register in `review_demo.md`. The live terminal does not wait on this tool. On-screen `shown` and `dwelled` stay a separate watch.
+The outer client can create a project, read it, start a tour, and export it, through the MCP tools on `presence.sock`. The daemon still enforces the tier. The skill tells the client what it may not write. The report the frontier model gives when asked how the review stands is the register in the note below: skip, accept, and deny, the same three numbers as `review_demo.md`. The hand rows are already in `events.jsonl` when a tour phrase is bound. This ticket puts that reading on `queryProject`. The live terminal does not wait on this tool, and this ticket does not name the watch command. On-screen `shown` and `dwelled` stay a separate watch.
 
 ### Tools
 
@@ -343,24 +343,24 @@ Add to the MCP surface, each a `createTask`-style forwarder on the shared `Daemo
 
 | Tool | Daemon kind | Notes |
 |---|---|---|
-| `queryProject` | `queryProject` | Read. T2 is already allowed. The reply includes `keeps`, `decisions`, notes on the loci, the tour cursor, and `pseq`. `decisions` are the T0 acknowledge, clear, approve, and discard rows. This is the preferences read in `research_tours.md` section 1a |
+| `queryProject` | `queryProject` | Read. T2 is already allowed. The reply keeps the fields it has now: the project, the loci with their notes, `keeps`, the tour cursor, and `pseq`. It gains `register`, specified in the note below. `sincePseq` still pages loci. It does not slice the register |
 | `createProject` | `createProject` | URLs only. A path in the tool arguments is refused in the client before the socket, and the daemon still enforces L1 |
 | `addSources` | `addSources` | Same URL rule |
 | `startProjectTour` | `startProjectTour` | T2, so the daemon returns `awaitingStart` and the source list. The tool shows that list. It does not send Start |
 | `exportProject` | `exportProject` | Returns the fixed paths and the row counts |
 | `showCitations` | no new kind | Builds `createProject` with one claim-ask per citation and the URL, claim, and optional quote on each source, then `selectLoci`, then `startProjectTour`. Omitted `mode` and `pace` are `explain` and `flow`. Arguments `mode` and `pace` are forwarded. `select` or `approve` with `wait` is the preference review |
 
-`showCitations` input: `{ citations: [{ url, claim, quote? }], mode?, pace? }`. A local path in that list is refused before the socket. A quote is stored for C10. The tour waits for the user's Start because the caller is T2. Omitted `mode` and `pace` stay `explain` and `flow`. A preference review passes `select` and `wait`, then re-reads `queryProject` for keeps, decisions, and notes. The tour cursor on that reply is the resume point.
+`showCitations` input: `{ citations: [{ url, claim, quote? }], mode?, pace? }`. A local path in that list is refused before the socket. A quote is stored for C10. The tour waits for the user's Start because the caller is T2. Omitted `mode` and `pace` stay `explain` and `flow`. A preference review passes `select` and `wait`, then re-reads `queryProject` for the register, the notes on the loci, and the cursor. The cursor is the resume point. The register is the review.
 
 `queryDocMap` and `buildDocMap` stay out of this ticket.
 
 ### Skill
 
-Add these paragraphs to both presence skill copies. Leave the Task book paragraph as it is. Do not merge the rest of the files.
+Add these paragraphs to both presence skill copies. Leave the Task book paragraph as it is. The **Three conditions** paragraph is already in `skills/presence/SKILL.md`. The installed copy at `~/.grok/skills/presence/SKILL.md` does not have it yet; copy it across when these two paragraphs are added. Do not merge the rest of the files. Do not add a fourth condition.
 
-**Project.** A project is a list of sources the daemon keeps on disk. Read it with `queryProject`. The reply's keeps, decisions, and notes are the user's preferences as filled so far. The cursor on that reply is where the tour resumes. A keep is still the user's checkbox or yes. You may propose sources and a stance. You cannot write the keep.
+**Project.** A project is a list of sources the daemon keeps on disk. Read it with `queryProject`. The register on that reply is skip, accept, and deny for the loci the tour has put up. A locus with no hand row yet is skip. You do not write those rows. Notes on the loci are the user's words. The cursor on that reply is where the tour resumes. You may propose sources and a stance.
 
-**Citations.** `showCitations` takes URLs, the claim, and the quote when you have one. The tour waits for the user's start. Omit `mode` and `pace` for the narrated check. Pass `select` and `wait` when the user is recording preferences, and re-read `queryProject` as those decisions land. A quote the page does not contain is reported as a near passage, and it is not presented as the quoted words.
+**Citations.** `showCitations` takes URLs, the claim, and the quote when you have one. The tour waits for the user's start. Omit `mode` and `pace` for the narrated check. Pass `select` and `wait` when the user is recording the register, and re-read `queryProject` as the hand lands. A quote the page does not contain is reported as a near passage, and it is not presented as the quoted words.
 
 ### Acceptance
 
@@ -370,9 +370,10 @@ Add these paragraphs to both presence skill copies. Leave the Task book paragrap
 | V2 | `createProject` from the tool opens `presence.sock` and sends no `path` |
 | V3 | `showCitations` with a `file` path does not open a socket |
 | V4 | `showCitations` with two URLs and no mode sends one `createProject`, one `selectLoci`, and one `startProjectTour` of mode `explain` and pace `flow` |
-| V7 | `showCitations` with `mode: select` and `pace: wait` forwards those two fields and still does not send Start. `queryProject`'s daemon reply includes a T0 discard in `decisions` |
+| V7 | `showCitations` with `mode: select` and `pace: wait` forwards those two fields and still does not send Start. After a bound item is entered, a T0 accept and a later T0 skip leave that locus under `register.skip`, and the accept line is still the earlier row in `events.jsonl` |
+| V8 | A second locus the tour has entered, with no hand row, is also under `register.skip`. The reply does not append a hand row to put it there. A `viewed` row, `shown` or `dwelled`, leaves the locus where the hand put it. `keeps` is unchanged by an accept |
 | V5 | The tool module does not send `subscribeLedger`, `addNote`, or `observePhrase` |
-| V6 | Both skill copies contain the Project and Citations paragraphs, and the Task book paragraph is unchanged |
+| V6 | Both skill copies contain the Project and Citations paragraphs, and the Three conditions paragraph. The Task book paragraph is unchanged |
 
 ### Out of scope
 
@@ -380,7 +381,39 @@ A new daemon kind, a sidecar tool, shipping the daemon.
 
 ### Done when
 
-V1 through V7 pass. `npm run build` passes. Commit title: `mcp: project tools and showCitations (C13)`.
+V1 through V8 pass. `npm run build` passes. Commit title: `mcp: project tools and showCitations (C13)`.
+
+### The register, 2 November 2026
+
+This amends the `queryProject` row, the skill paragraphs, V7, and the sentence in `research_tours.md` section 1a that lists acknowledge, clear, approve, and discard as the reply. Those four names are the checkbox path. The highlight is the control now, and the hand writes `skip`, `accept`, and `deny`. `hand_and_phrase.md` is the ticket that stores them. `review_demo.md` is the report this tool has to match.
+
+What is already stored, when a tour commit has bound the phrase:
+
+- The phrase id and the locus id are the same `lc-` string. A non-tour `createTask` still mints `ph-n`. A press on that phrase stays in the session ledger and is absent from this reply.
+- Each finished gesture appends one line to `events.jsonl` before the call returns. The line has `kind` `skip`, `accept`, or `deny`, `locusId`, `phraseId`, `askId`, `taskId`, `by` `T0`, and a `pseq`. A later skip is a newer line. The latest line for that locus is the condition.
+- Entering the item appends a `tour` line. The glass watch may append `viewed` with `shown` or `dwelled`. Arrival of the yellow highlight appends no hand line. An entered locus with no hand line reads as skip.
+- The same locus opened again takes its color from that latest line. The session ledger is empty after a restart, so the color comes from the project file.
+- `queryProject` today is the project, the loci, `keeps`, the cursor, and `pseq`. Notes sit on the loci. There is no `decisions` field and no `register`. `pseq` already advances when a hand line is stored, so a caller can see that the log moved and still cannot see the condition.
+- `ProjectStore::decisions` returns T0 rows of kind `approved`, `discarded`, `cleared`, `skip`, `accept`, or `deny`, and a `viewed` row whose tier is `acknowledged`. It is not on the wire. Putting that array on the reply would mix the checkbox rows with the hand, and it would omit an entered locus that has no hand line. The register is a reading of the log. It does not replace that function, and building the reply does not append a line.
+- `keeps` stays the array C7 already returns: a select acknowledgement, or an approve, under the rules `keep_for` already implements. A hand accept does not add a keep. C12's bibliographies still read keeps. This ticket does not teach the model that a keep is the highlight.
+
+The field is `register`:
+
+```json
+{
+  "skip": [{ "locusId": "lc-…", "phraseId": "lc-…", "askId": "ak-1", "sourceId": "sr-1", "taskId": "tk-1", "words": "the quoted line" }],
+  "accept": [],
+  "deny": []
+}
+```
+
+A locus is listed once the project log has a `tour` line for it, or a hand line for it. A locus that is only in `loci.jsonl` is absent, which is an item the tour has not put up. `phraseId` equals `locusId`. `words` and `sourceId` come from the locus. `taskId` is the task on the latest hand line, or on the `tour` line when the hand has not written one. The three arrays are the current condition. The earlier lines stay in `events.jsonl`, and the caller can see the order there. `shown` and `dwelled` do not move a locus between the arrays. Checkbox rows (`approved`, `discarded`, `cleared`, `viewed` acknowledged) stay in the file and stay out of `register`.
+
+`sincePseq` pages loci, as it does now. The register is the current condition of the loci the tour has entered, so a page of loci does not drop a condition that was written earlier. The caller uses `pseq` to know the log has moved, then reads `register` for the three groups.
+
+The client, the sidecar, and the tool arguments cannot set a color or a condition. The daemon already allows T1, T2, and T3 to call `queryProject`. The MCP tool is the outer client, and it sends that kind as T2. One reply per call. The tool does not subscribe.
+
+The terminal beside the page is the other reader of this same file. `review_demo.md` leaves its command name to the ticket that writes the command. That watch is how the person sees the counts during the tour. This tool is how the model reports the same counts when asked. An item still yellow is skip in both.
 
 ## Order
 

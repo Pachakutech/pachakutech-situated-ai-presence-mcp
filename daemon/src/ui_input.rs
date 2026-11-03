@@ -50,6 +50,10 @@ pub enum UiEvent {
     Hotkey(Hotkey),
     /// Arms one phrase for the next T1 note. Writes no decision.
     ArmNote { phrase_id: String },
+    /// Finished tint gesture. The task book classified it first.
+    Skip { phrase_id: String },
+    Accept { phrase_id: String },
+    Deny { phrase_id: String },
 }
 
 pub fn apply_ui_event(ledger: &mut Ledger, ev: UiEvent, now_ms: u64) -> Result<u64, LedgerError> {
@@ -59,6 +63,9 @@ pub fn apply_ui_event(ledger: &mut Ledger, ev: UiEvent, now_ms: u64) -> Result<u
         UiEvent::Uncheck { phrase_id } => UserAppend::Cleared { phrase_id },
         UiEvent::Approve { phrase_id } => UserAppend::Approved { phrase_id },
         UiEvent::Discard { phrase_id } => UserAppend::Discarded { phrase_id },
+        UiEvent::Skip { phrase_id } => UserAppend::Skip { phrase_id },
+        UiEvent::Accept { phrase_id } => UserAppend::Accept { phrase_id },
+        UiEvent::Deny { phrase_id } => UserAppend::Deny { phrase_id },
         // Clicks and hotkeys are accepted by the task book, which calls back
         // with one of the variants above. This arm writes nothing.
         UiEvent::Click { .. } | UiEvent::Hotkey(_) => return Err(LedgerError::Schema),

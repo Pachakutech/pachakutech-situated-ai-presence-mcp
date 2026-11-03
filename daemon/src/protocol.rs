@@ -198,6 +198,9 @@ pub enum Proposal {
     /// Walk a project's sources. T1 and T2. T2 waits for the start key.
     #[serde(rename = "startProjectTour")]
     StartProjectTour(StartProjectTourBody),
+    /// The locate process reports that the parked source opened, or why it did not.
+    #[serde(rename = "reportSourceOpen")]
+    ReportSourceOpen(ReportSourceOpenBody),
     /// T1 text on a phrase. Without `phraseId`, one live arming is consumed.
     #[serde(rename = "addNote")]
     AddNote(AddNoteBody),
@@ -256,6 +259,7 @@ impl Proposal {
             Proposal::QueryProject(body) => &body.proposal_id,
             Proposal::SelectLoci(body) => &body.proposal_id,
             Proposal::StartProjectTour(body) => &body.proposal_id,
+            Proposal::ReportSourceOpen(body) => &body.proposal_id,
             Proposal::AddNote(body) => &body.proposal_id,
             Proposal::DeleteNote(body) => &body.proposal_id,
         }
@@ -296,6 +300,7 @@ impl Proposal {
             Proposal::QueryProject(_) => "queryProject",
             Proposal::SelectLoci(_) => "selectLoci",
             Proposal::StartProjectTour(_) => "startProjectTour",
+            Proposal::ReportSourceOpen(_) => "reportSourceOpen",
             Proposal::AddNote(_) => "addNote",
             Proposal::DeleteNote(_) => "deleteNote",
         }
@@ -714,6 +719,24 @@ pub struct StartProjectTourBody {
     pub mode: TaskMode,
     #[serde(default)]
     pub pace: Option<TaskPace>,
+    #[serde(default, rename = "kind")]
+    pub wire_kind: Option<String>,
+}
+
+/// The parked source opened, or it did not. Exactly one of `ok: true` or a reason.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReportSourceOpenBody {
+    #[serde(rename = "proposalId")]
+    pub proposal_id: String,
+    #[serde(rename = "projectId")]
+    pub project_id: String,
+    #[serde(rename = "sourceId")]
+    pub source_id: String,
+    #[serde(default)]
+    pub ok: Option<bool>,
+    #[serde(default)]
+    pub reason: Option<String>,
     #[serde(default, rename = "kind")]
     pub wire_kind: Option<String>,
 }

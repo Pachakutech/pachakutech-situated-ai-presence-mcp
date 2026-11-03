@@ -5,7 +5,7 @@
 use crate::gate::Tier;
 use crate::ledger::Ledger;
 use crate::project::{Cursor, Locus, MatchKind, Project, ProjectStore, Source, SourceKind, SourceStatus, StoreError};
-use crate::protocol::{ProposalResult, StartProjectTourBody, TaskMode, TaskPace};
+use crate::protocol::{ProposalResult, ReportSourceOpenBody, StartProjectTourBody, TaskMode, TaskPace};
 use crate::task::{TaskBook, TourSeed, TourSeedItem, ViewerMove, MOVE_WAIT_MS};
 use crate::ui_input::{Hotkey, UiEvent};
 use serde_json::{json, Value};
@@ -41,6 +41,10 @@ pub enum OpenFault {
 pub trait SourceOpener {
     fn open(&mut self, spec: &OpenSpec) -> Result<(), OpenFault>;
     fn close(&mut self);
+    /// `Ok` from `open` parks the spec. It does not mark the source opened.
+    fn parks(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Debug)]
@@ -48,6 +52,8 @@ pub enum OpenOutcome {
     Opened,
     Closed,
     Waiting,
+    /// The spec is on the desk. The source status is unchanged.
+    Parked,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -73,6 +79,13 @@ struct Active {
     task_id: Option<String>,
     /// Locus ids in the task inserted for this tour. The next chunk starts after the last one.
     chunk: Vec<String>,
+    /// One listed source waiting for the locate process. Absent once that process reports.
+    park: Option<ParkedOpen>,
+}
+
+struct ParkedOpen {
+    source_id: String,
+    spec: OpenSpec,
 }
 
 #[derive(Default)]
@@ -89,31 +102,94 @@ impl SourceOpener for AllowOpener {
     fn close(&mut self) {}
 }
 
+/// Production opener. `Ok` stores the spec. The source stays at its current status.
+pub struct ParkOpener;
+
+impl SourceOpener for ParkOpener {
+    fn open(&mut self, _spec: &OpenSpec) -> Result<(), OpenFault> {
+        Ok(())
+    }
+    fn close(&mut self) {}
+    fn parks(&self) -> bool {
+        true
+    }
+}
+
 pub(crate) enum Planned {
     Finished(ProposalResult),
     Insert { proposal_id: String, seed: TourSeed, detail: Value },
 }
 
 pub(crate) fn route_start(body: &StartProjectTourBody, tier: Tier, store: &mut ProjectStore, desk: &mut TourDesk, now_ms: u64) -> Planned {
-    let mut opener = AllowOpener;
+    let mut opener = ParkOpener;
     plan(body, tier, store, desk, &mut opener, now_ms)
 }
 
-pub(crate) fn commit(planned: Planned, book: &mut TaskBook, ledger: &mut Ledger, desk: &mut TourDesk, now_ms: u64) -> ProposalResult {
+pub(crate) fn commit(
+    planned: Planned,
+    book: &mut TaskBook,
+    ledger: &mut Ledger,
+    desk: &mut TourDesk,
+    store: &mut ProjectStore,
+    now_ms: u64,
+) -> ProposalResult {
     match planned {
         Planned::Finished(result) => result,
         Planned::Insert { proposal_id, seed, mut detail } => {
             let locus_ids = seed.locus_ids.clone();
             match book.insert_tour_chunk(ledger, seed, now_ms) {
-                Ok(id) => {
-                    remember_chunk(desk, id.clone(), locus_ids);
-                    detail["taskId"] = json!(id);
-                    ProposalResult::ok(&proposal_id, Some(detail))
-                }
+                Ok(id) => match associate_chunk(ledger, desk, store, &id, &locus_ids, now_ms) {
+                    Ok(()) => {
+                        remember_chunk(desk, id.clone(), locus_ids);
+                        detail["taskId"] = json!(id);
+                        ProposalResult::ok(&proposal_id, Some(detail))
+                    }
+                    Err(wire) => {
+                        book.end_without_decision(&id);
+                        ProposalResult::err(&proposal_id, wire)
+                    }
+                },
                 Err(err) => ProposalResult::err(&proposal_id, task_wire(err)),
             }
         }
     }
+}
+
+/// Holds are already done. Bind each locus, then register the task. A failure drops the new bindings.
+pub(crate) fn associate_chunk(
+    ledger: &mut Ledger,
+    desk: &TourDesk,
+    store: &mut ProjectStore,
+    task_id: &str,
+    locus_ids: &[String],
+    now_ms: u64,
+) -> Result<(), &'static str> {
+    let Some(active) = desk.active.as_ref() else {
+        return Err("schema");
+    };
+    let source = active.open_source.clone().filter(|id| !id.is_empty()).ok_or("schema")?;
+    let project_id = active.project_id.clone();
+    let ask_id = active.ask_id.clone();
+    let mode = match active.mode {
+        TaskMode::Explain => "explain",
+        TaskMode::Select => "select",
+        TaskMode::Approve => "approve",
+    };
+    let mut planted = Vec::new();
+    for locus in locus_ids {
+        match ledger.bind_shown_locus(locus, &project_id, locus, ask_id.clone()) {
+            Ok(plant) => planted.push(plant),
+            Err(_) => {
+                ledger.undo_shown(&planted);
+                return Err("schema");
+            }
+        }
+    }
+    if let Err(err) = store.register_task(&project_id, task_id, mode, ask_id.as_deref(), Some(source.as_str()), now_ms) {
+        ledger.undo_shown(&planted);
+        return Err(err.as_wire());
+    }
+    Ok(())
 }
 
 pub fn start(
@@ -127,7 +203,7 @@ pub fn start(
     now_ms: u64,
 ) -> ProposalResult {
     let planned = plan(body, tier, store, desk, opener, now_ms);
-    commit(planned, book, ledger, desk, now_ms)
+    commit(planned, book, ledger, desk, store, now_ms)
 }
 
 pub fn phase_name(desk: &TourDesk) -> Option<&'static str> {
@@ -140,6 +216,33 @@ pub fn phase_name(desk: &TourDesk) -> Option<&'static str> {
 
 pub fn task_id(desk: &TourDesk) -> Option<&str> {
     desk.active.as_ref().and_then(|active| active.task_id.as_deref())
+}
+
+pub fn tour_project(desk: &TourDesk) -> Option<&str> {
+    desk.active.as_ref().map(|active| active.project_id.as_str())
+}
+
+/// The parked spec for this project, in the `queryProject` shape. Absent when nothing is parked.
+pub fn open_request_for(desk: &TourDesk, project_id: &str) -> Option<Value> {
+    let active = desk.active.as_ref()?;
+    if active.project_id != project_id {
+        return None;
+    }
+    let park = active.park.as_ref()?;
+    Some(match &park.spec {
+        OpenSpec::Web { url, profile, port } => json!({
+            "sourceId": park.source_id,
+            "kind": "web",
+            "reference": url,
+            "profile": profile,
+            "port": port,
+        }),
+        OpenSpec::Pdf { path } => json!({
+            "sourceId": park.source_id,
+            "kind": "pdf",
+            "reference": path,
+        }),
+    })
 }
 
 pub(crate) fn remember_chunk(desk: &mut TourDesk, task_id: String, locus_ids: Vec<String>) {
@@ -290,6 +393,7 @@ fn plan(
         open_source: None,
         task_id: None,
         chunk: Vec::new(),
+        park: None,
     });
     if tier == Tier::T2Client {
         return Planned::Finished(ProposalResult::ok(
@@ -316,7 +420,7 @@ fn confirm_listed(
         return;
     };
     let planned = activate(proposal_id, store, desk, opener, now_ms);
-    let _ = commit(planned, book, ledger, desk, now_ms);
+    let _ = commit(planned, book, ledger, desk, store, now_ms);
 }
 
 fn activate(
@@ -356,6 +460,10 @@ fn activate(
             Ok(OpenOutcome::Waiting) => {
                 waiting = true;
                 opened = Some(source_id);
+                break;
+            }
+            Ok(OpenOutcome::Parked) => {
+                waiting = true;
                 break;
             }
             Ok(OpenOutcome::Closed) => {}
@@ -500,7 +608,7 @@ pub(crate) fn plan_follow(
                     found = Some((source_id.clone(), rows));
                     break;
                 }
-                Ok(OpenOutcome::Waiting) => return None,
+                Ok(OpenOutcome::Parked) | Ok(OpenOutcome::Waiting) => return None,
                 Ok(OpenOutcome::Closed) => {}
                 Err(message) if message == "quota:opens" => {
                     if let Some(active) = desk.active.as_mut() {
@@ -546,6 +654,11 @@ pub fn follow_done(
     let seed = plan_follow(desk, store, opener, now_ms)?;
     let locus_ids = seed.locus_ids.clone();
     let id = book.insert_tour_chunk(ledger, seed, now_ms).ok()?;
+    if let Err(err) = associate_chunk(ledger, desk, store, &id, &locus_ids, now_ms) {
+        book.end_without_decision(&id);
+        eprintln!("[tour] follow bind: {err}");
+        return None;
+    }
     remember_chunk(desk, id.clone(), locus_ids);
     Some(id)
 }
@@ -566,6 +679,9 @@ fn open_source(
         }
         return Err("quota:opens".into());
     }
+    if active.park.is_some() {
+        return Ok(OpenOutcome::Waiting);
+    }
     if let Some(last) = active.last_open_ms {
         if active.open_source.is_some() && now_ms < last.saturating_add(MOVE_WAIT_MS) {
             return Ok(OpenOutcome::Waiting);
@@ -579,6 +695,26 @@ fn open_source(
         Err(OpenFault::NoOpener) => return Err("no-opener".into()),
         Err(OpenFault::Failed(reason)) => return Err(reason),
     };
+    if opener.parks() {
+        return match opener.open(&spec) {
+            Ok(()) => {
+                if let Some(active) = desk.active.as_mut() {
+                    active.park = Some(ParkedOpen { source_id: source_id.to_string(), spec });
+                }
+                Ok(OpenOutcome::Parked)
+            }
+            Err(OpenFault::NoOpener) => Err("no-opener".into()),
+            Err(OpenFault::Failed(reason)) => {
+                if let Some(active) = desk.active.as_mut() {
+                    active.opens = active.opens.saturating_add(1);
+                    active.open_source = None;
+                    active.last_open_ms = None;
+                    active.park = None;
+                }
+                Err(reason)
+            }
+        };
+    }
     if desk.active.as_ref().and_then(|active| active.open_source.as_ref()).is_some() {
         opener.close();
     }
@@ -602,6 +738,153 @@ fn open_source(
             Err(reason)
         }
     }
+}
+
+/// `ok: true` marks the parked source opened and inserts the chunk.
+/// A reason marks it failed and parks the next listed source.
+pub(crate) fn plan_report(body: &ReportSourceOpenBody, store: &mut ProjectStore, desk: &mut TourDesk, now_ms: u64) -> Planned {
+    let ok = match report_kind(body) {
+        Ok(ok) => ok,
+        Err(()) => return Planned::Finished(ProposalResult::err(&body.proposal_id, "schema")),
+    };
+    let (tour_project, parked_source) = {
+        let Some(active) = desk.active.as_ref() else {
+            return Planned::Finished(ProposalResult::err(&body.proposal_id, "source_not_in_project"));
+        };
+        let Some(park) = active.park.as_ref() else {
+            return Planned::Finished(ProposalResult::err(&body.proposal_id, "source_not_in_project"));
+        };
+        (active.project_id.clone(), park.source_id.clone())
+    };
+    if tour_project != body.project_id || parked_source != body.source_id {
+        return Planned::Finished(ProposalResult::err(&body.proposal_id, "source_not_in_project"));
+    }
+    let project_id = body.project_id.clone();
+    let source_id = body.source_id.clone();
+    let Some(project) = store.get(&project_id).cloned() else {
+        return Planned::Finished(ProposalResult::err(&body.proposal_id, "source_not_in_project"));
+    };
+    if !project.sources.iter().any(|source| source.source_id == source_id) {
+        return Planned::Finished(ProposalResult::err(&body.proposal_id, "source_not_in_project"));
+    }
+    if ok {
+        if store.set_source_status(&project_id, &source_id, SourceStatus::Opened, None).is_err() {
+            return Planned::Finished(ProposalResult::err(&body.proposal_id, "source_not_in_project"));
+        }
+        if let Some(active) = desk.active.as_mut() {
+            active.opens = active.opens.saturating_add(1);
+            active.last_open_ms = Some(now_ms);
+            active.open_source = Some(source_id.clone());
+            active.park = None;
+        }
+        let ask_id = desk.active.as_ref().and_then(|active| active.ask_id.clone());
+        let project = match store.get(&project_id).cloned() {
+            Some(project) => project,
+            None => return Planned::Finished(ProposalResult::err(&body.proposal_id, "no_such_project")),
+        };
+        let index = project.sources.iter().position(|source| source.source_id == source_id).unwrap_or(0);
+        let source = project.sources.iter().find(|source| source.source_id == source_id).unwrap().clone();
+        let cursor_locus = if index == project.cursor.source_index as usize { project.cursor.locus_id.clone() } else { None };
+        let rows = match highlight_loci(store, &project_id, &source_id, ask_id.as_deref()) {
+            Ok(rows) => rows,
+            Err(message) => return Planned::Finished(ProposalResult::err(&body.proposal_id, message)),
+        };
+        let rows = from_cursor(rows, cursor_locus.as_deref());
+        if rows.is_empty() {
+            let _ = write_cursor(store, &project_id, next_index(&project, index), None, now_ms);
+            return match park_later(desk, store, &source_id, now_ms) {
+                Ok(()) => Planned::Finished(ProposalResult::ok(&body.proposal_id, Some(report_detail(&project_id, &source_id, "opened")))),
+                Err(message) => Planned::Finished(ProposalResult::err(&body.proposal_id, message)),
+            };
+        }
+        let first = rows[0].locus_id.clone();
+        if let Err(message) = write_cursor(store, &project_id, index as u32, Some(first), now_ms) {
+            return Planned::Finished(ProposalResult::err(&body.proposal_id, message));
+        }
+        let seed = seed_for(desk, &source, &rows);
+        return Planned::Insert {
+            proposal_id: body.proposal_id.clone(),
+            seed,
+            detail: report_detail(&project_id, &source_id, "opened"),
+        };
+    }
+    let reason = body.reason.clone().unwrap_or_default();
+    if store.set_source_status(&project_id, &source_id, SourceStatus::Failed, Some(reason)).is_err() {
+        return Planned::Finished(ProposalResult::err(&body.proposal_id, "source_not_in_project"));
+    }
+    if let Some(active) = desk.active.as_mut() {
+        active.opens = active.opens.saturating_add(1);
+        active.open_source = None;
+        active.last_open_ms = None;
+        active.park = None;
+    }
+    match park_later(desk, store, &source_id, now_ms) {
+        Ok(()) => Planned::Finished(ProposalResult::ok(&body.proposal_id, Some(report_detail(&project_id, &source_id, "failed")))),
+        Err(message) => Planned::Finished(ProposalResult::err(&body.proposal_id, message)),
+    }
+}
+
+pub fn report_open(
+    body: &ReportSourceOpenBody,
+    store: &mut ProjectStore,
+    book: &mut TaskBook,
+    ledger: &mut Ledger,
+    desk: &mut TourDesk,
+    now_ms: u64,
+) -> ProposalResult {
+    let planned = plan_report(body, store, desk, now_ms);
+    commit(planned, book, ledger, desk, store, now_ms)
+}
+
+fn report_kind(body: &ReportSourceOpenBody) -> Result<bool, ()> {
+    match (body.ok, body.reason.as_deref()) {
+        (Some(true), None) => Ok(true),
+        (None, Some(reason)) if !reason.is_empty() => Ok(false),
+        _ => Err(()),
+    }
+}
+
+fn report_detail(project_id: &str, source_id: &str, state: &str) -> Value {
+    json!({
+        "projectId": project_id,
+        "sourceId": source_id,
+        "state": state,
+    })
+}
+
+/// Park the next listed source after the one just reported. A parked ask does not count as an open.
+fn park_later(desk: &mut TourDesk, store: &mut ProjectStore, after: &str, now_ms: u64) -> Result<(), String> {
+    if let Some(active) = desk.active.as_mut() {
+        active.open_source = None;
+        active.park = None;
+    }
+    let (project_id, source_ids) = {
+        let Some(active) = desk.active.as_ref() else {
+            return Ok(());
+        };
+        (active.project_id.clone(), active.source_ids.clone())
+    };
+    let Some(pos) = source_ids.iter().position(|id| id == after) else {
+        return Ok(());
+    };
+    let mut opener = ParkOpener;
+    for source_id in source_ids.iter().skip(pos + 1) {
+        let status = store.get(&project_id).and_then(|project| {
+            project.sources.iter().find(|source| source.source_id == *source_id).map(|source| source.status)
+        });
+        if matches!(status, Some(SourceStatus::Failed) | None) {
+            continue;
+        }
+        match open_source(desk, store, source_id, &mut opener, now_ms) {
+            Ok(OpenOutcome::Parked) | Ok(OpenOutcome::Waiting) | Ok(OpenOutcome::Opened) => return Ok(()),
+            Ok(OpenOutcome::Closed) => {}
+            Err(message) if message == "quota:opens" => return Err(message),
+            Err(message) => {
+                let _ = store.set_source_status(&project_id, source_id, SourceStatus::Failed, Some(message));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn move_source(
@@ -1307,5 +1590,261 @@ mod tests {
         book.admit().unwrap();
         book.complete(&next).unwrap();
         assert!(follow_done(&mut desk, &mut scratch.store, &mut book, &mut ledger, &mut opener, 8_000).is_none());
+    }
+
+    fn report_proposal(project: &str, source: &str, extra: &str) -> Proposal {
+        let raw = format!(r#"{{"kind":"reportSourceOpen","proposalId":"r","projectId":"{project}","sourceId":"{source}"{extra}}}"#);
+        serde_json::from_str(&raw).unwrap()
+    }
+
+    fn report_body(proposal: Proposal) -> crate::protocol::ReportSourceOpenBody {
+        let Proposal::ReportSourceOpen(body) = proposal else { panic!("report") };
+        body
+    }
+
+    #[test]
+    fn w1_production_start_parks_and_leaves_the_source_mapped() {
+        let mut scratch = bench("w1");
+        let id = project(&mut scratch.store, &[SourceInput { kind: SourceKind::Web, reference: "https://example.test/a".into() }]);
+        scratch.store.set_source_status(&id, "sr-1", SourceStatus::Mapped, None).unwrap();
+        put(&mut scratch.store, &id, "sr-1", "the quoted line", MatchKind::Exact, None, None, 0);
+        let mut book = TaskBook::new();
+        let mut ledger = Ledger::new();
+        let mut desk = TourDesk::default();
+        let body = body_of(&id, "explain");
+        let planned = route_start(&body, Tier::T1User, &mut scratch.store, &mut desk, 0);
+        let result = commit(planned, &mut book, &mut ledger, &mut desk, &mut scratch.store, 0);
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        assert!(result.detail.unwrap().get("taskId").is_none());
+        assert_eq!(scratch.store.get(&id).unwrap().sources[0].status, SourceStatus::Mapped);
+        assert_eq!(desk.active.as_ref().unwrap().opens, 0);
+        assert!(desk.active.as_ref().unwrap().last_open_ms.is_none());
+        let req = open_request_for(&desk, &id).unwrap();
+        assert_eq!(req["kind"], "web");
+        assert_eq!(req["sourceId"], "sr-1");
+        assert_eq!(req["reference"], "https://example.test/a");
+        let profile = req["profile"].as_str().unwrap();
+        assert!(profile.ends_with("/pachakutech/locate-chromium"), "{profile}");
+        assert!(!profile.contains(".config"), "{profile}");
+        assert_eq!(req["port"], 9222);
+        assert!(open_request_for(&desk, "pj-0123456789abcdef").is_none());
+
+        let mut two = bench("w1b");
+        let id = project(
+            &mut two.store,
+            &[
+                SourceInput { kind: SourceKind::Web, reference: "https://example.test/a".into() },
+                SourceInput { kind: SourceKind::Web, reference: "https://example.test/b".into() },
+            ],
+        );
+        two.store.set_source_status(&id, "sr-1", SourceStatus::Mapped, None).unwrap();
+        two.store.set_source_status(&id, "sr-2", SourceStatus::Mapped, None).unwrap();
+        let mut book = TaskBook::new();
+        let mut ledger = Ledger::new();
+        let mut desk = TourDesk::default();
+        let body = body_of(&id, "explain");
+        let planned = route_start(&body, Tier::T1User, &mut two.store, &mut desk, 0);
+        let result = commit(planned, &mut book, &mut ledger, &mut desk, &mut two.store, 0);
+        assert_eq!(result.status, "ok");
+        let mut opener = ParkOpener;
+        let waited = apply(
+            &mut desk,
+            &mut two.store,
+            OpenSource::Open { project_id: id.clone(), source_id: "sr-2".into() },
+            &mut opener,
+            10,
+        )
+        .unwrap();
+        assert!(matches!(waited, OpenOutcome::Waiting));
+        assert_eq!(open_request_for(&desk, &id).unwrap()["sourceId"], "sr-1");
+        assert_eq!(desk.active.as_ref().unwrap().opens, 0);
+        assert!(two.store.get(&id).unwrap().sources.iter().all(|source| source.status == SourceStatus::Mapped));
+    }
+
+    #[test]
+    fn w2_a_report_opens_or_fails_and_parks_the_next() {
+        let mut scratch = bench("w2");
+        let id = project(&mut scratch.store, &[SourceInput { kind: SourceKind::Web, reference: "https://example.test/a".into() }]);
+        scratch.store.set_source_status(&id, "sr-1", SourceStatus::Mapped, None).unwrap();
+        put(&mut scratch.store, &id, "sr-1", "the quoted line", MatchKind::Exact, None, None, 0);
+        let mut book = TaskBook::new();
+        let mut ledger = Ledger::new();
+        let mut desk = TourDesk::default();
+        let body = body_of(&id, "explain");
+        let planned = route_start(&body, Tier::T1User, &mut scratch.store, &mut desk, 0);
+        assert_eq!(commit(planned, &mut book, &mut ledger, &mut desk, &mut scratch.store, 0).status, "ok");
+        let reported = report_open(&report_body(report_proposal(&id, "sr-1", r#","ok":true"#)), &mut scratch.store, &mut book, &mut ledger, &mut desk, 5);
+        assert_eq!(reported.status, "ok", "{:?}", reported.error);
+        let task_id = reported.detail.unwrap()["taskId"].as_str().unwrap().to_string();
+        assert!(!task_id.is_empty());
+        assert_eq!(scratch.store.get(&id).unwrap().sources[0].status, SourceStatus::Opened);
+        assert!(open_request_for(&desk, &id).is_none());
+        assert_eq!(desk.active.as_ref().unwrap().opens, 1);
+        assert_eq!(desk.active.as_ref().unwrap().last_open_ms, Some(5));
+        let mut opener = Rec::new();
+        let waited = apply(
+            &mut desk,
+            &mut scratch.store,
+            OpenSource::Open { project_id: id.clone(), source_id: "sr-1".into() },
+            &mut opener,
+            100,
+        )
+        .unwrap();
+        assert!(matches!(waited, OpenOutcome::Waiting));
+        assert!(opener.calls.is_empty());
+
+        let mut next = bench("w2b");
+        let id = project(
+            &mut next.store,
+            &[
+                SourceInput { kind: SourceKind::Web, reference: "https://pay.example/a".into() },
+                SourceInput { kind: SourceKind::File, reference: "/tmp/papers/paper.pdf".into() },
+            ],
+        );
+        next.store.set_source_status(&id, "sr-1", SourceStatus::Mapped, None).unwrap();
+        next.store.set_source_status(&id, "sr-2", SourceStatus::Mapped, None).unwrap();
+        put(&mut next.store, &id, "sr-2", "the quoted line", MatchKind::Exact, None, Some("2"), 0);
+        let mut book = TaskBook::new();
+        let mut ledger = Ledger::new();
+        let mut desk = TourDesk::default();
+        let body = body_of(&id, "explain");
+        let planned = route_start(&body, Tier::T1User, &mut next.store, &mut desk, 0);
+        assert_eq!(commit(planned, &mut book, &mut ledger, &mut desk, &mut next.store, 0).status, "ok");
+        let failed = report_open(
+            &report_body(report_proposal(&id, "sr-1", r#","reason":"paywall""#)),
+            &mut next.store,
+            &mut book,
+            &mut ledger,
+            &mut desk,
+            8,
+        );
+        assert_eq!(failed.status, "ok", "{:?}", failed.error);
+        assert!(failed.detail.unwrap().get("taskId").is_none());
+        let first = next.store.get(&id).unwrap().sources.iter().find(|source| source.source_id == "sr-1").unwrap();
+        assert_eq!(first.status, SourceStatus::Failed);
+        assert_eq!(first.reason.as_deref(), Some("paywall"));
+        let req = open_request_for(&desk, &id).unwrap();
+        assert_eq!(req["kind"], "pdf");
+        assert_eq!(req["sourceId"], "sr-2");
+        assert_eq!(req["reference"], "/tmp/papers/paper.pdf");
+        assert!(req.get("profile").is_none());
+        assert!(req.get("port").is_none());
+        assert_eq!(next.store.get(&id).unwrap().sources.iter().find(|source| source.source_id == "sr-2").unwrap().status, SourceStatus::Mapped);
+        assert_eq!(desk.active.as_ref().unwrap().opens, 1);
+    }
+
+    #[test]
+    fn w3_a_report_is_the_parked_source_only() {
+        let mut scratch = bench("w3");
+        let id = project(
+            &mut scratch.store,
+            &[
+                SourceInput { kind: SourceKind::Web, reference: "https://example.test/a".into() },
+                SourceInput { kind: SourceKind::Web, reference: "https://example.test/b".into() },
+            ],
+        );
+        scratch.store.set_source_status(&id, "sr-1", SourceStatus::Mapped, None).unwrap();
+        scratch.store.set_source_status(&id, "sr-2", SourceStatus::Mapped, None).unwrap();
+        let mut book = TaskBook::new();
+        let mut ledger = Ledger::new();
+        let mut desk = TourDesk::default();
+        let body = body_of(&id, "explain");
+        let planned = route_start(&body, Tier::T1User, &mut scratch.store, &mut desk, 0);
+        assert_eq!(commit(planned, &mut book, &mut ledger, &mut desk, &mut scratch.store, 0).status, "ok");
+        let wrong = report_open(
+            &report_body(report_proposal(&id, "sr-2", r#","ok":true"#)),
+            &mut scratch.store,
+            &mut book,
+            &mut ledger,
+            &mut desk,
+            1,
+        );
+        assert_eq!(wrong.error.as_deref(), Some("source_not_in_project"));
+        assert_eq!(open_request_for(&desk, &id).unwrap()["sourceId"], "sr-1");
+        assert!(scratch.store.get(&id).unwrap().sources.iter().all(|source| source.status == SourceStatus::Mapped));
+
+        let mut reg = crate::registry::Registry::new();
+        let proposal: Proposal = serde_json::from_str(
+            r#"{"kind":"reportSourceOpen","proposalId":"r","projectId":"pj-0123456789abcdef","sourceId":"sr-1","ok":true}"#,
+        )
+        .unwrap();
+        let refused = reg.route_tour_proposal(&proposal, Tier::T3Sidecar, 0).unwrap();
+        assert_eq!(refused.error.as_deref(), Some("not_allowed_for_tier:reportSourceOpen"));
+
+        assert!(serde_json::from_str::<Proposal>(
+            r#"{"kind":"reportSourceOpen","proposalId":"r","projectId":"pj-0123456789abcdef","sourceId":"sr-1","ok":true,"url":"https://evil.test"}"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<Proposal>(
+            r#"{"kind":"reportSourceOpen","proposalId":"r","projectId":"pj-0123456789abcdef","sourceId":"sr-1","reason":"x","path":"/tmp/a"}"#
+        )
+        .is_err());
+        for extra in ["", r#","ok":false"#, r#","ok":true,"reason":"x""#, r#","reason":"""#] {
+            let bad = report_open(
+                &report_body(report_proposal("pj-0123456789abcdef", "sr-1", extra)),
+                &mut scratch.store,
+                &mut book,
+                &mut ledger,
+                &mut desk,
+                2,
+            );
+            assert_eq!(bad.error.as_deref(), Some("schema"), "{extra}");
+        }
+        assert_eq!(open_request_for(&desk, &id).unwrap()["sourceId"], "sr-1");
+    }
+
+    #[test]
+    fn w6_production_names_a_spec_and_spawns_no_viewer() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        let tour = fs::read_to_string(root.join("tour.rs")).unwrap();
+        let tour_head = tour.split("mod tests").next().unwrap();
+        assert!(!tour_head.contains("Command::new"));
+        assert!(!tour_head.contains("evince"));
+        assert!(!tour_head.replace("locate-chromium", "").contains("chromium"));
+        let socket = fs::read_to_string(root.join("socket.rs")).unwrap();
+        let socket_head = socket.split("mod tests").next().unwrap();
+        assert!(!socket_head.contains("Command::new"));
+        assert!(!socket_head.contains("chromium"));
+        assert!(!socket_head.contains("evince"));
+        let overlay = fs::read_to_string(root.join("overlay.rs")).unwrap();
+        assert!(!overlay.contains("evince"));
+        assert!(!overlay.contains("chromium"));
+    }
+
+    #[test]
+    fn w7_start_parks_when_no_task_is_waiting() {
+        let mut scratch = bench("w7");
+        let id = project(&mut scratch.store, &[SourceInput { kind: SourceKind::Web, reference: "https://example.test/a".into() }]);
+        put(&mut scratch.store, &id, "sr-1", "the quoted line", MatchKind::Exact, None, None, 0);
+        let mut book = TaskBook::new();
+        let mut ledger = Ledger::new();
+        let mut desk = TourDesk::default();
+        let body = body_of(&id, "explain");
+        let listed = start(&body, Tier::T2Client, &mut scratch.store, &mut book, &mut ledger, &mut desk, &mut ParkOpener, 0);
+        assert_eq!(listed.detail.unwrap()["state"], "awaitingStart");
+        assert!(open_request_for(&desk, &id).is_none());
+        assert!(on_hotkey(&mut desk, &mut scratch.store, &mut book, &mut ledger, &mut ParkOpener, Hotkey::Start, 1));
+        assert_eq!(phase_name(&desk), Some("active"));
+        assert_eq!(open_request_for(&desk, &id).unwrap()["reference"], "https://example.test/a");
+        assert!(task_id(&desk).is_none());
+        assert_ne!(scratch.store.get(&id).unwrap().sources[0].status, SourceStatus::Opened);
+        assert_eq!(desk.active.as_ref().unwrap().opens, 0);
+
+        let mut waiting = bench("w7b");
+        let id = project(&mut waiting.store, &[SourceInput { kind: SourceKind::Web, reference: "https://example.test/a".into() }]);
+        put(&mut waiting.store, &id, "sr-1", "the quoted line", MatchKind::Exact, None, None, 0);
+        let mut book = TaskBook::new();
+        let mut ledger = Ledger::new();
+        let raw = r#"{"kind":"createTask","proposalId":"c","presenceId":"p-1","mode":"explain","items":[{"query":"the line","scroll":true}]}"#;
+        let proposal: Proposal = serde_json::from_str(raw).unwrap();
+        let created = route_task(&proposal, Tier::T2Client, &mut book, &mut ledger, true, 1).unwrap();
+        let task_id = created.detail.unwrap()["taskId"].as_str().unwrap().to_string();
+        let mut desk = TourDesk::default();
+        let body = body_of(&id, "explain");
+        assert_eq!(start(&body, Tier::T2Client, &mut waiting.store, &mut book, &mut ledger, &mut desk, &mut ParkOpener, 2).status, "ok");
+        assert!(on_hotkey(&mut desk, &mut waiting.store, &mut book, &mut ledger, &mut ParkOpener, Hotkey::Start, 3));
+        assert_eq!(book.query_value(&task_id).unwrap()["state"], "active");
+        assert_eq!(phase_name(&desk), Some("awaitingStart"));
+        assert!(open_request_for(&desk, &id).is_none());
     }
 }
