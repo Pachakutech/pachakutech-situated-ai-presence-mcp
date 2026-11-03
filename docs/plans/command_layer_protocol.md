@@ -211,7 +211,7 @@ Locate is asynchronous. Match results arrive in the ledger and via `queryTask`.
 
 ## 6. MCP tools (T2)
 
-`createPresenceTask`, `cancelPresenceTask`, `queryPresenceTask`, `listPhraseFlags`, `queryDocMap`, `buildDocMap`, `createProject`, `addSources`, `startProjectTour`, `queryProject`, `exportProject`, and the convenience `showCitations({ citations: [{ url, claim, quote? }] })` (creates a project and starts a flow citation walk). Skill copy (`skills/presence/SKILL.md`) additions:
+`createPresenceTask`, `cancelPresenceTask`, `queryPresenceTask`, `listPhraseFlags`, `queryDocMap`, `buildDocMap`, `createProject`, `addSources`, `startProjectTour`, `queryProject`, `exportProject`, and the convenience `showCitations({ citations: [{ url, claim, quote? }], mode?, pace? })` (creates a project and starts a citation walk). Omitted `mode` and `pace` are `explain` and `flow`. Skill copy (`skills/presence/SKILL.md`) additions:
 - You may choose mode, `controls` (none or check), pace and narration text. You cannot set or change any flag.
 - After a task, read `listPhraseFlags` with `decidedBy: "T0"` for decisions. Do not ask the user in prose when the UI can collect it.
 - `acknowledged` in a select task means selected. `dwelled` without `acknowledged` means passed over.

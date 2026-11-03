@@ -869,7 +869,12 @@ impl ProjectStore {
         }
         let project = self.get(id).ok_or(StoreError::NoSuchProject)?;
         let loci = self.loci(id, since_pseq, limit)?;
-        let events = self.projects.get(id).map(|loaded| loaded.events.clone()).unwrap_or_default();
+        let (events, all_loci) = self
+            .projects
+            .get(id)
+            .map(|loaded| (loaded.events.clone(), loaded.loci.clone()))
+            .unwrap_or_default();
+        let register = register_value(&all_loci, &events);
         let mut loci_json = Vec::with_capacity(loci.len());
         for locus in &loci {
             let mut value = serde_json::to_value(locus).map_err(|_| StoreError::Schema)?;
@@ -887,6 +892,7 @@ impl ProjectStore {
             "keeps": keeps.iter().map(keep_value).collect::<Vec<_>>(),
             "cursor": project.cursor,
             "pseq": pseq,
+            "register": register,
         }))
     }
 
@@ -1209,6 +1215,82 @@ fn is_decision(ev: &ProjectEvent) -> bool {
         "viewed" => ev.viewed.as_deref() == Some("acknowledged"),
         _ => false,
     }
+}
+
+/// Current hand condition of each locus the tour has entered. Building this does not append.
+fn register_value(loci: &[StoredLocus], events: &[ProjectEvent]) -> Value {
+    struct Slot {
+        condition: &'static str,
+        task_id: Option<String>,
+        from_hand: bool,
+    }
+    let mut order = Vec::new();
+    let mut slots: HashMap<String, Slot> = HashMap::new();
+    for ev in events {
+        let Some(locus_id) = ev.locus_id.as_deref().filter(|id| !id.is_empty()) else {
+            continue;
+        };
+        let hand = ev.by == "T0" && matches!(ev.kind.as_str(), "skip" | "accept" | "deny");
+        let tour = ev.kind == "tour";
+        if !hand && !tour {
+            continue;
+        }
+        if !slots.contains_key(locus_id) {
+            order.push(locus_id.to_string());
+        }
+        let slot = slots.entry(locus_id.to_string()).or_insert(Slot {
+            condition: "skip",
+            task_id: None,
+            from_hand: false,
+        });
+        if hand {
+            slot.condition = match ev.kind.as_str() {
+                "accept" => "accept",
+                "deny" => "deny",
+                _ => "skip",
+            };
+            slot.task_id = ev.task_id.clone();
+            slot.from_hand = true;
+        } else if tour && !slot.from_hand {
+            slot.task_id = ev.task_id.clone();
+        }
+    }
+    let mut skip = Vec::new();
+    let mut accept = Vec::new();
+    let mut deny = Vec::new();
+    for locus_id in order {
+        let slot = &slots[&locus_id];
+        let locus = loci.iter().find(|row| row.locus.locus_id == locus_id);
+        let mut entry = json!({
+            "locusId": locus_id,
+            "phraseId": locus_id,
+            "words": locus.map(|row| row.locus.words.as_str()).unwrap_or(""),
+        });
+        if let Some(source_id) = locus.map(|row| row.locus.source_id.as_str()) {
+            entry["sourceId"] = json!(source_id);
+        }
+        let ask = locus.and_then(|row| row.locus.ask_id.clone()).filter(|ask| !ask.is_empty()).or_else(|| {
+            events.iter().rev().find_map(|ev| {
+                if ev.locus_id.as_deref() == Some(locus_id.as_str()) {
+                    ev.ask_id.clone().filter(|ask| !ask.is_empty())
+                } else {
+                    None
+                }
+            })
+        });
+        if let Some(ask_id) = ask {
+            entry["askId"] = json!(ask_id);
+        }
+        if let Some(task_id) = slot.task_id.as_ref().filter(|task| !task.is_empty()) {
+            entry["taskId"] = json!(task_id);
+        }
+        match slot.condition {
+            "accept" => accept.push(entry),
+            "deny" => deny.push(entry),
+            _ => skip.push(entry),
+        }
+    }
+    json!({ "skip": skip, "accept": accept, "deny": deny })
 }
 
 fn keep_value(keep: &Keep) -> Value {
@@ -2133,11 +2215,16 @@ mod tests {
         };
         let first = query(&mut store, "");
         assert_eq!(first["pseq"], 0);
+        assert!(first.get("decisions").is_none());
+        assert!(first["register"]["skip"].as_array().unwrap().is_empty());
+        assert!(first["register"]["accept"].as_array().unwrap().is_empty());
+        assert!(first["register"]["deny"].as_array().unwrap().is_empty());
         assert_eq!(first["loci"].as_array().unwrap().len(), 100);
         assert_eq!(first["loci"][0]["locusId"], ids[0]);
         assert_eq!(first["loci"][99]["locusId"], ids[99]);
         assert!(first["loci"].as_array().unwrap().iter().all(|row| row.get("pseq").is_none()));
         let page = query(&mut store, r#","sincePseq":1"#);
+        assert_eq!(page["register"], first["register"]);
         assert_eq!(page["loci"][0]["locusId"], ids[1]);
         assert_eq!(page["loci"].as_array().unwrap().len(), 100);
         let capped = query(&mut store, r#","limit":1000"#);
@@ -2312,6 +2399,185 @@ mod tests {
         assert_eq!(row["decision"], decision);
         assert_eq!(row["decisionBy"], decision_by);
         assert_eq!(row["notes"][0]["text"], "cut the second clause");
+    }
+
+    fn push_event(
+        ledger: &mut Ledger,
+        id: &str,
+        phrase: &str,
+        kind: LedgerKind,
+        viewed: Option<ViewedTier>,
+        by: Tier,
+        locus: &str,
+        task: &str,
+    ) {
+        ledger
+            .projects_mut()
+            .unwrap()
+            .append_event(
+                id,
+                &LedgerEvent {
+                    seq: 1,
+                    ts_ms: 1,
+                    phrase_id: phrase.into(),
+                    task_id: Some(task.into()),
+                    kind,
+                    viewed,
+                    matched: None,
+                    uv: None,
+                    query: None,
+                    doc_key: None,
+                    by,
+                    dwell_ms: None,
+                    project_id: Some(id.into()),
+                    ask_id: Some("ak-1".into()),
+                    locus_id: Some(locus.into()),
+                    note: None,
+                },
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn register_groups_skip_accept_and_deny() {
+        let tmp = scratch("reg");
+        let mut ledger = open_ledger(&tmp.0);
+        let id = ledger
+            .projects_mut()
+            .unwrap()
+            .create(
+                Tier::T1User,
+                "Register",
+                &[AskInput { text: "Is it so?".into(), kind: AskKind::Question }],
+                &[SourceInput { kind: SourceKind::Web, reference: "https://example.com/a".into() }],
+                &[],
+                1,
+            )
+            .unwrap();
+        let mut first = locus_in("sr-1", "the quoted line", 0);
+        first.ask_id = Some("ak-1".into());
+        let mut second = locus_in("sr-1", "the second line", 20);
+        second.ask_id = Some("ak-1".into());
+        let mut stored_only = locus_in("sr-1", "not yet up", 40);
+        stored_only.ask_id = Some("ak-1".into());
+        let mut checkbox = locus_in("sr-1", "old square", 60);
+        checkbox.ask_id = Some("ak-1".into());
+        let locus_a = ledger.projects_mut().unwrap().upsert_locus(&id, first).unwrap();
+        let locus_b = ledger.projects_mut().unwrap().upsert_locus(&id, second).unwrap();
+        let locus_c = ledger.projects_mut().unwrap().upsert_locus(&id, stored_only).unwrap();
+        let locus_d = ledger.projects_mut().unwrap().upsert_locus(&id, checkbox).unwrap();
+        ledger.projects_mut().unwrap().register_task(&id, "tk-1", "select", Some("ak-1"), Some("sr-1"), 1).unwrap();
+        push_event(&mut ledger, &id, &locus_a, LedgerKind::Tour, None, Tier::T2Client, &locus_a, "tk-1");
+        push_event(&mut ledger, &id, &locus_b, LedgerKind::Tour, None, Tier::T2Client, &locus_b, "tk-1");
+        push_event(
+            &mut ledger,
+            &id,
+            &locus_b,
+            LedgerKind::Viewed,
+            Some(ViewedTier::Acknowledged),
+            Tier::T0Physical,
+            &locus_b,
+            "tk-1",
+        );
+        let keeps_before = ledger.projects().unwrap().keeps(&id).unwrap();
+        assert_eq!(keeps_before.len(), 1);
+        assert_eq!(keeps_before[0].locus_id, locus_b);
+        push_event(&mut ledger, &id, &locus_a, LedgerKind::Accept, None, Tier::T0Physical, &locus_a, "tk-1");
+        push_event(
+            &mut ledger,
+            &id,
+            &locus_a,
+            LedgerKind::Viewed,
+            Some(ViewedTier::Shown),
+            Tier::T2Client,
+            &locus_a,
+            "tk-1",
+        );
+        push_event(
+            &mut ledger,
+            &id,
+            &locus_a,
+            LedgerKind::Viewed,
+            Some(ViewedTier::Dwelled),
+            Tier::T2Client,
+            &locus_a,
+            "tk-1",
+        );
+        push_event(&mut ledger, &id, &locus_d, LedgerKind::Approved, None, Tier::T0Physical, &locus_d, "tk-1");
+        let path = tmp.0.join(&id).join("events.jsonl");
+        let before = fs::read(&path).unwrap();
+        let query = |ledger: &mut Ledger, extra: &str| {
+            let proposal = parse(&format!(r#"{{"kind":"queryProject","proposalId":"q","projectId":"{id}"{extra}}}"#));
+            let result = route_project(&proposal, Tier::T2Client, ledger.projects_mut(), 2).unwrap();
+            assert_eq!(result.status, "ok", "{:?}", result.error);
+            result.detail.unwrap()
+        };
+        let detail = query(&mut ledger, "");
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert!(detail.get("decisions").is_none());
+        assert_eq!(detail["register"]["accept"].as_array().unwrap().len(), 1);
+        assert_eq!(detail["register"]["accept"][0]["locusId"], locus_a);
+        assert_eq!(detail["register"]["accept"][0]["phraseId"], locus_a);
+        assert_eq!(detail["register"]["accept"][0]["words"], "the quoted line");
+        assert_eq!(detail["register"]["accept"][0]["sourceId"], "sr-1");
+        assert_eq!(detail["register"]["accept"][0]["askId"], "ak-1");
+        assert_eq!(detail["register"]["accept"][0]["taskId"], "tk-1");
+        assert_eq!(detail["register"]["skip"].as_array().unwrap().len(), 1);
+        assert_eq!(detail["register"]["skip"][0]["locusId"], locus_b);
+        assert_eq!(detail["register"]["skip"][0]["phraseId"], locus_b);
+        assert_eq!(detail["register"]["skip"][0]["words"], "the second line");
+        assert!(detail["register"]["deny"].as_array().unwrap().is_empty());
+        let listed: Vec<String> = ["skip", "accept", "deny"]
+            .into_iter()
+            .flat_map(|bucket| {
+                detail["register"][bucket]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|row| row["locusId"].as_str().unwrap().to_string())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert!(!listed.iter().any(|locus| locus == &locus_c || locus == &locus_d));
+        assert_eq!(detail["keeps"].as_array().unwrap().len(), 1);
+        assert_eq!(detail["keeps"][0]["locusId"], locus_b);
+        assert_eq!(ledger.projects().unwrap().keeps(&id).unwrap().len(), keeps_before.len());
+        let hands = |text: &str| -> Vec<serde_json::Value> {
+            text.lines()
+                .filter(|line| !line.is_empty())
+                .map(|line| serde_json::from_str(line).unwrap())
+                .filter(|row: &serde_json::Value| matches!(row["kind"].as_str(), Some("skip" | "accept" | "deny")))
+                .collect()
+        };
+        assert_eq!(hands(&String::from_utf8(before.clone()).unwrap()).len(), 1);
+        let paged = query(&mut ledger, r#","sincePseq":100000"#);
+        assert!(paged["loci"].as_array().unwrap().is_empty());
+        assert_eq!(paged["register"], detail["register"]);
+        assert_eq!(fs::read(&path).unwrap(), before);
+        push_event(&mut ledger, &id, &locus_a, LedgerKind::Skip, None, Tier::T0Physical, &locus_a, "tk-1");
+        let after_skip = fs::read(&path).unwrap();
+        let moved = query(&mut ledger, "");
+        assert_eq!(fs::read(&path).unwrap(), after_skip);
+        assert!(moved["register"]["accept"].as_array().unwrap().is_empty());
+        assert!(moved["register"]["deny"].as_array().unwrap().is_empty());
+        let skip_ids: Vec<_> = moved["register"]["skip"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["locusId"].as_str().unwrap())
+            .collect();
+        assert!(skip_ids.contains(&locus_a.as_str()));
+        assert!(skip_ids.contains(&locus_b.as_str()));
+        assert_eq!(skip_ids.len(), 2);
+        let hand_rows = hands(&String::from_utf8(after_skip).unwrap());
+        assert_eq!(hand_rows.len(), 2);
+        assert_eq!(hand_rows[0]["kind"], "accept");
+        assert_eq!(hand_rows[0]["locusId"], locus_a);
+        assert_eq!(hand_rows[1]["kind"], "skip");
+        assert_eq!(hand_rows[1]["locusId"], locus_a);
+        assert!(hand_rows[1]["pseq"].as_u64().unwrap() > hand_rows[0]["pseq"].as_u64().unwrap());
+        assert_eq!(moved["keeps"].as_array().unwrap().len(), 1);
+        assert_eq!(moved["keeps"][0]["locusId"], locus_b);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # The hand on the highlight, and the phrase it belongs to
 
-Status: coded in the working tree, 2 November 2026. The unit tests named under Tests pass in the daemon suite. The viseme failure is untouched. A live press on the glass is still the machine check, after a release build is staged and the daemon is started. This ticket takes no C-number. It does not reorder C12 or C13. The squares stay unpainted. `queryProject` still does not return the rows; that read is the register note in the C13 brief.
+Status: coded in the working tree, 2 November 2026. The unit tests named under Tests pass in the daemon suite. The viseme failure is untouched. A live press on the glass is still the machine check, after a release build is staged and the daemon is started. This ticket takes no C-number. It does not reorder C12 or C13. The squares stay unpainted. `queryProject` returns `register` as the C13 note specifies.
 
 `highlight_switch.md` is the order for the component. `review_demo.md` is the register that component fills. The design sentence in `local_multimodal_reflex.md` stays as it is: accept a phrase id the project already chose, mint `ph-n` only when an `observePhrase` arrives without one, and the research locus id and the ledger phrase id are the same string when a tour shows that locus.
 
@@ -132,7 +132,7 @@ Order on a successful insert:
 
 `append_user` is still the only T0 writer. Once the binding exists, `push` stamps `project_id`, `locus_id`, and `ask_id` and calls `append_event` before the in-memory event is stored. `events.jsonl` grows, `pseq` moves, and the line is durable before the call returns. The binding itself is not a hand row. The hand row is.
 
-`queryProject` still returns the project, the loci, the keeps, the cursor, and `pseq`. It has no register. `pseq` on that reply already moves when a hand row is stored. The reading that names skip, accept, and deny is the register note in the C13 brief. The live terminal does not wait on that tool.
+`queryProject` returns the project, the loci, the keeps, the cursor, `pseq`, and `register`. The register names skip, accept, and deny. `pseq` moves when a hand row is stored. The live terminal does not wait on that tool.
 
 ## When the person takes the scroll
 

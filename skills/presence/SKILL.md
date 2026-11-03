@@ -57,6 +57,10 @@ The presences and artifacts live in a shared substrate, not in your context wind
 
 **Three conditions.** A highlight the user can press is skip, accept, or deny. Yellow is skip, green is accept, red is deny. While the tour is waiting on them the highlight is yellow, and the register reads skip until they choose accept or deny. You do not write those rows. If you want to treat a stretch of skips as an abstention, or any other contract over time, that reading is yours to define. The daemon records the three conditions.
 
+**Project.** A project is a list of sources the daemon keeps on disk. Read it with `queryProject`. The register on that reply is skip, accept, and deny for the loci the tour has put up. A locus with no hand row yet is skip. You do not write those rows. Notes on the loci are the user's words. The cursor on that reply is where the tour resumes. You may propose sources and a stance.
+
+**Citations.** `showCitations` takes URLs, the claim, and the quote when you have one. The tour waits for the user's start. Omit `mode` and `pace` for the narrated check. Pass `select` and `wait` when the user is recording the register, and re-read `queryProject` as the hand lands. A quote the page does not contain is reported as a near passage, and it is not presented as the quoted words.
+
 **Ask.** The user asks with `presence ask` on the command socket. The ask can create a task after they confirm the mode. It cannot acknowledge, approve, or discard. A transcript is the same ask.
 
 **Report.** `presence ledger` reads the task's phrases and the user's answers. The table and the watch file are copies. Editing a copy does not change the ledger.
