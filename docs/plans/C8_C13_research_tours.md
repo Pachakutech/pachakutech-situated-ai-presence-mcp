@@ -268,7 +268,7 @@ M1 through M13 pass. Commit title: `daemon: openSource and the multi-source tour
 
 ### Goal
 
-`exportProject` rebuilds the files under `projects/<id>/export/` from keeps, decisions, loci, and citation facts. Editing a file does not change a keep. A client cannot choose the directory or the names.
+`exportProject` rebuilds the files under `projects/<id>/export/` from keeps, decisions, loci, and citation facts. Editing a file does not change a keep. A client cannot choose the directory or the names. The acknowledge message and the approve message this brief still names are one accept under `highlight_switch.md`. This ticket, when written, reads a review tour's accepts as the keeps. The switch is not painted here.
 
 ### Files
 
@@ -335,7 +335,7 @@ N1 through N12 pass. Commit title: `daemon: project export files (C12)`.
 
 ### Goal
 
-The outer client can create a project, read it, start a tour, and export it, through the MCP tools on `presence.sock`. The daemon still enforces the tier. The skill tells the client what it may not write.
+The outer client can create a project, read it, start a tour, and export it, through the MCP tools on `presence.sock`. The daemon still enforces the tier. The skill tells the client what it may not write. The report the frontier model gives when asked how the review stands is this read: the accept, deny, and abstain register in `review_demo.md`. The live terminal does not wait on this tool. On-screen `shown` and `dwelled` stay a separate watch.
 
 ### Tools
 

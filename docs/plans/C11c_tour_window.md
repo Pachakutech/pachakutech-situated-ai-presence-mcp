@@ -86,7 +86,7 @@ No new crate. The viseme failure stays. This ticket does not map a source, does 
 
 ## Out of scope
 
-Painting `control_rects` and routing a glass click to `task.hit`. That is the button layer. C9b's map worker. Phrase binding and `register_task`. C12 and C13. A CDP client inside the daemon. Writer. Link following. A second Chromium on the locate profile.
+Painting `control_rects` and routing a glass click to `task.hit`. That is the button layer. The decision control those squares were going to be is the tint, specified in `highlight_switch.md`: yellow for not chosen yet, green for accept, red for deny. Abstain is a later report, specified in `review_demo.md`. On-screen `shown` and `dwelled` stay a separate watch. This ticket still does not paint it. C9b's map worker. Phrase binding and `register_task`. C12 and C13. A CDP client inside the daemon. Writer. Link following. A second Chromium on the locate profile.
 
 ## Done when
 

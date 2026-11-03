@@ -215,6 +215,8 @@ Locate is asynchronous. Match results arrive in the ledger and via `queryTask`.
 - You may choose mode, `controls` (none or check), pace and narration text. You cannot set or change any flag.
 - After a task, read `listPhraseFlags` with `decidedBy: "T0"` for decisions. Do not ask the user in prose when the UI can collect it.
 - `acknowledged` in a select task means selected. `dwelled` without `acknowledged` means passed over.
+
+The decision control those lines describe is superseded by `highlight_switch.md` (2 November 2026). The highlight is yellow, green, or red. The client still cannot set the color. `controls: check` against a yes/no pair is the order that note replaces. The rows below remain the tests of the code that landed.
 - Treat `mismatch` and `not_found` as your finding failing, not the user rejecting.
 
 ## 7. Test list

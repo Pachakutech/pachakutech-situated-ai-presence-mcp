@@ -26,7 +26,7 @@ That paragraph is the store as of C7b. C8 through C11 have since landed, and T2 
 
 **Two cursors.** The tour cursor is `(sourceIndex, locusId)`. C11 writes it so a walk resumes. The preferences cursor is the decision record the model reads: keeps, T0 decisions, and notes, in the order the user wrote them. `pseq` moves when one lands. The latest decision names the locus the user just filled. `sincePseq` pages locus rows. The preferences feed is `keeps`, `decisions`, and the notes on the loci.
 
-**How the model observes a review in progress.** `queryProject` is the read, once C13 exposes it. Each tool is one reply. The model re-reads while the user is deciding. A select or approve tour in `wait` pace is the review that fills preferences. An explain tour in `flow` pace is the narrated citation check: it records `matchKind`, and an acknowledgement in that mode is not a keep. `showCitations` keeps `explain` and `flow` when `mode` and `pace` are omitted, and it forwards `mode` and `pace` when the caller sets them. A preference review is `select` and `wait`.
+**How the model observes a review in progress.** `queryProject` is the read, once C13 exposes it. Each tool is one reply. The model re-reads while the user is deciding. The demo of that review is the register in `review_demo.md`: accept and deny as the hand makes them, and an abstain only when a presentation ends after the person engaged and left the highlight yellow. On-screen `shown` and `dwelled` stay a separate watch. Yellow means not chosen yet. A select or approve tour in `wait` pace is the review that fills preferences. An explain tour in `flow` pace is the narrated citation check: it records `matchKind`, and an acknowledgement in that mode is not a keep. `showCitations` keeps `explain` and `flow` when `mode` and `pace` are omitted, and it forwards `mode` and `pace` when the caller sets them. A preference review is `select` and `wait`.
 
 **What the reply has to carry.** Beside the fields C7 already returns, `queryProject` includes `decisions`: each T0 acknowledge, clear, approve, and discard, with locus, ask, time, and `by`. A no is visible on that reply. Notes stay on the loci. The tour cursor remains the resume point.
 
@@ -53,6 +53,8 @@ These follow `reflex-review.md` ("Three records") with additions.
 - In a **select** tour, `viewed: acknowledged` (checkbox, highlight click or hotkey). This is the default for research tours, matching your "select a few for collection".
 - In an **approve** tour, `approved`. Use approve when the researcher wants a full audit of yes and no (the review's decision report).
 - Both are T0-only ledger events, so the rule "only the user's hands keep something" carries over unchanged. Unchecking removes a keep. A passage the user passed over is neither kept nor rejected.
+
+The control those two bullets split, an acknowledge against an approve, is superseded by `highlight_switch.md` (2 November 2026). One highlight carries not-yet-chosen, accept, and deny. Yellow means not chosen yet. Abstain is the report in `review_demo.md`, written when the presentation ends after engagement, and not before. A review tour's accept is the keep. An explain tour's accept is recorded and is not a keep. The bullets above describe the code that has landed. The switch is the order for the control that has not been painted.
 
 The cursor on the project is the tour resume point (section 5). The live user preferences cursor is the keeps, the T0 decisions, and the notes, read back while the review is still being filled (section 1a).
 
@@ -225,6 +227,8 @@ The sidecar gets read-only access to `queryProject` and the doc map, and may `cr
 | biblatex child entry per quote (`crossref`, `annotation`) | One BibTeX entry per work; quotes in `.tex` and `.txt` with `\cite[p.~N]{}` | Works with plain BibTeX and a vanilla `.tex` |
 | Exports: decision report and bib; markdown and CSL-JSON as other spellings | Adds `collection.tex`, `collection.txt`, `citation_check.csv`; markdown and CSL-JSON optional | As requested |
 | Sidecar is off the path | Sidecar is the conversation and the yes/no relevance judge; stance is advisory; path still finishes without it | You want to talk to the sidecar; quotes still come from the text adapter |
+
+The row that keeps approve available beside select is superseded for the control by `highlight_switch.md`. One accept replaces the acknowledge message and the approve message.
 | Doc map in the command layer had an offset-to-scroll mapping | Doc map shortlists and indexes loci only; it never moves a page | `viewer_find.md` removed the index-driven walk |
 
 Unchanged from the review: quotes are text-adapter spans; a missing author stays missing; OCR-only words stay out until confirmed; the project and decisions survive tour timeout, retire and restart; a candidate never shown never takes a keep.
