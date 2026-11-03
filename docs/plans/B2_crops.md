@@ -46,6 +46,7 @@ Do not rebuild any of this.
 | C6 | A doc-map read. This ticket does not open the doc-map directory. An excerpt is copied only when the caller already passed one. |
 | C10 | `selectLoci`. A crop does not choose a locus and does not drop a span. |
 | C11 | Opening a source, `ViewerMove`. |
+| `sidecar_representation.md` | A search of mapped documents for citations that bear on a frontier account. A crop of the glass is a different feed. |
 | The shaders | No uniform, no sampled crop in `avatar_expand.comp` or the projection shader. |
 | The live daemon | Not restarted. The viseme failure `GLB lacks viseme_aa` stays. |
 

@@ -33,6 +33,7 @@ Do not replace these checks. Append the model report after them.
 | B1 | The completion, the mapper, the 3 s job timeout. This ticket exports the config that client will import. |
 | B2 | Cutting a crop. This ticket names the ceiling the cut will read. |
 | B4 | An in-daemon actor, a fine-tune, a GPU layer inside the daemon. |
+| `sidecar_representation.md` | The collection walk that would call the endpoint this ticket reports. This ticket stays the report. |
 | `voice_command.md` | Opening a microphone, or letting a transcript approve. |
 | The operator | Starting `llama-server` or Ollama. This command does not spawn either. |
 | K2's number | A live frame-time measurement. The procedure is below. The suite does not fail on an unmeasured budget. |

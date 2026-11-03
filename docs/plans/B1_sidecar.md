@@ -45,6 +45,7 @@ Do not rebuild any of this.
 | C8 | URL and path checks inside the daemon. This client refuses paths before the socket. The daemon rule lands with C8. |
 | C10 | `selectLoci`. This ticket returns a judgement. It does not write a locus. |
 | C11–C13 | Tours, exports, MCP tools, skill text. |
+| `sidecar_representation.md` | A frontier account of a collection, and the citations in the mapped media that bear on it. The judge in this ticket stays one span the caller already holds. |
 | The live daemon | Not restarted. The viseme failure `GLB lacks viseme_aa` stays. |
 
 No new `Proposal` variant. `samples()` stays the sixteen pre-C2 kinds. No new crate. No edit to `overlay.rs`, `avatar_expand.rs`, or the shaders. No key grab.

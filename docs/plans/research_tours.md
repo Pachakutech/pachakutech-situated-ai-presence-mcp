@@ -105,6 +105,8 @@ The quote stays the text adapter's span. The URL stays one that was submitted. N
 
 Section 4, step 2 of the research ask, and C10's rule that a sidecar judge may drop a span, are the text this note supersedes once a ticket adopts it. The C10 U tests are unchanged until that ticket. `cleanup_plan_deltas.md` points here.
 
+A frontier model's written account of the collection, and a sidecar search for the citations in the mapped media that bear on that account, is `sidecar_representation.md`. That exploration leaves this section unadopted.
+
 ## 5. The multi-source tour
 
 A project tour is **a sequence of per-source tasks**. Each per-source task is an ordinary task within the existing caps (one active, about 12 items, item timeout). The project holds the tour cursor (which source, which locus) so a tour that times out resumes where it stopped, and the project caps stay separate from the session caps. That cursor is the resume point. The preferences the model reads are the keeps, the T0 decisions, and the notes (section 1a).
