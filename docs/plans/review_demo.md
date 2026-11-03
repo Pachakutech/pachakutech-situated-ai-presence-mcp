@@ -32,11 +32,11 @@ The person opens the terminal and places it beside the viewer. The daemon does n
 
 `presence ledger --follow` is already a follow. It reads the session phrase ledger on `command.sock` and prints a copy. That list is empty after a restart, and it is not this register. The demo watch reads the project record. The shape is a foreground command that prints the three lines and replaces them when the record moves. The ticket that writes the command picks the name. `pseq` is the mark that the record moved. `events.jsonl` grows when a hand row is stored on the project, and it is written before that call returns.
 
-A press on a tour locus is a project event. `hand_and_phrase.md` binds the phrase id to that locus and `register_task` runs on the tour commit, so `events.jsonl` and `pseq` move. The watch still has no command. `queryProject` still omits the register, and that read is C13.
+A press on a tour locus is a project event. `hand_and_phrase.md` binds the phrase id to that locus and `register_task` runs on the tour commit, so `events.jsonl` and `pseq` move. The watch still has no command. `queryProject` returns `register` (skip, accept, deny). That read is C13.
 
 ## The model, when asked
 
-The frontier model is the second reader. Asked how the review stands, it reports the same three numbers and can name the passages in each. An item still yellow is reported as skip. That read is `queryProject`, once C13 exposes it and the reply carries the decisions. The model does not keep a second register.
+The frontier model is the second reader. Asked how the review stands, it reports the same three numbers and can name the passages in each. An item still yellow is reported as skip. That read is `queryProject`, and the reply carries `register`. The model does not keep a second register.
 
 C13's tool is one reply per question. That is the right pace for a report. It is the wrong pace for the window beside the page, which is why the terminal follows the record itself. The agent goes on with its other work and reads the register when it wants to. The register does not make the agent wait. Any further contract over these rows is the model's to define. The skill says so.
 

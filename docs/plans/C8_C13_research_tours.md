@@ -415,6 +415,14 @@ The client, the sidecar, and the tool arguments cannot set a color or a conditio
 
 The terminal beside the page is the other reader of this same file. `review_demo.md` leaves its command name to the ticket that writes the command. That watch is how the person sees the counts during the tour. This tool is how the model reports the same counts when asked. An item still yellow is skip in both.
 
+### Progress, 3 November 2026
+
+Coded in the working tree. `queryProject` carries `register`: skip, accept, and deny. A locus the tour has entered, with no hand row yet, is skip, and building the reply leaves `events.jsonl` as it was. The latest hand line is the condition. A second short tap inside 250 ms stays a second line. `shown` and `dwelled` leave the locus where the hand put it. `decisions()` stays off the wire. The `keeps` array C7 already returned is still on the reply. A hand accept leaves it unchanged. A value read across a stretch of the register waits for the C12 pass.
+
+The MCP tools are `queryProject`, `createProject`, `addSources`, `startProjectTour`, `exportProject`, and `showCitations`. Each name is on the 1.5 s gate. `draftTask` stays off this surface. `showCitations` refuses a local path before it opens a socket. Omitted `mode` and `pace` are `explain` and `flow`. The tour reply lists the sources and waits for the user's Start. `exportProject` forwards that kind. The writer is C12, so until that kind exists the daemon's error is the tool result.
+
+The squares stay unpainted. The terminal watch is still unnamed.
+
 ## Order
 
 C8 and C9 can be written together. C10 needs C9's passages. C11 needs C3 and C10's loci. C12 needs C7's keeps and is better after C11 has written `opened` and `failed`, though an export of keeps already on disk is valid before any tour. C13 is the client over kinds the earlier tickets have added. A tool whose kind is not implemented yet is not stubbed as success.

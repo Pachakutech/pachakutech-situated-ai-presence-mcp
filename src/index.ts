@@ -9,7 +9,15 @@ import { z } from "zod";
 import { PolicyGate } from "./policyGate.js";
 import { PresenceDaemon } from "./daemon.js";
 import { daemonStub } from "./daemonStub.js";
-import { tryConnectDaemon } from "./daemonClient.js";
+import { DaemonClient, tryConnectDaemon } from "./daemonClient.js";
+import {
+  addSources,
+  createProject,
+  exportProject,
+  queryProject,
+  showCitations,
+  startProjectTour,
+} from "./projectTools.js";
 import { BOX_PAD } from "./locate/core.js";
 import { fuseRegion, locateRegion } from "./locate/run.js";
 
@@ -32,6 +40,16 @@ function getDaemon(): Promise<PresenceDaemon> {
       });
   }
   return daemonReady.then(() => daemon);
+}
+
+async function projectCaller(): Promise<DaemonClient> {
+  const live = await getDaemon();
+  if (live instanceof DaemonClient) return live;
+  throw new Error("no presence-daemon socket");
+}
+
+function jsonText(detail: unknown) {
+  return { content: [{ type: "text" as const, text: JSON.stringify(detail) }] };
 }
 
 server.registerTool(
@@ -415,6 +433,144 @@ server.registerTool(
     policy.assertAllowed("queryPresenceTask");
     const detail = await (await getDaemon()).queryTask(taskId);
     return { content: [{ type: "text", text: JSON.stringify(detail) }] };
+  },
+);
+
+const tourMode = z.enum(["explain", "select", "approve"]);
+const tourPace = z.enum(["flow", "wait"]);
+const projectSource = z.object({
+  url: z.string().optional().describe("Public http(s) URL"),
+  path: z.string().optional().describe("Refused. This tool takes URLs"),
+  dir: z.string().optional().describe("Refused. This tool takes URLs"),
+  file: z.string().optional().describe("Refused. This tool takes URLs"),
+  claim: z.string().optional(),
+  quote: z.string().optional(),
+});
+
+server.registerTool(
+  "queryProject",
+  {
+    title: "Read a project",
+    description:
+      "Reads a project. The register is skip, accept, and deny for the loci the tour has put up. " +
+      "A locus with no hand row yet is skip. You do not write those rows. Notes are on the loci. " +
+      "The cursor is where the tour resumes. sincePseq pages loci and leaves the register whole.",
+    inputSchema: {
+      projectId: z.string(),
+      sincePseq: z.number().int().nonnegative().optional(),
+      limit: z.number().int().positive().optional(),
+    },
+  },
+  async (input) => {
+    policy.assertAllowed("queryProject");
+    return jsonText(await queryProject(input, projectCaller));
+  },
+);
+
+server.registerTool(
+  "createProject",
+  {
+    title: "Create a project",
+    description:
+      "Opens a project of public http(s) URLs. A path is refused before the socket opens. " +
+      "You may propose sources and a stance. You do not write the register.",
+    inputSchema: {
+      title: z.string(),
+      asks: z.array(z.object({ text: z.string(), kind: z.enum(["claim", "question"]) })),
+      sources: z.array(projectSource),
+    },
+  },
+  async (input) => {
+    policy.assertAllowed("createProject");
+    return jsonText(await createProject(input, projectCaller));
+  },
+);
+
+server.registerTool(
+  "addSources",
+  {
+    title: "Add sources to a project",
+    description: "Adds public http(s) URLs to a project. A path is refused before the socket opens.",
+    inputSchema: {
+      projectId: z.string(),
+      sources: z.array(projectSource).min(1),
+    },
+  },
+  async (input) => {
+    policy.assertAllowed("addSources");
+    return jsonText(await addSources(input, projectCaller));
+  },
+);
+
+server.registerTool(
+  "startProjectTour",
+  {
+    title: "Start a project tour",
+    description:
+      "Asks the daemon to start a tour. The reply lists the sources and waits for the user's start. " +
+      "This call does not send Start.",
+    inputSchema: {
+      projectId: z.string(),
+      mode: tourMode,
+      pace: tourPace.optional(),
+      askId: z.string().optional(),
+      path: z.string().optional().describe("Refused"),
+    },
+  },
+  async (input) => {
+    policy.assertAllowed("startProjectTour");
+    return jsonText(await startProjectTour(input, projectCaller));
+  },
+);
+
+server.registerTool(
+  "exportProject",
+  {
+    title: "Export a project",
+    description:
+      "Sends exportProject. The reply is the paths and the row counts the daemon returns. A path argument is refused.",
+    inputSchema: {
+      projectId: z.string(),
+      formats: z
+        .array(z.enum(["bib", "tex", "txt", "decisionsCsv", "citationCheckCsv", "md", "cslJson"]))
+        .optional(),
+      path: z.string().optional().describe("Refused"),
+    },
+  },
+  async (input) => {
+    policy.assertAllowed("exportProject");
+    return jsonText(await exportProject(input, projectCaller));
+  },
+);
+
+server.registerTool(
+  "showCitations",
+  {
+    title: "Show citations",
+    description:
+      "Takes URLs, the claim, and the quote when you have one. Creates the project, selects loci, and starts the tour. " +
+      "Omit mode and pace for the narrated check. Pass select and wait when the user is recording the register, " +
+      "and re-read queryProject as the hand lands. The tour waits for the user's start. " +
+      "A local path is refused before a socket opens. A quote the page does not contain is a near passage.",
+    inputSchema: {
+      citations: z
+        .array(
+          z.object({
+            url: z.string().optional().describe("Public http(s) URL"),
+            file: z.string().optional().describe("Refused. Pass a URL"),
+            path: z.string().optional().describe("Refused. Pass a URL"),
+            claim: z.string(),
+            quote: z.string().optional(),
+          }),
+        )
+        .min(1),
+      mode: tourMode.optional(),
+      pace: tourPace.optional(),
+    },
+  },
+  async (input) => {
+    policy.assertAllowed("showCitations");
+    return jsonText(await showCitations(input, projectCaller));
   },
 );
 

@@ -8,7 +8,7 @@
 // is a normal request on this one.
 
 import { createConnection, type Socket } from "node:net";
-import { PresenceDaemon, HighlightResult, PhraseFlagList, PhraseFlagQuery, CreateTaskInput, TaskView } from "./daemon.js";
+import type { PresenceDaemon, HighlightResult, PhraseFlagList, PhraseFlagQuery, CreateTaskInput, TaskView } from "./daemon.js";
 
 export function socketPath(): string {
   if (process.env.PRESENCE_DAEMON_SOCKET) return process.env.PRESENCE_DAEMON_SOCKET;
@@ -28,12 +28,15 @@ function proposalId(): string {
 }
 
 export class DaemonClient implements PresenceDaemon {
+  private readonly path: string;
   private socket: Socket | null = null;
   private buffer = "";
   private readonly pending: Array<(line: string) => void> = [];
   private chain: Promise<unknown> = Promise.resolve();
 
-  constructor(private readonly path: string = socketPath()) {}
+  constructor(path: string = socketPath()) {
+    this.path = path;
+  }
 
   private enqueue<T>(fn: () => Promise<T>): Promise<T> {
     const run = this.chain.then(fn, fn);

@@ -573,7 +573,7 @@ mod tests {
         use crate::highlight::MarkColor;
         use crate::ledger::LedgerKind;
         use crate::project::{LocusInput, MatchKind, SourceStatus};
-        use crate::task::{hand_condition, TintMark, TintSample, TourSeed, TourSeedItem, BTN_LEFT};
+        use crate::task::{hand_condition, TintMark, TintSample, TourSeed, TourSeedItem, BTN_LEFT, DOUBLE_CLICK_MS};
 
         let root = std::env::temp_dir().join(format!("presence-hand-reg-{}-{}", std::process::id(), line!()));
         let _ = std::fs::remove_dir_all(&root);
@@ -697,6 +697,38 @@ mod tests {
         let detail = viewed.detail.unwrap();
         assert!(detail.get("decisions").is_none());
         assert_eq!(detail["pseq"], hands[1]["pseq"]);
+        assert!(5_200 - 5_000 < DOUBLE_CLICK_MS);
+        let task_src = include_str!("task.rs");
+        let tint_at = task_src.find("fn apply_tint_sample").expect("tint");
+        let tint_end = task_src[tint_at..].find("fn note_highlight").expect("note") + tint_at;
+        assert!(!task_src[tint_at..tint_end].contains("DOUBLE_CLICK_MS"));
+        let skip_rows = detail["register"]["skip"].as_array().unwrap();
+        assert_eq!(skip_rows.len(), 1);
+        assert_eq!(skip_rows[0]["locusId"], locus);
+        assert_eq!(skip_rows[0]["phraseId"], locus);
+        assert_eq!(skip_rows[0]["askId"], "ak-1");
+        assert_eq!(skip_rows[0]["sourceId"], "sr-1");
+        assert_eq!(skip_rows[0]["taskId"], task_id);
+        assert_eq!(skip_rows[0]["words"], "the quoted line");
+        assert!(detail["register"]["accept"].as_array().unwrap().is_empty());
+        assert!(detail["register"]["deny"].as_array().unwrap().is_empty());
+        assert!(detail["keeps"].as_array().unwrap().is_empty());
+        let still = hand_rows(&events);
+        assert_eq!(still.len(), 2);
+        assert_eq!(still[0]["kind"], "accept");
+        assert_eq!(still[1]["kind"], "skip");
+        let paged = json!({
+            "kind": "queryProject",
+            "proposalId": "q3",
+            "projectId": id,
+            "sincePseq": 999999,
+        });
+        let paged_proposal: Proposal = serde_json::from_value(paged).unwrap();
+        let paged_view = reg.route_project_proposal(&paged_proposal, Tier::T2Client, 7).unwrap();
+        let paged_detail = paged_view.detail.unwrap();
+        assert!(paged_detail["loci"].as_array().unwrap().is_empty());
+        assert_eq!(paged_detail["register"]["skip"][0]["locusId"], locus);
+        assert_eq!(hand_rows(&events).len(), 2);
 
         let saved = hand_rows(&events);
         let mut fresh = crate::ledger::Ledger::new();
