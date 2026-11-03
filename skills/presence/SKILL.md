@@ -55,6 +55,8 @@ The presences and artifacts live in a shared substrate, not in your context wind
 
 **Task book.** A task is a list the daemon holds. Read it with `queryTask`. The checkbox and the yes/no pair are the user's. A client does not write those answers. After a compaction, read the task again.
 
+**Three conditions.** A highlight the user can press is skip, accept, or deny. Yellow is skip, green is accept, red is deny. While the tour is waiting on them the highlight is yellow, and the register reads skip until they choose accept or deny. You do not write those rows. If you want to treat a stretch of skips as an abstention, or any other contract over time, that reading is yours to define. The daemon records the three conditions.
+
 **Ask.** The user asks with `presence ask` on the command socket. The ask can create a task after they confirm the mode. It cannot acknowledge, approve, or discard. A transcript is the same ask.
 
 **Report.** `presence ledger` reads the task's phrases and the user's answers. The table and the watch file are copies. Editing a copy does not change the ledger.

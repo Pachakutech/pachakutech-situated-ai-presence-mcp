@@ -131,22 +131,41 @@ impl Registry {
         (&mut self.tasks, &mut self.ledger)
     }
 
-    /// `startProjectTour` needs the task book and the project store in sequence.
+    /// `startProjectTour` and `reportSourceOpen` need the task book and the project store in sequence.
     pub fn route_tour_proposal(&mut self, proposal: &Proposal, tier: Tier, now_ms: u64) -> Option<ProposalResult> {
-        let Proposal::StartProjectTour(body) = proposal else {
-            return None;
-        };
-        if !crate::gate::allowed(tier, proposal) {
-            return Some(ProposalResult::err(
-                &body.proposal_id,
-                format!("not_allowed_for_tier:{}", proposal.kind_name()),
-            ));
+        match proposal {
+            Proposal::StartProjectTour(body) => {
+                if !crate::gate::allowed(tier, proposal) {
+                    return Some(ProposalResult::err(
+                        &body.proposal_id,
+                        format!("not_allowed_for_tier:{}", proposal.kind_name()),
+                    ));
+                }
+                let Some(mut store) = self.ledger.take_projects() else {
+                    return Some(ProposalResult::err(&body.proposal_id, "projects_unavailable"));
+                };
+                let planned = crate::tour::route_start(body, tier, &mut store, &mut self.tour, now_ms);
+                let result = crate::tour::commit(planned, &mut self.tasks, &mut self.ledger, &mut self.tour, &mut store, now_ms);
+                self.ledger.give_projects(store);
+                Some(result)
+            }
+            Proposal::ReportSourceOpen(body) => {
+                if !crate::gate::allowed(tier, proposal) {
+                    return Some(ProposalResult::err(
+                        &body.proposal_id,
+                        format!("not_allowed_for_tier:{}", proposal.kind_name()),
+                    ));
+                }
+                let Some(mut store) = self.ledger.take_projects() else {
+                    return Some(ProposalResult::err(&body.proposal_id, "projects_unavailable"));
+                };
+                let planned = crate::tour::plan_report(body, &mut store, &mut self.tour, now_ms);
+                let result = crate::tour::commit(planned, &mut self.tasks, &mut self.ledger, &mut self.tour, &mut store, now_ms);
+                self.ledger.give_projects(store);
+                Some(result)
+            }
+            _ => None,
         }
-        let planned = match self.ledger.projects_mut() {
-            Some(store) => crate::tour::route_start(body, tier, store, &mut self.tour, now_ms),
-            None => return Some(ProposalResult::err(&body.proposal_id, "projects_unavailable")),
-        };
-        Some(crate::tour::commit(planned, &mut self.tasks, &mut self.ledger, &mut self.tour, now_ms))
     }
 
     /// `selectLoci` reads the project and the doc map together. Other project
@@ -155,7 +174,38 @@ impl Registry {
         if let Some(result) = crate::select::route(proposal, tier, self.ledger.projects_mut(), &self.docmap) {
             return Some(result);
         }
-        crate::project::route_project(proposal, tier, self.ledger.projects_mut(), now_ms)
+        let mut result = crate::project::route_project(proposal, tier, self.ledger.projects_mut(), now_ms)?;
+        self.attach_open_request(proposal, &mut result);
+        Some(result)
+    }
+
+    /// The park lives on the tour desk, not in the project file. It is copied onto this reply only.
+    fn attach_open_request(&self, proposal: &Proposal, result: &mut ProposalResult) {
+        let Proposal::QueryProject(body) = proposal else {
+            return;
+        };
+        if result.status != "ok" {
+            return;
+        }
+        let Some(detail) = result.detail.as_mut() else {
+            return;
+        };
+        if crate::tour::tour_project(&self.tour) != Some(body.project_id.as_str()) {
+            return;
+        }
+        if let Some(req) = crate::tour::open_request_for(&self.tour, &body.project_id) {
+            detail["openRequest"] = req;
+            return;
+        }
+        let Some(id) = crate::tour::task_id(&self.tour) else {
+            return;
+        };
+        let live = self.tasks.query_value(id).is_some_and(|view| {
+            matches!(view["state"].as_str(), Some("pending") | Some("awaitingStart") | Some("active") | Some("paused"))
+        });
+        if live {
+            detail["tourTaskId"] = serde_json::json!(id);
+        }
     }
 
     pub fn tick_tasks(&mut self, now_ms: u64) {
@@ -168,20 +218,33 @@ impl Registry {
         if !done {
             return;
         }
-        let seed = {
-            let Some(store) = self.ledger.projects_mut() else {
-                return;
-            };
-            let mut opener = crate::tour::AllowOpener;
-            crate::tour::plan_follow(&mut self.tour, store, &mut opener, now_ms)
-        };
-        let Some(seed) = seed else {
+        let Some(mut store) = self.ledger.take_projects() else {
             return;
         };
-        let locus_ids = seed.locus_ids.clone();
-        if let Ok(id) = self.tasks.insert_tour_chunk(&mut self.ledger, seed, now_ms) {
-            crate::tour::remember_chunk(&mut self.tour, id, locus_ids);
+        let seed = {
+            let mut opener = crate::tour::ParkOpener;
+            crate::tour::plan_follow(&mut self.tour, &mut store, &mut opener, now_ms)
+        };
+        if let Some(seed) = seed {
+            let locus_ids = seed.locus_ids.clone();
+            if let Ok(id) = self.tasks.insert_tour_chunk(&mut self.ledger, seed, now_ms) {
+                match crate::tour::associate_chunk(&mut self.ledger, &self.tour, &mut store, &id, &locus_ids, now_ms) {
+                    Ok(()) => crate::tour::remember_chunk(&mut self.tour, id, locus_ids),
+                    Err(_) => {
+                        self.tasks.end_without_decision(&id);
+                    }
+                }
+            }
         }
+        self.ledger.give_projects(store);
+    }
+
+    pub fn apply_tint_samples(&mut self, samples: Vec<crate::task::TintSample>) {
+        self.tasks.apply_tint_samples(&mut self.ledger, samples);
+    }
+
+    pub fn mark_colors(&self) -> Vec<(String, crate::highlight::MarkColor)> {
+        self.tasks.mark_colors()
     }
 
     fn apply_finished_maps(&mut self) {
@@ -421,6 +484,250 @@ mod tests {
         assert_eq!(drafted.status, "ok", "{:?}", drafted.error);
         reg.note_project_sources(&draft, &drafted);
         assert!(reg.map_inbox.pop().is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn w1_query_project_carries_the_parked_spec() {
+        let root = std::env::temp_dir().join(format!("presence-c11c-reg-{}-{}", std::process::id(), line!()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut reg = Registry::new();
+        reg.open_projects(&root.join("projects")).unwrap();
+        let create = json!({
+            "kind": "createProject",
+            "proposalId": "c",
+            "title": "Window",
+            "asks": [{ "text": "Is X supported?", "kind": "question" }],
+            "sources": [{ "url": "https://example.com/a" }],
+        });
+        let proposal: Proposal = serde_json::from_value(create).unwrap();
+        let created = reg.route_project_proposal(&proposal, Tier::T1User, 1).unwrap();
+        assert_eq!(created.status, "ok", "{:?}", created.error);
+        let id = created.detail.unwrap()["projectId"].as_str().unwrap().to_string();
+        reg.projects_mut().unwrap().set_source_status(&id, "sr-1", crate::project::SourceStatus::Mapped, None).unwrap();
+        let other = json!({
+            "kind": "createProject",
+            "proposalId": "o",
+            "title": "Other",
+            "asks": [{ "text": "Is X supported?", "kind": "question" }],
+            "sources": [{ "url": "https://example.com/b" }],
+        });
+        let other_proposal: Proposal = serde_json::from_value(other).unwrap();
+        let other_created = reg.route_project_proposal(&other_proposal, Tier::T1User, 2).unwrap();
+        let other_id = other_created.detail.unwrap()["projectId"].as_str().unwrap().to_string();
+        let start = json!({
+            "kind": "startProjectTour",
+            "proposalId": "g",
+            "projectId": id,
+            "mode": "explain",
+        });
+        let start_proposal: Proposal = serde_json::from_value(start).unwrap();
+        let started = reg.route_tour_proposal(&start_proposal, Tier::T1User, 3).unwrap();
+        assert_eq!(started.status, "ok", "{:?}", started.error);
+        assert!(started.detail.as_ref().unwrap().get("taskId").is_none());
+        assert_eq!(
+            reg.projects_mut().unwrap().get(&id).unwrap().sources[0].status,
+            crate::project::SourceStatus::Mapped
+        );
+        let query = json!({
+            "kind": "queryProject",
+            "proposalId": "q",
+            "projectId": id,
+        });
+        let query_proposal: Proposal = serde_json::from_value(query).unwrap();
+        let viewed = reg.route_project_proposal(&query_proposal, Tier::T2Client, 4).unwrap();
+        assert_eq!(viewed.status, "ok", "{:?}", viewed.error);
+        let req = &viewed.detail.as_ref().unwrap()["openRequest"];
+        assert_eq!(req["kind"], "web");
+        assert_eq!(req["sourceId"], "sr-1");
+        assert_eq!(req["reference"], "https://example.com/a");
+        assert_eq!(req["port"], 9222);
+        let profile = req["profile"].as_str().unwrap();
+        assert!(profile.ends_with("/pachakutech/locate-chromium"), "{profile}");
+        assert!(viewed.detail.as_ref().unwrap().get("tourTaskId").is_none());
+        let quiet = json!({
+            "kind": "queryProject",
+            "proposalId": "q2",
+            "projectId": other_id,
+        });
+        let quiet_proposal: Proposal = serde_json::from_value(quiet).unwrap();
+        let other_view = reg.route_project_proposal(&quiet_proposal, Tier::T2Client, 5).unwrap();
+        assert!(other_view.detail.unwrap().get("openRequest").is_none());
+        let saved = std::fs::read_to_string(root.join("projects").join(&id).join("project.json")).unwrap();
+        assert!(!saved.contains("openRequest"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn hand_rows(path: &std::path::Path) -> Vec<serde_json::Value> {
+        let text = std::fs::read_to_string(path).unwrap_or_default();
+        text.lines()
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .filter(|row| matches!(row["kind"].as_str(), Some("skip" | "accept" | "deny")))
+            .collect()
+    }
+
+    #[test]
+    fn a_bound_hand_lands_in_the_project_event_log() {
+        use crate::highlight::MarkColor;
+        use crate::ledger::LedgerKind;
+        use crate::project::{LocusInput, MatchKind, SourceStatus};
+        use crate::task::{hand_condition, TintMark, TintSample, TourSeed, TourSeedItem, BTN_LEFT};
+
+        let root = std::env::temp_dir().join(format!("presence-hand-reg-{}-{}", std::process::id(), line!()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut reg = Registry::new();
+        reg.open_projects(&root.join("projects")).unwrap();
+        let create = json!({
+            "kind": "createProject",
+            "proposalId": "c",
+            "title": "Hand",
+            "asks": [{ "text": "Is X supported?", "kind": "question" }],
+            "sources": [{ "url": "https://example.com/hand" }],
+        });
+        let proposal: Proposal = serde_json::from_value(create).unwrap();
+        let created = reg.route_project_proposal(&proposal, Tier::T1User, 1).unwrap();
+        assert_eq!(created.status, "ok", "{:?}", created.error);
+        let id = created.detail.unwrap()["projectId"].as_str().unwrap().to_string();
+        reg.projects_mut().unwrap().set_source_status(&id, "sr-1", SourceStatus::Mapped, None).unwrap();
+        let locus = reg
+            .projects_mut()
+            .unwrap()
+            .upsert_locus(
+                &id,
+                LocusInput {
+                    source_id: "sr-1".into(),
+                    ask_id: Some("ak-1".into()),
+                    doc_key: "doc-sr-1".into(),
+                    span_start: 0,
+                    span_end: 10,
+                    words: "the quoted line".into(),
+                    page: None,
+                    line: Some(1),
+                    heading_path: None,
+                    stance: None,
+                    stance_by: None,
+                    stance_conf: None,
+                    match_kind: Some(MatchKind::Exact),
+                    narration: None,
+                    ocr_only: false,
+                    view: None,
+                },
+            )
+            .unwrap();
+        assert!(locus.starts_with("lc-"));
+        let start = json!({
+            "kind": "startProjectTour",
+            "proposalId": "g",
+            "projectId": id,
+            "askId": "ak-1",
+            "mode": "explain",
+            "pace": "flow",
+        });
+        let start_proposal: Proposal = serde_json::from_value(start).unwrap();
+        let started = reg.route_tour_proposal(&start_proposal, Tier::T1User, 2).unwrap();
+        assert_eq!(started.status, "ok", "{:?}", started.error);
+        assert!(started.detail.as_ref().unwrap().get("taskId").is_none());
+        let report = json!({
+            "kind": "reportSourceOpen",
+            "proposalId": "r",
+            "projectId": id,
+            "sourceId": "sr-1",
+            "ok": true,
+        });
+        let report_proposal: Proposal = serde_json::from_value(report).unwrap();
+        let reported = reg.route_tour_proposal(&report_proposal, Tier::T1User, 3).unwrap();
+        assert_eq!(reported.status, "ok", "{:?}", reported.error);
+        let task_id = reported.detail.unwrap()["taskId"].as_str().unwrap().to_string();
+        let view = reg.task_book().query_value(&task_id).unwrap();
+        assert_eq!(view["items"][0]["phraseId"], locus);
+        assert!(!reg.ledger().holds("ph-1"));
+        assert!(reg.task_book_mut().admit().is_some());
+        {
+            let (book, ledger) = reg.task_and_ledger();
+            book.begin_task(&task_id, ledger, 4_000).unwrap();
+        }
+        reg.note_task_highlight("driver", 4_100);
+        assert_eq!(hand_condition(reg.ledger(), &locus), "skip");
+        let events = root.join("projects").join(&id).join("events.jsonl");
+        assert!(hand_rows(&events).is_empty());
+        assert_eq!(
+            reg.task_book().mark_colors().into_iter().find(|(mark, _)| mark == "driver").map(|(_, color)| color),
+            Some(MarkColor::Yellow)
+        );
+        let mark = Some(TintMark { id: "driver".into(), generation: 1 });
+        reg.apply_tint_samples(vec![
+            TintSample { down: true, button: BTN_LEFT, ts_ms: 5_000, mark: mark.clone() },
+            TintSample { down: false, button: BTN_LEFT, ts_ms: 5_100, mark: mark.clone() },
+        ]);
+        let hands = hand_rows(&events);
+        assert_eq!(hands.len(), 1);
+        assert_eq!(hands[0]["kind"], "accept");
+        assert_eq!(hands[0]["locusId"], locus);
+        assert_eq!(hands[0]["phraseId"], locus);
+        assert_eq!(hands[0]["by"], "T0");
+        assert_eq!(hands[0]["askId"], "ak-1");
+        assert_eq!(hands[0]["taskId"], task_id);
+        let accept_pseq = hands[0]["pseq"].as_u64().unwrap();
+        assert!(accept_pseq >= 1);
+        reg.apply_tint_samples(vec![
+            TintSample { down: true, button: BTN_LEFT, ts_ms: 5_200, mark: mark.clone() },
+            TintSample { down: false, button: BTN_LEFT, ts_ms: 5_300, mark },
+        ]);
+        let hands = hand_rows(&events);
+        assert_eq!(hands.len(), 2);
+        assert_eq!(hands[1]["kind"], "skip");
+        assert_eq!(hands[1]["locusId"], locus);
+        assert_eq!(hands[1]["phraseId"], locus);
+        assert_eq!(hands[1]["by"], "T0");
+        assert!(hands[1]["pseq"].as_u64().unwrap() > accept_pseq);
+        assert_eq!(hand_condition(reg.ledger(), &locus), "skip");
+        assert_eq!(reg.task_book().query_value(&task_id).unwrap()["index"], 0);
+        assert_eq!(reg.task_book().query_value(&task_id).unwrap()["state"], "active");
+        let query = json!({
+            "kind": "queryProject",
+            "proposalId": "q",
+            "projectId": id,
+        });
+        let query_proposal: Proposal = serde_json::from_value(query).unwrap();
+        let viewed = reg.route_project_proposal(&query_proposal, Tier::T2Client, 6).unwrap();
+        assert_eq!(viewed.status, "ok", "{:?}", viewed.error);
+        let detail = viewed.detail.unwrap();
+        assert!(detail.get("decisions").is_none());
+        assert_eq!(detail["pseq"], hands[1]["pseq"]);
+
+        let saved = hand_rows(&events);
+        let mut fresh = crate::ledger::Ledger::new();
+        fresh.open_projects(&root.join("projects")).unwrap();
+        fresh.bind_shown_locus(&locus, &id, &locus, Some("ak-1".into())).unwrap();
+        assert_eq!(fresh.latest_hand(&locus), Some(LedgerKind::Skip));
+        assert_eq!(hand_condition(&fresh, &locus), "skip");
+        let mut book = crate::task::TaskBook::new();
+        let reopened = book
+            .insert_tour_chunk(
+                &mut fresh,
+                TourSeed {
+                    origin_user: true,
+                    mode: crate::protocol::TaskMode::Explain,
+                    pace: crate::protocol::TaskPace::Flow,
+                    doc_key: None,
+                    items: vec![TourSeedItem { query: "the quoted line".into(), narration: String::new(), page: None }],
+                    locus_ids: vec![locus.clone()],
+                },
+                50_000,
+            )
+            .unwrap();
+        assert!(book.admit().is_some());
+        book.begin_task(&reopened, &mut fresh, 50_100).unwrap();
+        book.note_highlight("driver", &mut fresh, 50_200);
+        assert_eq!(
+            book.mark_colors().into_iter().find(|(mark, _)| mark == "driver").map(|(_, color)| color),
+            Some(MarkColor::Yellow)
+        );
+        assert_eq!(hand_rows(&events), saved);
+        assert_eq!(fresh.latest_hand(&locus), Some(LedgerKind::Skip));
         let _ = std::fs::remove_dir_all(&root);
     }
 }

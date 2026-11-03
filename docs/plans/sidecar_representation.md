@@ -52,7 +52,7 @@ The person at the glass may want the document, the frontier account, the support
 
 ## Left where it is
 
-B1 is the client, the mapper, and the one-span judge. B2 is the crop of the glass. B3 is the doctor and the endpoint report. B4 is the in-daemon actor. C12 is the two bibliographies. C13 is the decisions read and the MCP tools. The shared id of a locus and a ledger phrase stays the open delta it already is.
+B1 is the client, the mapper, and the one-span judge. B2 is the crop of the glass. B3 is the doctor and the endpoint report. B4 is the in-daemon actor. C12 is the two bibliographies. C13 is the MCP tools and the `register` on `queryProject`. When a tour shows a locus, the ledger phrase id is that locus id. `hand_and_phrase.md` is that binding.
 
 The design sentence in `local_multimodal_reflex.md` stands. Accept a phrase id the project already chose. Mint `ph-n` only when an `observePhrase` arrives without one. The research locus id and the ledger phrase id are the same string when a tour shows that locus.
 

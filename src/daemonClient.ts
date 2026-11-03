@@ -191,6 +191,11 @@ export class DaemonClient implements PresenceDaemon {
     return (result.detail ?? {}) as TaskView;
   }
 
+  async call(kind: string, fields: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
+    const result = await this.rpc(kind, fields);
+    return (result.detail ?? {}) as Record<string, unknown>;
+  }
+
   async listPhraseFlags(query: PhraseFlagQuery): Promise<PhraseFlagList> {
     const result = await this.rpc("listPhraseFlags", { ...query });
     const detail = result.detail ?? {};

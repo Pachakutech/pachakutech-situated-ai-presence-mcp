@@ -139,10 +139,30 @@ pub fn to_pixels(box_: UvBox, screen_w: u32, screen_h: u32) -> (i32, i32, i32, i
     (x, y, w.max(1), h.max(1))
 }
 
+/// The three conditions of the highlight. Yellow is the tint that already ships.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MarkColor {
+    Yellow,
+    Green,
+    Red,
+}
+
+impl MarkColor {
+    /// Premultiplied factors, blue, green, red. Alpha and radius stay outside.
+    pub fn factors(self) -> (f32, f32, f32) {
+        match self {
+            Self::Yellow => (0.22, 0.68, 0.95),
+            Self::Green => (0.25, 0.72, 0.28),
+            Self::Red => (0.22, 0.28, 0.78),
+        }
+    }
+}
+
 /// Premultiplied BGRA into a Wayland SHM buffer. Alpha is 0 outside a
 /// rounded rectangle, so the square's corners stay pass-through.
 /// `phase` is seconds. The edge breathes. The fill stays low.
-pub fn paint_mark(buf: &mut [u8], width: i32, height: i32, stride: i32, phase: f32) {
+pub fn paint_mark(buf: &mut [u8], width: i32, height: i32, stride: i32, phase: f32, color: MarkColor) {
+    let (blue, green, red) = color.factors();
     let w = width.max(1);
     let h = height.max(1);
     let pulse = (phase * 1.7).sin() * 0.5 + 0.5;
@@ -154,10 +174,9 @@ pub fn paint_mark(buf: &mut [u8], width: i32, height: i32, stride: i32, phase: f
             if i + 3 >= buf.len() {
                 continue;
             }
-            // Warm amber, premultiplied.
-            buf[i] = (0.22 * a * 255.0).round() as u8;
-            buf[i + 1] = (0.68 * a * 255.0).round() as u8;
-            buf[i + 2] = (0.95 * a * 255.0).round() as u8;
+            buf[i] = (blue * a * 255.0).round() as u8;
+            buf[i + 1] = (green * a * 255.0).round() as u8;
+            buf[i + 2] = (red * a * 255.0).round() as u8;
             buf[i + 3] = (a * 255.0).round() as u8;
         }
     }
@@ -256,7 +275,7 @@ mod tests {
 
         let stride = 40 * 4;
         let mut buf = vec![7u8; (stride * 40) as usize];
-        paint_mark(&mut buf, 40, 40, stride, 0.0);
+        paint_mark(&mut buf, 40, 40, stride, 0.0, MarkColor::Yellow);
         assert_eq!(buf[3], 0, "corner of the square stays pass-through");
         let mid = (20 * stride + 20 * 4) as usize;
         assert!(buf[mid + 3] > 0, "the middle of the box is tinted");

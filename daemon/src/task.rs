@@ -1,16 +1,19 @@
 //! Task book for one daemon run. In memory, empty at start, not kept across
-//! a restart. Controls sit beside the word box. The word mark stays click-through.
+//! a restart. The highlight is the control. The squares beside the words stay
+//! unpainted.
 //!
 //! Clicks and hotkeys enter the ledger only through [`crate::ui_input::apply_ui_event`].
 
 use crate::gate::Tier;
-use crate::ledger::{Ledger, LedgerError, ObservedAppend, PHRASE_CAP};
+use crate::highlight::MarkColor;
+use crate::ledger::{Ledger, LedgerError, LedgerKind, ObservedAppend, PHRASE_CAP};
 use crate::protocol::{
     ClientControls, CreateTaskBody, ListPhraseFlagsBody, MatchInfo, MatchStatus, ObservedViewed, Proposal, ProposalResult,
     ResolveItemBody, TaskItemBody, TaskMode, TaskPace, TourSignalBody, TourSignalKind,
 };
 use crate::ui_input::{apply_ui_event, ClickTarget, Hotkey, UiEvent};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 
 pub const QUEUE_CAP: usize = 5;
 pub const ITEM_CAP: usize = 12;
@@ -19,6 +22,10 @@ pub const DEFAULT_ITEM_TIMEOUT_S: u32 = 20;
 pub const DWELL_MS: u64 = 1200;
 pub const GRACE_MS: u64 = 1500;
 pub const DOUBLE_CLICK_MS: u64 = 250;
+/// Hold at least this long, measured on the daemon clock, and the release is a long tap.
+pub const LONG_TAP_MS: u64 = 500;
+/// evdev `BTN_LEFT`.
+pub const BTN_LEFT: u32 = 0x110;
 pub const MOVE_WAIT_MS: u64 = 1500;
 pub const MOVE_ATTEMPTS: u8 = 3;
 pub const NUDGE_PX: i32 = 80;
@@ -30,8 +37,70 @@ pub struct TourSeed {
     pub pace: crate::protocol::TaskPace,
     pub doc_key: Option<String>,
     pub items: Vec<TourSeedItem>,
-    /// Locus ids in this chunk, in item order. The task book does not read them.
+    /// Locus ids in this chunk, parallel to `items`. Each item's phrase id.
     pub locus_ids: Vec<String>,
+}
+
+/// One pointer sample, stamped with the daemon clock when the compositor delivered it.
+#[derive(Clone, Debug)]
+pub struct TintMark {
+    pub id: String,
+    pub generation: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct TintSample {
+    pub down: bool,
+    pub button: u32,
+    pub ts_ms: u64,
+    /// Present when the pointer is on a mark. Absent on a release outside every mark.
+    pub mark: Option<TintMark>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tap {
+    Short,
+    Long,
+}
+
+/// Release on the same generation. A different generation, or no generation, is no gesture.
+pub fn classify_tap(
+    press_button: u32,
+    release_button: u32,
+    press_ms: u64,
+    release_ms: u64,
+    press_generation: u64,
+    release_generation: Option<u64>,
+) -> Option<Tap> {
+    if press_button != BTN_LEFT || release_button != BTN_LEFT {
+        return None;
+    }
+    if release_generation != Some(press_generation) {
+        return None;
+    }
+    if release_ms.saturating_sub(press_ms) >= LONG_TAP_MS {
+        Some(Tap::Long)
+    } else {
+        Some(Tap::Short)
+    }
+}
+
+pub fn switch_tint(from: MarkColor, tap: Tap) -> (MarkColor, LedgerKind) {
+    match (from, tap) {
+        (MarkColor::Yellow, Tap::Short) => (MarkColor::Green, LedgerKind::Accept),
+        (MarkColor::Green, Tap::Short) => (MarkColor::Yellow, LedgerKind::Skip),
+        (MarkColor::Yellow | MarkColor::Green, Tap::Long) => (MarkColor::Red, LedgerKind::Deny),
+        (MarkColor::Red, Tap::Short | Tap::Long) => (MarkColor::Yellow, LedgerKind::Skip),
+    }
+}
+
+/// No hand row, and a skip row, both read as skip.
+pub fn hand_condition(ledger: &Ledger, phrase_id: &str) -> &'static str {
+    match ledger.latest_hand(phrase_id) {
+        Some(LedgerKind::Accept) => "accept",
+        Some(LedgerKind::Deny) => "deny",
+        _ => "skip",
+    }
 }
 
 pub struct TourSeedItem {
@@ -162,6 +231,16 @@ struct ShownMark {
     phrase_id: String,
     at_ms: u64,
     dwelled: bool,
+    /// Presence whose highlight is showing this phrase. Empty when a test notes the phrase directly.
+    mark_id: String,
+}
+
+struct TintPress {
+    mark_id: String,
+    generation: u64,
+    button: u32,
+    ts_ms: u64,
+    phrase_id: String,
 }
 
 pub struct TaskBook {
@@ -175,6 +254,9 @@ pub struct TaskBook {
     stop_pending: bool,
     moves_issued: u64,
     pointer: Option<(i32, i32)>,
+    tint_press: Option<TintPress>,
+    /// Color cached when the highlight was noted and when a gesture completed.
+    tints: HashMap<String, MarkColor>,
 }
 
 impl TaskBook {
@@ -190,6 +272,8 @@ impl TaskBook {
             stop_pending: false,
             moves_issued: 0,
             pointer: None,
+            tint_press: None,
+            tints: HashMap::new(),
         }
     }
 
@@ -207,18 +291,27 @@ impl TaskBook {
 
     /// A project-tour chunk. Scroll items stay `pending`. This path does not use the T2 start-card rule.
     pub fn insert_tour_chunk(&mut self, ledger: &mut Ledger, seed: TourSeed, now_ms: u64) -> Result<String, TaskError> {
-        if seed.items.is_empty() || seed.items.len() > ITEM_CAP {
+        if seed.items.is_empty() || seed.items.len() > ITEM_CAP || seed.locus_ids.len() != seed.items.len() {
+            return Err(TaskError::Schema);
+        }
+        if seed.locus_ids.iter().any(|id| id.trim().is_empty()) {
             return Err(TaskError::Schema);
         }
         if self.runnable_count() >= QUEUE_CAP {
             return Err(TaskError::QueueFull);
         }
         let drawn = resolve_presentation(seed.mode, None)?;
+        let fresh = seed.locus_ids.iter().filter(|id| !ledger.holds(id)).count();
+        if ledger.occupancy() + fresh > PHRASE_CAP {
+            return Err(TaskError::Quota);
+        }
+        for id in &seed.locus_ids {
+            ledger.hold_phrase(id).map_err(ledger_err)?;
+        }
         let mut items = Vec::with_capacity(seed.items.len());
-        for raw in &seed.items {
-            let phrase_id = ledger.mint_and_hold().map_err(ledger_err)?;
+        for (raw, phrase_id) in seed.items.iter().zip(seed.locus_ids.iter()) {
             items.push(Item {
-                phrase_id,
+                phrase_id: phrase_id.clone(),
                 query: Some(cut(&raw.query, crate::ledger::TEXT_CAP)),
                 narration: cut(&raw.narration, NARRATION_CAP),
                 scroll: true,
@@ -421,19 +514,98 @@ impl TaskBook {
             // Project confirm is applied on the project store. Start still promotes a task.
             // Source keys are applied by the project tour, which also ends the per-source task.
             UiEvent::Hotkey(Hotkey::ConfirmProject) | UiEvent::Hotkey(Hotkey::NextSource) | UiEvent::Hotkey(Hotkey::PrevSource) => false,
-            UiEvent::ArmNote { .. } | UiEvent::Acknowledge { .. } | UiEvent::Uncheck { .. } | UiEvent::Approve { .. } | UiEvent::Discard { .. } => false,
+            UiEvent::ArmNote { .. }
+            | UiEvent::Acknowledge { .. }
+            | UiEvent::Uncheck { .. }
+            | UiEvent::Approve { .. }
+            | UiEvent::Discard { .. }
+            | UiEvent::Skip { .. }
+            | UiEvent::Accept { .. }
+            | UiEvent::Deny { .. } => false,
         }
     }
 
+    pub fn mark_colors(&self) -> Vec<(String, MarkColor)> {
+        self.tints.iter().map(|(id, color)| (id.clone(), *color)).collect()
+    }
+
+    /// Pointer samples already stamped. A finished gesture appends one hand row.
+    pub fn apply_tint_samples(&mut self, ledger: &mut Ledger, samples: Vec<TintSample>) {
+        for sample in samples {
+            self.apply_tint_sample(ledger, sample);
+        }
+    }
+
+    fn apply_tint_sample(&mut self, ledger: &mut Ledger, sample: TintSample) {
+        if sample.down {
+            let Some(mark) = sample.mark else {
+                return;
+            };
+            let Some(shown) = self.shown.as_ref() else {
+                self.tint_press = None;
+                return;
+            };
+            if !shown.mark_id.is_empty() && shown.mark_id != mark.id {
+                self.tint_press = None;
+                return;
+            }
+            self.tint_press = Some(TintPress {
+                mark_id: mark.id,
+                generation: mark.generation,
+                button: sample.button,
+                ts_ms: sample.ts_ms,
+                phrase_id: shown.phrase_id.clone(),
+            });
+            return;
+        }
+        let Some(press) = self.tint_press.take() else {
+            return;
+        };
+        let still = self.shown.as_ref().is_some_and(|shown| shown.phrase_id == press.phrase_id);
+        if !still {
+            return;
+        }
+        let release_generation = sample.mark.as_ref().filter(|mark| mark.id == press.mark_id).map(|mark| mark.generation);
+        let Some(tap) = classify_tap(press.button, sample.button, press.ts_ms, sample.ts_ms, press.generation, release_generation) else {
+            return;
+        };
+        let from = self.tints.get(&press.mark_id).copied().unwrap_or(MarkColor::Yellow);
+        let (color, kind) = switch_tint(from, tap);
+        let event = match kind {
+            LedgerKind::Accept => UiEvent::Accept { phrase_id: press.phrase_id.clone() },
+            LedgerKind::Deny => UiEvent::Deny { phrase_id: press.phrase_id.clone() },
+            LedgerKind::Skip => UiEvent::Skip { phrase_id: press.phrase_id.clone() },
+            _ => return,
+        };
+        if apply_ui_event(ledger, event, sample.ts_ms).is_err() {
+            return;
+        }
+        self.tints.insert(press.mark_id, color);
+        self.consider(ledger, sample.ts_ms);
+    }
+
     pub fn note_highlight(&mut self, presence_id: &str, ledger: &mut Ledger, now_ms: u64) {
-        let phrase = self
+        let phrase = self.phrase_for_mark(presence_id);
+        if let Some(phrase) = phrase {
+            self.note_shown_on(ledger, &phrase, presence_id, now_ms);
+            self.remember_tint(presence_id, ledger, &phrase);
+        }
+    }
+
+    /// A live task on this presence owns the mark. Otherwise an active project tour does.
+    fn phrase_for_mark(&self, presence_id: &str) -> Option<String> {
+        if let Some(phrase) = self
             .tasks
             .iter()
             .find(|task| task.presence_id == presence_id && live(task.state))
-            .and_then(|task| task.items.get(task.index).map(|item| item.phrase_id.clone()));
-        if let Some(phrase) = phrase {
-            self.note_shown(ledger, &phrase, now_ms);
+            .and_then(|task| task.items.get(task.index).map(|item| item.phrase_id.clone()))
+        {
+            return Some(phrase);
         }
+        self.tasks
+            .iter()
+            .find(|task| task.presence_id == "project-tour" && live(task.state))
+            .and_then(|task| task.items.get(task.index).map(|item| item.phrase_id.clone()))
     }
 
     pub fn note_hidden_presence(&mut self, presence_id: &str) {
@@ -448,15 +620,22 @@ impl TaskBook {
     }
 
     pub fn note_shown(&mut self, ledger: &mut Ledger, phrase_id: &str, now_ms: u64) {
+        self.note_shown_on(ledger, phrase_id, "", now_ms);
+    }
+
+    fn note_shown_on(&mut self, ledger: &mut Ledger, phrase_id: &str, mark_id: &str, now_ms: u64) {
         if !self.phrase_is_live(phrase_id) {
             return;
         }
         if viewed_name(ledger, phrase_id) == "acknowledged" {
+            self.retarget_shown(phrase_id, mark_id);
             return;
         }
         if self.shown.as_ref().is_some_and(|mark| mark.phrase_id == phrase_id) {
+            self.retarget_shown(phrase_id, mark_id);
             return;
         }
+        self.tint_press = None;
         self.shown = None;
         let Some(task_id) = self.task_id_for_live_phrase(phrase_id) else { return };
         if ledger
@@ -474,7 +653,35 @@ impl TaskBook {
         {
             return;
         }
-        self.shown = Some(ShownMark { phrase_id: phrase_id.to_string(), at_ms: now_ms, dwelled: false });
+        self.shown = Some(ShownMark {
+            phrase_id: phrase_id.to_string(),
+            at_ms: now_ms,
+            dwelled: false,
+            mark_id: mark_id.to_string(),
+        });
+    }
+
+    fn retarget_shown(&mut self, phrase_id: &str, mark_id: &str) {
+        if mark_id.is_empty() {
+            return;
+        }
+        if let Some(shown) = &mut self.shown {
+            if shown.phrase_id == phrase_id {
+                shown.mark_id = mark_id.to_string();
+            }
+        }
+    }
+
+    fn remember_tint(&mut self, mark_id: &str, ledger: &Ledger, phrase_id: &str) {
+        if mark_id.is_empty() {
+            return;
+        }
+        let color = match ledger.latest_hand(phrase_id) {
+            Some(LedgerKind::Accept) => MarkColor::Green,
+            Some(LedgerKind::Deny) => MarkColor::Red,
+            _ => MarkColor::Yellow,
+        };
+        self.tints.insert(mark_id.to_string(), color);
     }
 
     pub fn note_hidden(&mut self, phrase_id: &str) {
@@ -1005,6 +1212,11 @@ fn surface_alive(surface: &Surface, now_ms: u64) -> bool {
 }
 
 fn item_answered(ledger: &Ledger, mode: TaskMode, phrase_id: &str) -> bool {
+    match ledger.latest_hand(phrase_id) {
+        Some(LedgerKind::Accept | LedgerKind::Deny) => return true,
+        Some(LedgerKind::Skip) | None => {}
+        Some(_) => {}
+    }
     match mode {
         TaskMode::Approve => decision_set(ledger, phrase_id),
         TaskMode::Explain | TaskMode::Select => viewed_name(ledger, phrase_id) == "acknowledged",
@@ -1085,9 +1297,9 @@ pub fn hit_control(rects: &[(ClickTarget, PxRect)], x: i32, y: i32) -> Option<Cl
     rects.iter().rev().find(|(_, rect)| x >= rect.x && y >= rect.y && x < rect.x + rect.w && y < rect.y + rect.h).map(|(t, _)| *t)
 }
 
-/// The word mark and the avatar disc keep an empty input region.
+/// The highlight takes the pointer. The disc does not.
 pub fn word_mark_takes_input() -> bool {
-    false
+    true
 }
 
 fn viewed_name(ledger: &Ledger, phrase_id: &str) -> &'static str {
@@ -1729,7 +1941,7 @@ mod tests {
     fn c1_explain_none_is_click_through_and_dwells() {
         let mut opened = open(&explain_line());
         assert!(opened.book.control_rects(&opened.id, word_at(100), 1920, 1080).is_empty());
-        assert!(!word_mark_takes_input());
+        assert!(word_mark_takes_input());
         opened.book.note_shown(&mut opened.ledger, &opened.phrase, 0);
         assert_eq!(opened.ledger.events().len(), 1);
         assert_eq!(opened.ledger.events()[0].viewed, Some(ViewedTier::Shown));
@@ -1948,7 +2160,7 @@ mod tests {
             let rects = opened.book.control_rects(&opened.id, word, 1920, 1080);
             assert_eq!(rects.len(), n, "{line}");
             assert!(rects.iter().all(|(_, rect)| !overlaps(*rect, word)));
-            assert!(!word_mark_takes_input());
+            assert!(word_mark_takes_input());
         }
         let opened = open(&task_line("explain", r#","controls":"check""#, r#"{"query":"the line"}"#));
         let left = opened.book.control_rects(&opened.id, word_at(100), 1920, 1080);
@@ -2084,9 +2296,12 @@ mod tests {
         let body = &src[start..];
         let end = body.find("\n    fn ").unwrap();
         let body = &body[..end];
-        assert!(!body.contains("region.add"));
+        assert_eq!(body.matches("region.add").count(), 1);
+        assert_eq!(src.matches("region.add").count(), 1);
         assert!(body.contains("KeyboardInteractivity::None"));
         assert!(body.contains("set_exclusive_zone(-1)"));
+        assert!(!src.contains("get_keyboard"));
+        assert!(!keyboard_grab_installed());
     }
 
     #[test]
@@ -2777,5 +2992,213 @@ mod tests {
         assert_eq!(on_active.status, "ok", "{:?}", on_active.error);
         assert_eq!(row(&active.ledger, &active_ids[0])["notes"][0]["text"], "cut the second clause");
         assert!(row(&active.ledger, &active_ids[1]).get("notes").is_none());
+    }
+
+    fn hand_kinds(ledger: &Ledger) -> Vec<LedgerKind> {
+        ledger
+            .events()
+            .iter()
+            .filter(|ev| matches!(ev.kind, LedgerKind::Skip | LedgerKind::Accept | LedgerKind::Deny))
+            .map(|ev| ev.kind)
+            .collect()
+    }
+
+    fn tint_of(book: &TaskBook) -> Option<crate::highlight::MarkColor> {
+        book.mark_colors().into_iter().find(|(id, _)| id == "driver").map(|(_, color)| color)
+    }
+
+    fn show_tour(pace: crate::protocol::TaskPace, loci: &[&str]) -> (TaskBook, Ledger, String) {
+        let mut book = TaskBook::new();
+        let mut ledger = Ledger::new();
+        let locus_ids: Vec<String> = loci.iter().map(|id| (*id).to_string()).collect();
+        let items = locus_ids
+            .iter()
+            .map(|id| TourSeedItem { query: format!("words {id}"), narration: String::new(), page: None })
+            .collect();
+        let id = book
+            .insert_tour_chunk(
+                &mut ledger,
+                TourSeed {
+                    origin_user: true,
+                    mode: crate::protocol::TaskMode::Explain,
+                    pace,
+                    doc_key: None,
+                    items,
+                    locus_ids,
+                },
+                1_000,
+            )
+            .unwrap();
+        assert!(book.admit().is_some());
+        book.begin_task(&id, &mut ledger, 2_000).unwrap();
+        book.note_highlight("driver", &mut ledger, 2_100);
+        (book, ledger, id)
+    }
+
+    fn gesture(book: &mut TaskBook, ledger: &mut Ledger, down_ms: u64, up_ms: u64, button: u32, release_generation: Option<u64>) {
+        book.apply_tint_samples(
+            ledger,
+            vec![
+                TintSample {
+                    down: true,
+                    button,
+                    ts_ms: down_ms,
+                    mark: Some(TintMark { id: "driver".into(), generation: 1 }),
+                },
+                TintSample {
+                    down: false,
+                    button,
+                    ts_ms: up_ms,
+                    mark: release_generation.map(|generation| TintMark { id: "driver".into(), generation }),
+                },
+            ],
+        );
+    }
+
+    #[test]
+    fn classify_tap_is_short_or_long_on_the_same_generation() {
+        assert_eq!(classify_tap(BTN_LEFT, BTN_LEFT, 0, 499, 1, Some(1)), Some(Tap::Short));
+        assert_eq!(classify_tap(BTN_LEFT, BTN_LEFT, 0, 500, 1, Some(1)), Some(Tap::Long));
+        assert_eq!(classify_tap(BTN_LEFT, BTN_LEFT, 0, 100, 1, None), None);
+        assert_eq!(classify_tap(BTN_LEFT, BTN_LEFT, 0, 100, 1, Some(2)), None);
+        assert_eq!(classify_tap(0x111, 0x111, 0, 100, 1, Some(1)), None);
+        assert_eq!(classify_tap(BTN_LEFT, 0x111, 0, 100, 1, Some(1)), None);
+        assert_eq!(classify_tap(BTN_LEFT, BTN_LEFT, 100, 200, 1, Some(1)), Some(Tap::Short));
+        assert_eq!(classify_tap(BTN_LEFT, BTN_LEFT, 300, 400, 1, Some(1)), Some(Tap::Short));
+    }
+
+    #[test]
+    fn switch_tint_follows_the_three_conditions() {
+        use crate::highlight::MarkColor;
+        assert_eq!(switch_tint(MarkColor::Yellow, Tap::Short), (MarkColor::Green, LedgerKind::Accept));
+        assert_eq!(switch_tint(MarkColor::Green, Tap::Short), (MarkColor::Yellow, LedgerKind::Skip));
+        assert_eq!(switch_tint(MarkColor::Yellow, Tap::Long), (MarkColor::Red, LedgerKind::Deny));
+        assert_eq!(switch_tint(MarkColor::Green, Tap::Long), (MarkColor::Red, LedgerKind::Deny));
+        assert_eq!(switch_tint(MarkColor::Red, Tap::Short), (MarkColor::Yellow, LedgerKind::Skip));
+        assert_eq!(switch_tint(MarkColor::Red, Tap::Long), (MarkColor::Yellow, LedgerKind::Skip));
+    }
+
+    #[test]
+    fn insert_tour_chunk_uses_the_locus_id() {
+        let mut book = TaskBook::new();
+        let mut ledger = Ledger::new();
+        let mismatch = book.insert_tour_chunk(
+            &mut ledger,
+            TourSeed {
+                origin_user: true,
+                mode: crate::protocol::TaskMode::Explain,
+                pace: crate::protocol::TaskPace::Flow,
+                doc_key: None,
+                items: vec![TourSeedItem { query: "a".into(), narration: String::new(), page: None }],
+                locus_ids: vec![],
+            },
+            0,
+        );
+        assert!(matches!(mismatch, Err(TaskError::Schema)));
+        assert_eq!(ledger.occupancy(), 0);
+        assert!(!ledger.holds("ph-1"));
+        let empty = book.insert_tour_chunk(
+            &mut ledger,
+            TourSeed {
+                origin_user: true,
+                mode: crate::protocol::TaskMode::Explain,
+                pace: crate::protocol::TaskPace::Flow,
+                doc_key: None,
+                items: vec![TourSeedItem { query: "a".into(), narration: String::new(), page: None }],
+                locus_ids: vec!["  ".into()],
+            },
+            0,
+        );
+        assert!(matches!(empty, Err(TaskError::Schema)));
+        assert_eq!(ledger.occupancy(), 0);
+        let id = book
+            .insert_tour_chunk(
+                &mut ledger,
+                TourSeed {
+                    origin_user: true,
+                    mode: crate::protocol::TaskMode::Explain,
+                    pace: crate::protocol::TaskPace::Flow,
+                    doc_key: None,
+                    items: vec![TourSeedItem { query: "the line".into(), narration: String::new(), page: None }],
+                    locus_ids: vec!["lc-9".into()],
+                },
+                0,
+            )
+            .unwrap();
+        assert_eq!(book.query_value(&id).unwrap()["items"][0]["phraseId"], "lc-9");
+        assert!(ledger.holds("lc-9"));
+        assert!(!ledger.holds("ph-1"));
+    }
+
+    #[test]
+    fn a_slide_off_or_a_right_button_appends_no_row() {
+        let (mut book, mut ledger, id) = show_tour(crate::protocol::TaskPace::Flow, &["lc-a", "lc-b"]);
+        assert_eq!(hand_condition(&ledger, "lc-a"), "skip");
+        assert!(hand_kinds(&ledger).is_empty());
+        assert_eq!(tint_of(&book), Some(crate::highlight::MarkColor::Yellow));
+        gesture(&mut book, &mut ledger, 3_000, 3_100, 0x111, Some(1));
+        gesture(&mut book, &mut ledger, 3_200, 3_300, BTN_LEFT, None);
+        gesture(&mut book, &mut ledger, 3_400, 3_500, BTN_LEFT, Some(9));
+        book.apply_tint_samples(
+            &mut ledger,
+            vec![TintSample {
+                down: true,
+                button: BTN_LEFT,
+                ts_ms: 3_600,
+                mark: Some(TintMark { id: "driver".into(), generation: 1 }),
+            }],
+        );
+        book.note_shown(&mut ledger, "lc-b", 3_700);
+        book.apply_tint_samples(
+            &mut ledger,
+            vec![TintSample {
+                down: false,
+                button: BTN_LEFT,
+                ts_ms: 3_800,
+                mark: Some(TintMark { id: "driver".into(), generation: 1 }),
+            }],
+        );
+        assert!(hand_kinds(&ledger).is_empty());
+        assert_eq!(tint_of(&book), Some(crate::highlight::MarkColor::Yellow));
+        assert_eq!(book_query(&book, &id)["index"], 0);
+        assert_eq!(book_query(&book, &id)["state"], "active");
+    }
+
+    #[test]
+    fn a_flow_tap_changes_color_and_leaves_the_item() {
+        let (mut book, mut ledger, id) = show_tour(crate::protocol::TaskPace::Flow, &["lc-a", "lc-b"]);
+        gesture(&mut book, &mut ledger, 3_000, 3_200, BTN_LEFT, Some(1));
+        assert_eq!(hand_kinds(&ledger), vec![LedgerKind::Accept]);
+        assert_eq!(tint_of(&book), Some(crate::highlight::MarkColor::Green));
+        assert_eq!(row(&ledger, "lc-a")["decision"], "accept");
+        assert_eq!(book_query(&book, &id)["index"], 0);
+        assert_eq!(book_query(&book, &id)["state"], "active");
+        assert!(ledger.events().iter().filter(|ev| ev.kind == LedgerKind::Accept).all(|ev| ev.project_id.is_none()));
+        gesture(&mut book, &mut ledger, 3_300, 3_400, BTN_LEFT, Some(1));
+        assert_eq!(hand_kinds(&ledger), vec![LedgerKind::Accept, LedgerKind::Skip]);
+        assert_eq!(tint_of(&book), Some(crate::highlight::MarkColor::Yellow));
+        assert!(row(&ledger, "lc-a")["decision"].is_null());
+        assert_eq!(book_query(&book, &id)["index"], 0);
+        assert_eq!(book_query(&book, &id)["state"], "active");
+        book.set_presentation(&id, crate::protocol::TaskMode::Explain, crate::protocol::TaskPace::Wait, None).unwrap();
+        book.tick(&mut ledger, 4_000);
+        assert_eq!(book_query(&book, &id)["index"], 0);
+        assert_eq!(book_query(&book, &id)["state"], "active");
+        gesture(&mut book, &mut ledger, 4_100, 4_200, BTN_LEFT, Some(1));
+        assert_eq!(hand_kinds(&ledger), vec![LedgerKind::Accept, LedgerKind::Skip, LedgerKind::Accept]);
+        assert_eq!(book_query(&book, &id)["index"], 1);
+        assert_eq!(book_query(&book, &id)["state"], "active");
+    }
+
+    #[test]
+    fn a_wait_deny_answers_the_item() {
+        let (mut book, mut ledger, id) = show_tour(crate::protocol::TaskPace::Wait, &["lc-a", "lc-b"]);
+        assert_eq!(hand_condition(&ledger, "lc-a"), "skip");
+        assert!(hand_kinds(&ledger).is_empty());
+        gesture(&mut book, &mut ledger, 3_000, 3_500, BTN_LEFT, Some(1));
+        assert_eq!(hand_kinds(&ledger), vec![LedgerKind::Deny]);
+        assert_eq!(tint_of(&book), Some(crate::highlight::MarkColor::Red));
+        assert_eq!(book_query(&book, &id)["index"], 1);
+        assert_eq!(book_query(&book, &id)["state"], "active");
     }
 }

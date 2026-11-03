@@ -846,6 +846,23 @@ impl ProjectStore {
         Ok(loaded.events.last().map(|ev| ev.pseq).unwrap_or(0))
     }
 
+    /// Latest `skip`, `accept`, or `deny` stored for this locus. Empty when the hand has not written one.
+    pub(crate) fn latest_hand_wire(&self, id: &str, locus_id: &str) -> Option<&'static str> {
+        let loaded = self.projects.get(id)?;
+        let kind = loaded
+            .events
+            .iter()
+            .rev()
+            .find(|ev| ev.locus_id.as_deref() == Some(locus_id) && matches!(ev.kind.as_str(), "skip" | "accept" | "deny"))?
+            .kind
+            .as_str();
+        Some(match kind {
+            "accept" => "accept",
+            "deny" => "deny",
+            _ => "skip",
+        })
+    }
+
     pub fn query_value(&self, id: &str, since_pseq: Option<u64>, limit: Option<u32>) -> Result<Value, StoreError> {
         if !valid_project_id(id) {
             return Err(StoreError::Schema);
@@ -1188,7 +1205,7 @@ fn is_decision(ev: &ProjectEvent) -> bool {
         return false;
     }
     match ev.kind.as_str() {
-        "approved" | "discarded" | "cleared" => true,
+        "approved" | "discarded" | "cleared" | "skip" | "accept" | "deny" => true,
         "viewed" => ev.viewed.as_deref() == Some("acknowledged"),
         _ => false,
     }
@@ -1220,6 +1237,9 @@ fn kind_name(kind: LedgerKind) -> &'static str {
         LedgerKind::Tour => "tour",
         LedgerKind::Note => "note",
         LedgerKind::NoteDeleted => "noteDeleted",
+        LedgerKind::Skip => "skip",
+        LedgerKind::Accept => "accept",
+        LedgerKind::Deny => "deny",
     }
 }
 
