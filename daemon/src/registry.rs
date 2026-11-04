@@ -262,21 +262,8 @@ impl Registry {
         let Some(mut store) = self.ledger.take_projects() else {
             return;
         };
-        let seed = {
-            let mut opener = crate::tour::ParkOpener;
-            crate::tour::plan_follow(&mut self.tour, &mut store, &mut opener, now_ms)
-        };
-        if let Some(seed) = seed {
-            let locus_ids = seed.locus_ids.clone();
-            if let Ok(id) = self.tasks.insert_tour_chunk(&mut self.ledger, seed, now_ms) {
-                match crate::tour::associate_chunk(&mut self.ledger, &self.tour, &mut store, &id, &locus_ids, now_ms) {
-                    Ok(()) => crate::tour::remember_chunk(&mut self.tour, id, locus_ids),
-                    Err(_) => {
-                        self.tasks.end_without_decision(&id);
-                    }
-                }
-            }
-        }
+        let mut opener = crate::tour::ParkOpener;
+        let _ = crate::tour::follow_done(&mut self.tour, &mut store, &mut self.tasks, &mut self.ledger, &mut opener, now_ms);
         self.ledger.give_projects(store);
     }
 
@@ -835,7 +822,6 @@ mod tests {
         let view = reg.task_book().query_value(&task_id).unwrap();
         assert_eq!(view["items"][0]["phraseId"], locus);
         assert!(!reg.ledger().holds("ph-1"));
-        assert!(reg.task_book_mut().admit().is_some());
         {
             let (book, ledger) = reg.task_and_ledger();
             book.begin_task(&task_id, ledger, 4_000).unwrap();

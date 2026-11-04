@@ -141,6 +141,7 @@ pub(crate) fn commit(
                 Ok(id) => match associate_chunk(ledger, desk, store, &id, &locus_ids, now_ms) {
                     Ok(()) => {
                         remember_chunk(desk, id.clone(), locus_ids);
+                        book.admit();
                         detail["taskId"] = json!(id);
                         ProposalResult::ok(&proposal_id, Some(detail))
                     }
@@ -660,6 +661,7 @@ pub fn follow_done(
         return None;
     }
     remember_chunk(desk, id.clone(), locus_ids);
+    book.admit();
     Some(id)
 }
 
@@ -1497,7 +1499,7 @@ mod tests {
     }
 
     #[test]
-    fn m12_confirmed_scroll_item_is_pending() {
+    fn m12_confirmed_scroll_item_is_active() {
         let mut scratch = bench("m12");
         let id = project(&mut scratch.store, &[SourceInput { kind: SourceKind::Web, reference: "https://example.com/a".into() }]);
         put(&mut scratch.store, &id, "sr-1", "the quoted line", MatchKind::Exact, None, None, 0);
@@ -1510,7 +1512,7 @@ mod tests {
         assert!(on_hotkey(&mut desk, &mut scratch.store, &mut book, &mut ledger, &mut opener, Hotkey::Start, 1));
         let task_id = task_id(&desk).unwrap().to_string();
         let view = book.query_value(&task_id).unwrap();
-        assert_eq!(view["state"], "pending");
+        assert_eq!(view["state"], "active");
         assert_ne!(view["state"], "awaitingStart");
         assert_eq!(view["origin"], "agent");
         assert_eq!(view["items"][0]["scroll"], true);
@@ -1556,7 +1558,6 @@ mod tests {
         let mut opener = Rec::new();
         let result = go(&mut scratch, &mut book, &mut ledger, &mut desk, &mut opener, &id, Tier::T1User, 0);
         let task_id = result.detail.unwrap()["taskId"].as_str().unwrap().to_string();
-        book.admit().unwrap();
         assert_eq!(
             book.planned_move(&task_id).unwrap(),
             ViewerMove::WebFind { doc_key: "doc-sr-1".into(), opening_phrase: "opening words here".into() }
@@ -1582,12 +1583,10 @@ mod tests {
         let task_id = started.detail.unwrap()["taskId"].as_str().unwrap().to_string();
         assert_eq!(again_items(&book, &task_id), queries[..12]);
         assert!(follow_done(&mut desk, &mut scratch.store, &mut book, &mut ledger, &mut opener, 1_000).is_none());
-        book.admit().unwrap();
         book.complete(&task_id).unwrap();
         let next = follow_done(&mut desk, &mut scratch.store, &mut book, &mut ledger, &mut opener, 5_000).unwrap();
         assert_eq!(again_items(&book, &next), vec![queries[12].clone()]);
         assert_eq!(opener.calls.len(), 1);
-        book.admit().unwrap();
         book.complete(&next).unwrap();
         assert!(follow_done(&mut desk, &mut scratch.store, &mut book, &mut ledger, &mut opener, 8_000).is_none());
     }
