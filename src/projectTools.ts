@@ -62,6 +62,56 @@ export type ShowCitationsInput = {
 };
 
 const TITLE_CAP = 200;
+/** One source's map budget. Curl in the map uses the same 20 seconds. */
+export const MAP_SOURCE_MS = 20_000;
+/** The tour driver's poll. `driveTour.ts` exports the same number as `POLL_MS`. */
+export const MAP_POLL_MS = 200;
+
+export type MapWait = {
+  now(): number;
+  sleep(ms: number): Promise<void>;
+};
+
+function realWait(): MapWait {
+  return {
+    now: () => Date.now(),
+    sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  };
+}
+
+type ListedSource = { sourceId?: unknown; status?: unknown };
+
+function listedSources(view: Record<string, unknown>): ListedSource[] {
+  const project = view.project;
+  if (!project || typeof project !== "object") return [];
+  const sources = (project as { sources?: unknown }).sources;
+  if (!Array.isArray(sources)) return [];
+  return sources.filter((row): row is ListedSource => !!row && typeof row === "object");
+}
+
+function pendingIds(sources: ListedSource[]): string[] {
+  const ids: string[] = [];
+  for (const source of sources) {
+    if (source.status === "pending" && typeof source.sourceId === "string" && source.sourceId.length > 0) {
+      ids.push(source.sourceId);
+    }
+  }
+  return ids;
+}
+
+/** Poll until no source is pending. The budget is 20 seconds for each source that was pending on the first read. */
+export async function awaitMappedSources(client: ProjectCaller, projectId: string, wait: MapWait): Promise<string[]> {
+  const began = wait.now();
+  let budget: number | undefined;
+  for (;;) {
+    const view = await client.call("queryProject", { projectId });
+    const pending = pendingIds(listedSources(view));
+    if (pending.length === 0) return [];
+    if (budget === undefined) budget = pending.length * MAP_SOURCE_MS;
+    if (wait.now() - began >= budget) return pending;
+    await wait.sleep(MAP_POLL_MS);
+  }
+}
 
 function isHttpUrl(value: string | undefined): value is string {
   if (!value || /\s/.test(value)) return false;
@@ -139,7 +189,11 @@ function titleFrom(citations: CitationInput[]): string {
   return [...title].slice(0, TITLE_CAP).join("");
 }
 
-export async function showCitations(input: ShowCitationsInput, connect: Connect): Promise<Record<string, unknown>> {
+export async function showCitations(
+  input: ShowCitationsInput,
+  connect: Connect,
+  wait: MapWait = realWait(),
+): Promise<Record<string, unknown>> {
   const citations = input.citations ?? [];
   if (citations.length === 0) throw new Error("schema");
   assertUrls(citations);
@@ -159,6 +213,8 @@ export async function showCitations(input: ShowCitationsInput, connect: Connect)
   if (typeof projectId !== "string" || projectId.length === 0) {
     throw new Error("schema");
   }
+  const pending = await awaitMappedSources(client, projectId, wait);
+  if (pending.length > 0) return { projectId, pending };
   await client.call("selectLoci", { projectId, askId: "ak-1" });
   const started = await client.call("startProjectTour", { projectId, askId: "ak-1", mode, pace });
   return { projectId, mode, pace, ...started };

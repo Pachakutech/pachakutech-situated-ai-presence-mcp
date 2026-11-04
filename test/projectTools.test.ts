@@ -7,11 +7,15 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { DaemonClient } from "../src/daemonClient.ts";
 import { PolicyGate } from "../src/policyGate.ts";
+import { POLL_MS } from "../src/locate/driveTour.ts";
 import {
+  MAP_POLL_MS,
+  MAP_SOURCE_MS,
   createProject,
   exportProject,
   showCitations,
   type Connect,
+  type MapWait,
 } from "../src/projectTools.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -24,7 +28,7 @@ const THREE =
 const PROJECT =
   "**Project.** A project is a list of sources the daemon keeps on disk. Read it with `queryProject`. The register on that reply is skip, accept, and deny for the loci the tour has put up. A locus with no hand row yet is skip. You do not write those rows. Notes on the loci are the user's words. The cursor on that reply is where the tour resumes. You may propose sources and a stance.";
 const CITATIONS =
-  "**Citations.** `showCitations` takes URLs, the claim, and the quote when you have one. The tour waits for the user's start. Omit `mode` and `pace` for the narrated check. Pass `select` and `wait` when the user is recording the register, and re-read `queryProject` as the hand lands. A quote the page does not contain is reported as a near passage, and it is not presented as the quoted words.";
+  "**Citations.** `showCitations` takes URLs, the claim, and the quote when you have one. The tour waits for the user's start. Once that tour is waiting, `presence tour-start <projectId>` confirms it on the command socket, and `presence tour-drive <projectId>` opens the parked page. Omit `mode` and `pace` for the narrated check. Pass `select` and `wait` when the user is recording the register, and re-read `queryProject` as the hand lands. A quote the page does not contain is reported as a near passage, and it is not presented as the quoted words.";
 
 function handler(src: string, name: string): string {
   const marker = `registerTool(\n  "${name}",`;
@@ -198,7 +202,7 @@ test("V4 showCitations with two URLs and no mode sends explain and flow", async 
     const bodies = sock.lines().map((line) => JSON.parse(line) as Record<string, unknown>);
     assert.deepEqual(
       bodies.map((body) => body.kind),
-      ["createProject", "selectLoci", "startProjectTour"],
+      ["createProject", "queryProject", "selectLoci", "startProjectTour"],
     );
     const created = bodies[0] as {
       asks: { kind: string; text: string }[];
@@ -211,11 +215,11 @@ test("V4 showCitations with two URLs and no mode sends explain and flow", async 
     assert.equal(created.sources[1].quote, undefined);
     assert.equal(created.sources[0].path, undefined);
     assert.equal(sock.lines().join("\n").includes('"path"'), false);
-    assert.equal((bodies[1] as { askId: string }).askId, "ak-1");
-    const tour = bodies[2] as { mode: string; pace: string; kind: string };
+    assert.equal((bodies[2] as { askId: string }).askId, "ak-1");
+    const tour = bodies[3] as { mode: string; pace: string; kind: string };
     assert.equal(tour.mode, "explain");
     assert.equal(tour.pace, "flow");
-    assert.equal(bodies.some((body) => body.kind === "Start"), false);
+    assert.equal(bodies.some((body) => body.kind === "Start" || body.kind === "confirmTour"), false);
   } finally {
     await sock.close();
   }
@@ -235,10 +239,10 @@ test("V7 showCitations forwards select and wait and does not send Start", async 
     const bodies = sock.lines().map((line) => JSON.parse(line) as { kind: string; mode?: string; pace?: string });
     assert.deepEqual(
       bodies.map((body) => body.kind),
-      ["createProject", "selectLoci", "startProjectTour"],
+      ["createProject", "queryProject", "selectLoci", "startProjectTour"],
     );
-    assert.equal(bodies[2].mode, "select");
-    assert.equal(bodies[2].pace, "wait");
+    assert.equal(bodies[3].mode, "select");
+    assert.equal(bodies[3].pace, "wait");
     assert.equal(
       bodies.some((body) => body.kind !== "startProjectTour" && /start/i.test(body.kind)),
       false,
@@ -262,6 +266,128 @@ test("exportProject forwards the kind and a daemon error is the result", async (
   } finally {
     await sock.close();
   }
+});
+
+function clock(jump: number): { wait: MapWait; sleeps: number[]; now: () => number } {
+  const sleeps: number[] = [];
+  let now = 0;
+  return {
+    sleeps,
+    now: () => now,
+    wait: {
+      now: () => now,
+      sleep: async (ms: number) => {
+        sleeps.push(ms);
+        now += jump;
+      },
+    },
+  };
+}
+
+test("R4 showCitations waits out pending sources, then selects once", async () => {
+  assert.equal(MAP_POLL_MS, POLL_MS);
+  assert.equal(MAP_SOURCE_MS, 20_000);
+  let queries = 0;
+  const sock = await serve((kind, body) => {
+    if (kind === "createProject") return { projectId: "pj-0123456789abcdef" };
+    if (kind === "queryProject") {
+      queries += 1;
+      if (queries === 1) {
+        return {
+          project: {
+            sources: [
+              { sourceId: "sr-1", status: "pending" },
+              { sourceId: "sr-2", status: "pending" },
+            ],
+          },
+        };
+      }
+      return {
+        project: {
+          sources: [
+            { sourceId: "sr-1", status: "mapped" },
+            { sourceId: "sr-2", status: "failed" },
+          ],
+        },
+      };
+    }
+    if (kind === "selectLoci") return { projectId: body.projectId, askId: body.askId, locusIds: ["lc-1"] };
+    if (kind === "startProjectTour") return { projectId: body.projectId, state: "awaitingStart", sources: ["example.com"] };
+    return {};
+  });
+  const paced = clock(MAP_POLL_MS);
+  try {
+    const detail = await showCitations(
+      {
+        citations: [
+          { url: "https://example.com/a", claim: "first" },
+          { url: "https://example.com/b", claim: "second" },
+        ],
+      },
+      connectAt(sock.path),
+      paced.wait,
+    );
+    assert.deepEqual(paced.sleeps, [MAP_POLL_MS]);
+    const kinds = sock.lines().map((line) => (JSON.parse(line) as { kind: string }).kind);
+    assert.deepEqual(kinds, ["createProject", "queryProject", "queryProject", "selectLoci", "startProjectTour"]);
+    assert.equal(kinds.includes("confirmTour"), false);
+    assert.equal(detail.state, "awaitingStart");
+    assert.equal(detail.pending, undefined);
+  } finally {
+    await sock.close();
+  }
+});
+
+test("R4 a source still pending at the deadline is returned and the tour is not started", async () => {
+  const sock = await serve((kind) => {
+    if (kind === "createProject") return { projectId: "pj-0123456789abcdef" };
+    if (kind === "queryProject") {
+      return {
+        project: {
+          sources: [
+            { sourceId: "sr-1", status: "pending" },
+            { sourceId: "sr-2", status: "pending" },
+          ],
+        },
+      };
+    }
+    if (kind === "selectLoci" || kind === "startProjectTour") return { started: true };
+    return {};
+  });
+  const paced = clock(MAP_SOURCE_MS);
+  try {
+    const detail = await showCitations(
+      {
+        citations: [
+          { url: "https://example.com/a", claim: "first" },
+          { url: "https://example.com/b", claim: "second" },
+        ],
+      },
+      connectAt(sock.path),
+      paced.wait,
+    );
+    assert.deepEqual(paced.sleeps, [MAP_POLL_MS, MAP_POLL_MS]);
+    const kinds = sock.lines().map((line) => (JSON.parse(line) as { kind: string }).kind);
+    assert.deepEqual(kinds, ["createProject", "queryProject", "queryProject", "queryProject"]);
+    assert.equal(kinds.includes("selectLoci"), false);
+    assert.equal(kinds.includes("startProjectTour"), false);
+    assert.equal(kinds.includes("confirmTour"), false);
+    assert.deepEqual(detail, { projectId: "pj-0123456789abcdef", pending: ["sr-1", "sr-2"] });
+  } finally {
+    await sock.close();
+  }
+});
+
+test("R5 showCitations and tour-drive do not confirm, and the tint ignores the double click", () => {
+  const tool = readFileSync(join(root, "src/projectTools.ts"), "utf8");
+  const drive = readFileSync(join(root, "src/locate/driveTour.ts"), "utf8");
+  assert.equal(tool.includes("confirmTour"), false);
+  assert.equal(drive.includes("confirmTour"), false);
+  const task = readFileSync(join(root, "daemon/src/task.rs"), "utf8");
+  const tintAt = task.indexOf("fn apply_tint_sample");
+  const tintEnd = task.indexOf("fn note_highlight", tintAt);
+  assert.ok(tintAt >= 0 && tintEnd > tintAt);
+  assert.equal(task.slice(tintAt, tintEnd).includes("DOUBLE_CLICK_MS"), false);
 });
 
 test("V5 the tool module does not send subscribeLedger, addNote, or observePhrase", () => {

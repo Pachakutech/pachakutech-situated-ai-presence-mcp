@@ -602,7 +602,8 @@ fn dispatch(
         | Proposal::QueryProject(_)
         | Proposal::SelectLoci(_)
         | Proposal::StartProjectTour(_)
-        | Proposal::ReportSourceOpen(_) => ProposalResult::err(&proposal_id, "unrouted project proposal"),
+        | Proposal::ReportSourceOpen(_)
+        | Proposal::ConfirmTour(_) => ProposalResult::err(&proposal_id, "unrouted project proposal"),
         Proposal::AddNote(_) | Proposal::DeleteNote(_) => ProposalResult::err(&proposal_id, "unrouted note proposal"),
     };
     (result, false)
