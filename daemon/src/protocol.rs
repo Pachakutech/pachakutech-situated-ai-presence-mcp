@@ -201,6 +201,9 @@ pub enum Proposal {
     /// The locate process reports that the parked source opened, or why it did not.
     #[serde(rename = "reportSourceOpen")]
     ReportSourceOpen(ReportSourceOpenBody),
+    /// T1 confirms the tour that is waiting. It names the project and nothing else.
+    #[serde(rename = "confirmTour")]
+    ConfirmTour(ConfirmTourBody),
     /// T1 text on a phrase. Without `phraseId`, one live arming is consumed.
     #[serde(rename = "addNote")]
     AddNote(AddNoteBody),
@@ -260,6 +263,7 @@ impl Proposal {
             Proposal::SelectLoci(body) => &body.proposal_id,
             Proposal::StartProjectTour(body) => &body.proposal_id,
             Proposal::ReportSourceOpen(body) => &body.proposal_id,
+            Proposal::ConfirmTour(body) => &body.proposal_id,
             Proposal::AddNote(body) => &body.proposal_id,
             Proposal::DeleteNote(body) => &body.proposal_id,
         }
@@ -301,6 +305,7 @@ impl Proposal {
             Proposal::SelectLoci(_) => "selectLoci",
             Proposal::StartProjectTour(_) => "startProjectTour",
             Proposal::ReportSourceOpen(_) => "reportSourceOpen",
+            Proposal::ConfirmTour(_) => "confirmTour",
             Proposal::AddNote(_) => "addNote",
             Proposal::DeleteNote(_) => "deleteNote",
         }
@@ -737,6 +742,18 @@ pub struct ReportSourceOpenBody {
     pub ok: Option<bool>,
     #[serde(default)]
     pub reason: Option<String>,
+    #[serde(default, rename = "kind")]
+    pub wire_kind: Option<String>,
+}
+
+/// T1 only. The body is the project id. A URL, a path, or a mode is a schema error.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfirmTourBody {
+    #[serde(rename = "proposalId")]
+    pub proposal_id: String,
+    #[serde(rename = "projectId")]
+    pub project_id: String,
     #[serde(default, rename = "kind")]
     pub wire_kind: Option<String>,
 }

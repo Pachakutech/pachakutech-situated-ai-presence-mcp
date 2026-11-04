@@ -59,7 +59,7 @@ The presences and artifacts live in a shared substrate, not in your context wind
 
 **Project.** A project is a list of sources the daemon keeps on disk. Read it with `queryProject`. The register on that reply is skip, accept, and deny for the loci the tour has put up. A locus with no hand row yet is skip. You do not write those rows. Notes on the loci are the user's words. The cursor on that reply is where the tour resumes. You may propose sources and a stance.
 
-**Citations.** `showCitations` takes URLs, the claim, and the quote when you have one. The tour waits for the user's start. Omit `mode` and `pace` for the narrated check. Pass `select` and `wait` when the user is recording the register, and re-read `queryProject` as the hand lands. A quote the page does not contain is reported as a near passage, and it is not presented as the quoted words.
+**Citations.** `showCitations` takes URLs, the claim, and the quote when you have one. The tour waits for the user's start. Once that tour is waiting, `presence tour-start <projectId>` confirms it on the command socket, and `presence tour-drive <projectId>` opens the parked page. Omit `mode` and `pace` for the narrated check. Pass `select` and `wait` when the user is recording the register, and re-read `queryProject` as the hand lands. A quote the page does not contain is reported as a near passage, and it is not presented as the quoted words.
 
 **Ask.** The user asks with `presence ask` on the command socket. The ask can create a task after they confirm the mode. It cannot acknowledge, approve, or discard. A transcript is the same ask.
 

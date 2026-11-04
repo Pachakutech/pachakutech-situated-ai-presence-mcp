@@ -15,6 +15,7 @@ import { socketPath } from "./daemonClient.js";
 import { askCommand } from "./command/ask.js";
 import { noteCommand } from "./command/note.js";
 import { docmapProposal } from "./command/docmap.js";
+import { tourStartCommand } from "./command/tourStart.js";
 import { runLedger } from "./command/ledger.js";
 import { commandSocketPath, connectCommand, openCommand } from "./command/socket.js";
 import { sendProposal, socketReachable, startDaemon, statusDaemon, stopDaemon } from "./daemonControl.js";
@@ -47,6 +48,9 @@ function usage(): never {
       "  tour-drive <projectId> [--presence <id>]",
       "                       Poll the parked source and open that window.",
       "                       Does not press Start and does not create a project.",
+      "  tour-start <projectId>",
+      "                       Confirm the waiting tour on command.sock.",
+      "                       Does not open a window and does not take the hand.",
       "  locate --source web|pdf|terminal|doc|ide --query <phrase>",
       "                       [--uri URL_or_path] [--page N] [--pad 0] [--timeout-s 15]",
       "                       [--no-open] [--window-class RE] [--window-title RE] [--verify]",
@@ -398,6 +402,14 @@ switch (command) {
   case "tour-drive":
     process.exit(await tourDriveCommand(process.argv.slice(3)));
     break;
+  case "tour-start": {
+    const commandPath = commandSocketPath(socketPath());
+    process.exit(
+      await tourStartCommand(process.argv.slice(3), {
+        write: (body) => connectCommand(commandPath, body),
+      }),
+    );
+  }
   case "locate":
     process.exit(await locateCommand(process.argv.slice(3)));
     break;

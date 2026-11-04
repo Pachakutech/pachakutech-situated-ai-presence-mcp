@@ -123,6 +123,10 @@ impl Registry {
         &self.tasks
     }
 
+    pub fn tour_phase_name(&self) -> Option<&'static str> {
+        crate::tour::phase_name(&self.tour)
+    }
+
     pub fn task_book_mut(&mut self) -> &mut TaskBook {
         &mut self.tasks
     }
@@ -161,6 +165,43 @@ impl Registry {
                 };
                 let planned = crate::tour::plan_report(body, &mut store, &mut self.tour, now_ms);
                 let result = crate::tour::commit(planned, &mut self.tasks, &mut self.ledger, &mut self.tour, &mut store, now_ms);
+                self.ledger.give_projects(store);
+                Some(result)
+            }
+            Proposal::ConfirmTour(body) => {
+                if !crate::gate::allowed(tier, proposal) {
+                    return Some(ProposalResult::err(
+                        &body.proposal_id,
+                        format!("not_allowed_for_tier:{}", proposal.kind_name()),
+                    ));
+                }
+                let Some(mut store) = self.ledger.take_projects() else {
+                    return Some(ProposalResult::err(&body.proposal_id, "projects_unavailable"));
+                };
+                let awaiting = crate::tour::tour_project(&self.tour) == Some(body.project_id.as_str())
+                    && crate::tour::phase_name(&self.tour) == Some("awaitingStart");
+                if !awaiting {
+                    self.ledger.give_projects(store);
+                    return Some(ProposalResult::err(&body.proposal_id, "no_active_project_tour"));
+                }
+                let mut opener = crate::tour::ParkOpener;
+                let _took = crate::tour::on_hotkey(
+                    &mut self.tour,
+                    &mut store,
+                    &mut self.tasks,
+                    &mut self.ledger,
+                    &mut opener,
+                    crate::ui_input::Hotkey::Start,
+                    now_ms,
+                );
+                let state = crate::tour::phase_name(&self.tour).unwrap_or("awaitingStart");
+                let result = ProposalResult::ok(
+                    &body.proposal_id,
+                    Some(serde_json::json!({
+                        "projectId": body.project_id,
+                        "state": state,
+                    })),
+                );
                 self.ledger.give_projects(store);
                 Some(result)
             }
@@ -557,6 +598,156 @@ mod tests {
         let saved = std::fs::read_to_string(root.join("projects").join(&id).join("project.json")).unwrap();
         assert!(!saved.contains("openRequest"));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn scratch_reg(label: &str) -> (Registry, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!("presence-tour-confirm-{label}-{}-{}", std::process::id(), line!()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut reg = Registry::new();
+        reg.open_projects(&root.join("projects")).unwrap();
+        (reg, root)
+    }
+
+    fn mapped_web(reg: &mut Registry, url: &str, now: u64) -> String {
+        let create = json!({
+            "kind": "createProject",
+            "proposalId": format!("c{now}"),
+            "title": "Confirm",
+            "asks": [{ "text": "Is X supported?", "kind": "question" }],
+            "sources": [{ "url": url }],
+        });
+        let proposal: Proposal = serde_json::from_value(create).unwrap();
+        let created = reg.route_project_proposal(&proposal, Tier::T1User, now).unwrap();
+        assert_eq!(created.status, "ok", "{:?}", created.error);
+        let id = created.detail.unwrap()["projectId"].as_str().unwrap().to_string();
+        reg.projects_mut()
+            .unwrap()
+            .set_source_status(&id, "sr-1", crate::project::SourceStatus::Mapped, None)
+            .unwrap();
+        id
+    }
+
+    fn start_listed(reg: &mut Registry, id: &str, now: u64) {
+        let start = json!({
+            "kind": "startProjectTour",
+            "proposalId": "g",
+            "projectId": id,
+            "mode": "explain",
+        });
+        let proposal: Proposal = serde_json::from_value(start).unwrap();
+        let started = reg.route_tour_proposal(&proposal, Tier::T2Client, now).unwrap();
+        assert_eq!(started.status, "ok", "{:?}", started.error);
+        assert_eq!(started.detail.as_ref().unwrap()["state"], "awaitingStart");
+    }
+
+    fn confirm_proposal(id: &str, proposal_id: &str) -> Proposal {
+        serde_json::from_value(json!({
+            "kind": "confirmTour",
+            "proposalId": proposal_id,
+            "projectId": id,
+        }))
+        .unwrap()
+    }
+
+    fn parked_reference(reg: &mut Registry, id: &str, now: u64) -> Option<serde_json::Value> {
+        let query = json!({
+            "kind": "queryProject",
+            "proposalId": format!("q{now}"),
+            "projectId": id,
+        });
+        let proposal: Proposal = serde_json::from_value(query).unwrap();
+        let viewed = reg.route_project_proposal(&proposal, Tier::T2Client, now).unwrap();
+        assert_eq!(viewed.status, "ok", "{:?}", viewed.error);
+        viewed.detail.unwrap().get("openRequest").cloned()
+    }
+
+    #[test]
+    fn r2_confirm_tour_parks_the_listed_source() {
+        let (mut reg, root) = scratch_reg("r2");
+        let id = mapped_web(&mut reg, "https://example.com/a", 1);
+        start_listed(&mut reg, &id, 2);
+        assert!(parked_reference(&mut reg, &id, 3).is_none());
+        for (tier, proposal_id) in [(Tier::T2Client, "t2"), (Tier::T3Sidecar, "t3")] {
+            let refused = reg.route_tour_proposal(&confirm_proposal(&id, proposal_id), tier, 4).unwrap();
+            assert_eq!(refused.error.as_deref(), Some("not_allowed_for_tier:confirmTour"));
+        }
+        assert!(parked_reference(&mut reg, &id, 5).is_none());
+        assert_eq!(reg.tour_phase_name(), Some("awaitingStart"));
+        let confirmed = reg.route_tour_proposal(&confirm_proposal(&id, "k"), Tier::T1User, 6).unwrap();
+        assert_eq!(confirmed.status, "ok", "{:?}", confirmed.error);
+        assert_eq!(confirmed.detail.as_ref().unwrap()["state"], "active");
+        let req = parked_reference(&mut reg, &id, 7).unwrap();
+        assert_eq!(req["kind"], "web");
+        assert_eq!(req["sourceId"], "sr-1");
+        assert_eq!(req["reference"], "https://example.com/a");
+        assert_eq!(req["port"], 9222);
+        assert_eq!(
+            reg.projects_mut().unwrap().get(&id).unwrap().sources[0].status,
+            crate::project::SourceStatus::Mapped
+        );
+        for extra in [r#","url":"https://evil.test""#, r#","path":"/tmp/a""#, r#","mode":"explain""#] {
+            let raw = format!(
+                r#"{{"kind":"confirmTour","proposalId":"bad","projectId":"{id}"{extra}}}"#,
+                id = id,
+                extra = extra,
+            );
+            assert!(serde_json::from_str::<Proposal>(&raw).is_err(), "{extra}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn r3_confirm_tour_leaves_any_other_desk() {
+        let (mut reg, root) = scratch_reg("r3-other");
+        let id = mapped_web(&mut reg, "https://example.com/a", 1);
+        let other = mapped_web(&mut reg, "https://example.com/b", 2);
+        start_listed(&mut reg, &id, 3);
+        let task_id = awaiting_task(&mut reg, 4);
+        let wrong = reg.route_tour_proposal(&confirm_proposal(&other, "k"), Tier::T1User, 5).unwrap();
+        assert_eq!(wrong.error.as_deref(), Some("no_active_project_tour"));
+        assert_eq!(reg.task_book().query_value(&task_id).unwrap()["state"], "awaitingStart");
+        assert_eq!(reg.tour_phase_name(), Some("awaitingStart"));
+        assert!(parked_reference(&mut reg, &id, 6).is_none());
+        let _ = std::fs::remove_dir_all(&root);
+
+        let (mut reg, root) = scratch_reg("r3-active");
+        let id = mapped_web(&mut reg, "https://example.com/a", 1);
+        let start = json!({
+            "kind": "startProjectTour",
+            "proposalId": "g",
+            "projectId": id,
+            "mode": "explain",
+        });
+        let start_proposal: Proposal = serde_json::from_value(start).unwrap();
+        let started = reg.route_tour_proposal(&start_proposal, Tier::T1User, 2).unwrap();
+        assert_eq!(started.status, "ok", "{:?}", started.error);
+        let before = parked_reference(&mut reg, &id, 3).unwrap();
+        let late = reg.route_tour_proposal(&confirm_proposal(&id, "k"), Tier::T1User, 4).unwrap();
+        assert_eq!(late.error.as_deref(), Some("no_active_project_tour"));
+        assert_eq!(parked_reference(&mut reg, &id, 5).unwrap(), before);
+        let _ = std::fs::remove_dir_all(&root);
+
+        let (mut reg, root) = scratch_reg("r3-task");
+        let id = mapped_web(&mut reg, "https://example.com/a", 1);
+        let task_id = awaiting_task(&mut reg, 2);
+        start_listed(&mut reg, &id, 3);
+        let confirmed = reg.route_tour_proposal(&confirm_proposal(&id, "k"), Tier::T1User, 4).unwrap();
+        assert_eq!(confirmed.status, "ok", "{:?}", confirmed.error);
+        assert_eq!(reg.task_book().query_value(&task_id).unwrap()["state"], "active");
+        assert_eq!(reg.tour_phase_name(), Some("awaitingStart"));
+        assert!(parked_reference(&mut reg, &id, 5).is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn awaiting_task(reg: &mut Registry, now: u64) -> String {
+        let raw = r#"{"kind":"createTask","proposalId":"c","presenceId":"p-1","mode":"explain","items":[{"query":"the line","scroll":true}]}"#;
+        let proposal: Proposal = serde_json::from_str(raw).unwrap();
+        let (book, ledger) = reg.task_and_ledger();
+        let created = crate::task::route_task(&proposal, Tier::T2Client, book, ledger, true, now).unwrap();
+        let task_id = created.detail.unwrap()["taskId"].as_str().unwrap().to_string();
+        assert_eq!(reg.task_book().query_value(&task_id).unwrap()["state"], "awaitingStart");
+        task_id
     }
 
     fn hand_rows(path: &std::path::Path) -> Vec<serde_json::Value> {

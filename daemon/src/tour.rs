@@ -1809,6 +1809,9 @@ mod tests {
         let overlay = fs::read_to_string(root.join("overlay.rs")).unwrap();
         assert!(!overlay.contains("evince"));
         assert!(!overlay.contains("chromium"));
+        assert!(!overlay.contains("get_keyboard"));
+        assert_eq!(overlay.matches("Command::new").count(), 1);
+        assert!(overlay.contains("Command::new(\"stdbuf\")"));
     }
 
     #[test]
