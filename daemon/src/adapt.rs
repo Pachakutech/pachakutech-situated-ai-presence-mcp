@@ -1545,14 +1545,34 @@ mod tests {
         assert_eq!(source(&bench.store, &id, 1).status, SourceStatus::Mapped);
 
         let long = bench.root.join("long.txt");
-        fs::write(&long, format!("{}\n", "a".repeat(1001))).unwrap();
+        fs::write(&long, format!("{}\n", "a".repeat(docmap::MAX_PASSAGE_CHARS + 1))).unwrap();
         let next = bench.root.join("next.txt");
         fs::write(&next, b"after the cap\n").unwrap();
         let quota_id = project(&mut bench.store, &[file_source(&long), file_source(&next)]);
         map_project(&mut bench.store, &mut bench.map, &Silent, &quota_id, "2026-10-31", false, &Off).unwrap();
-        assert_eq!(source(&bench.store, &quota_id, 0).status, SourceStatus::Failed);
-        assert_eq!(source(&bench.store, &quota_id, 0).reason.as_deref(), Some("quota"));
+        let long_source = source(&bench.store, &quota_id, 0);
+        assert_eq!(long_source.status, SourceStatus::Mapped);
+        assert!(long_source.reason.is_none());
+        let pieces = bench.map.read_passages(long_source.doc_key.as_deref().unwrap()).unwrap();
+        assert_eq!(pieces.len(), 2);
+        assert_eq!(pieces[0].text.chars().count(), docmap::MAX_PASSAGE_CHARS);
+        assert_eq!(pieces[1].text, "a");
         assert_eq!(source(&bench.store, &quota_id, 1).status, SourceStatus::Mapped);
+
+        let many = bench.root.join("many.txt");
+        let mut lines = String::new();
+        for n in 0..docmap::MAX_PASSAGES + 1 {
+            lines.push_str(&format!("row {n}\n"));
+        }
+        fs::write(&many, lines).unwrap();
+        let many_id = project(&mut bench.store, &[file_source(&many)]);
+        map_project(&mut bench.store, &mut bench.map, &Silent, &many_id, "2026-10-31", false, &Off).unwrap();
+        let many_source = source(&bench.store, &many_id, 0);
+        assert_eq!(many_source.status, SourceStatus::Mapped);
+        let kept = bench.map.read_passages(many_source.doc_key.as_deref().unwrap()).unwrap();
+        assert_eq!(kept.len(), docmap::MAX_PASSAGES);
+        assert_eq!(kept[0].text, "row 0");
+        assert_eq!(kept.last().unwrap().text, format!("row {}", docmap::MAX_PASSAGES - 1));
     }
 
     #[test]

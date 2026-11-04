@@ -15,8 +15,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const MAX_BYTES: u64 = 50 * 1024 * 1024;
-const MAX_PASSAGE_CHARS: usize = 1000;
-const MAX_PASSAGES: usize = 2000;
+pub(crate) const MAX_PASSAGE_CHARS: usize = 2000;
+pub(crate) const MAX_PASSAGES: usize = 2000;
 const DEFAULT_K: usize = 5;
 const MAX_K: u32 = 20;
 
@@ -345,17 +345,49 @@ fn push_passage(passages: &mut Vec<Passage>, text: &str, page: Option<u32>, line
     if text.is_empty() {
         return Ok(());
     }
-    if text.chars().count() > MAX_PASSAGE_CHARS || passages.len() >= MAX_PASSAGES {
-        return Err("quota".to_string());
+    let chars: Vec<char> = text.chars().collect();
+    let mut start = 0usize;
+    while start < chars.len() {
+        if passages.len() >= MAX_PASSAGES {
+            return Ok(());
+        }
+        let remain = chars.len() - start;
+        let end = if remain <= MAX_PASSAGE_CHARS {
+            chars.len()
+        } else {
+            start + cut_at(&chars[start..start + MAX_PASSAGE_CHARS])
+        };
+        let piece: String = chars[start..end].iter().collect();
+        let piece = piece.trim();
+        if !piece.is_empty() {
+            passages.push(Passage {
+                passage_id: format!("p-{}", passages.len() + 1),
+                text: piece.to_string(),
+                page,
+                line,
+                heading_path: heading_path.to_vec(),
+            });
+        }
+        start = end;
+        while start < chars.len() && chars[start].is_whitespace() {
+            start += 1;
+        }
     }
-    passages.push(Passage {
-        passage_id: format!("p-{}", passages.len() + 1),
-        text: text.to_string(),
-        page,
-        line,
-        heading_path: heading_path.to_vec(),
-    });
     Ok(())
+}
+
+/// End of the piece inside a full window, as an index into that window.
+/// A sentence end wins, then whitespace, then the last character of the window.
+fn cut_at(window: &[char]) -> usize {
+    if let Some(at) = window.iter().rposition(|ch| matches!(ch, '.' | '!' | '?')) {
+        return at + 1;
+    }
+    if let Some(at) = window.iter().rposition(|ch| ch.is_whitespace()) {
+        if at > 0 {
+            return at;
+        }
+    }
+    window.len().max(1)
 }
 
 fn passages_from_plain(text: &str) -> Result<Vec<Passage>, String> {
@@ -835,6 +867,51 @@ mod tests {
         assert!(hit["line"].as_u64().is_some());
         assert!(hit["page"].is_null());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_long_block_splits_and_the_count_cap_keeps_what_fits() {
+        let letters = "a".repeat(MAX_PASSAGE_CHARS + 1);
+        let plain = plain_passages(&letters).unwrap();
+        assert_eq!(plain.len(), 2);
+        assert_eq!(plain[0].text.chars().count(), MAX_PASSAGE_CHARS);
+        assert_eq!(plain[1].text, "a");
+
+        let sentence = "Resonance spreads the charge.";
+        let tail = format!("{sentence} {}", "b".repeat(MAX_PASSAGE_CHARS));
+        let split = plain_passages(&tail).unwrap();
+        assert_eq!(split[0].text, sentence);
+        assert_eq!(split[1].text, "b".repeat(MAX_PASSAGE_CHARS));
+        assert!(split.iter().all(|passage| passage.text.chars().count() <= MAX_PASSAGE_CHARS));
+
+        let spaced = format!("{} {}", "c".repeat(MAX_PASSAGE_CHARS - 10), "d".repeat(40));
+        let at_space = plain_passages(&spaced).unwrap();
+        assert_eq!(at_space.len(), 2);
+        assert_eq!(at_space[0].text, "c".repeat(MAX_PASSAGE_CHARS - 10));
+        assert_eq!(at_space[1].text, "d".repeat(40));
+
+        let html = format!("<p>{}</p>", "e".repeat(MAX_PASSAGE_CHARS + 1));
+        let from_html = html_passages(&html).unwrap();
+        assert_eq!(from_html.len(), 2);
+        assert_eq!(from_html[0].text.chars().count(), MAX_PASSAGE_CHARS);
+        assert_eq!(from_html[1].text, "e");
+
+        let bbox = format!(
+            "<page><line><word>{}</word></line></page>",
+            "f".repeat(MAX_PASSAGE_CHARS + 1)
+        );
+        let from_bbox = bbox_passages(&bbox).unwrap();
+        assert_eq!(from_bbox.len(), 2);
+        assert_eq!(from_bbox[0].text.chars().count(), MAX_PASSAGE_CHARS);
+
+        let mut lines = String::new();
+        for n in 0..MAX_PASSAGES + 1 {
+            lines.push_str(&format!("row-{n}\n"));
+        }
+        let capped = plain_passages(&lines).unwrap();
+        assert_eq!(capped.len(), MAX_PASSAGES);
+        assert_eq!(capped[0].text, "row-0");
+        assert_eq!(capped.last().unwrap().text, format!("row-{}", MAX_PASSAGES - 1));
     }
 
     #[test]
