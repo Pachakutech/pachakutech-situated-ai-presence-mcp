@@ -28,7 +28,7 @@ const THREE =
 const PROJECT =
   "**Project.** A project is a list of sources the daemon keeps on disk. Read it with `queryProject`. The register on that reply is skip, accept, and deny for the loci the tour has put up. A locus with no hand row yet is skip. You do not write those rows. Notes on the loci are the user's words. The cursor on that reply is where the tour resumes. You may propose sources and a stance.";
 const CITATIONS =
-  "**Citations.** You choose the quotes. Read the page and copy a short sentence that is on it and bears on the claim. `showCitations` takes one citation per sentence: the page's URL, the claim, and that sentence. When one page has several such sentences, send one citation for each and repeat the URL. The tour waits for the user's start. Once that tour is waiting, `presence tour-start <projectId>` confirms it on the command socket, and `presence tour-drive <projectId>` opens the parked page. Omit `mode` and `pace` for the narrated check. Pass `select` and `wait` when the user is recording the register, and re-read `queryProject` as the hand lands. A mapped passage is at most 2000 characters, and a page keeps at most 2000 passages. Text past either limit is not in the map. Copy a sentence short enough to sit inside one piece. A quote the page does not contain, or one that crosses a cut, is a near passage. Present a locus as the quote you sent only when its `matchKind` is `exact`.";
+  "**Citations.** You choose the quotes. Read the page and copy a short sentence that is on it and bears on the claim. `showCitations` takes one citation per sentence: the page's URL, the claim, and that sentence. When one page has several such sentences, send one citation for each and repeat the URL. With each quote, send `narration`: one or two short sentences on why that sentence bears on the claim. The line is cut at 300 characters. The tour waits for the user's start. Once that tour is waiting, `presence tour-start <projectId>` confirms it on the command socket, and `presence tour-drive <projectId>` opens the parked page. Spawn a presence if none owns the body, and pass that id as `presence tour-drive <projectId> --presence <id>`. The driver tints each quote on that body and speaks that line. A missed quote keeps the correction sentence. The line you sent does not replace it. Omit `mode` and `pace` for the narrated check. Pass `select` and `wait` when the user is recording the register, and re-read `queryProject` as the hand lands. A mapped passage is at most 2000 characters, and a page keeps at most 2000 passages. Text past either limit is not in the map. Copy a sentence short enough to sit inside one piece. A quote the page does not contain, or one that crosses a cut, is a near passage. Present a locus as the quote you sent only when its `matchKind` is `exact`.";
 
 function handler(src: string, name: string): string {
   const marker = `registerTool(\n  "${name}",`;
@@ -193,8 +193,8 @@ test("V4 showCitations with two URLs and no mode sends explain and flow", async 
     await showCitations(
       {
         citations: [
-          { url: "https://example.com/a", claim: "first claim", quote: "the quoted line" },
-          { url: "https://example.com/b", claim: "second claim" },
+          { url: "https://example.com/a", claim: "first claim", quote: "the quoted line", narration: "  why this sentence bears on the claim  " },
+          { url: "https://example.com/b", claim: "second claim", narration: "   " },
         ],
       },
       connectAt(sock.path),
@@ -206,13 +206,15 @@ test("V4 showCitations with two URLs and no mode sends explain and flow", async 
     );
     const created = bodies[0] as {
       asks: { kind: string; text: string }[];
-      sources: { url: string; claim: string; quote?: string; path?: string }[];
+      sources: { url: string; claim: string; quote?: string; path?: string; narration?: string }[];
     };
     assert.equal(created.asks.length, 2);
     assert.equal(created.asks[0].kind, "claim");
     assert.equal(created.asks[1].text, "second claim");
     assert.equal(created.sources[0].quote, "the quoted line");
+    assert.equal(created.sources[0].narration, "why this sentence bears on the claim");
     assert.equal(created.sources[1].quote, undefined);
+    assert.equal(created.sources[1].narration, undefined);
     assert.equal(created.sources[0].path, undefined);
     assert.equal(sock.lines().join("\n").includes('"path"'), false);
     assert.equal((bodies[2] as { askId: string }).askId, "ak-1");

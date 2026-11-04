@@ -548,7 +548,8 @@ server.registerTool(
   {
     title: "Show citations",
     description:
-      "Takes URLs, the claim, and the quote when you have one. Creates the project, selects loci, and starts the tour. " +
+      "Takes URLs, the claim, the quote when you have one, and narration: one or two short sentences on why the quote bears on the claim. " +
+      "Creates the project, selects loci, and starts the tour. " +
       "Omit mode and pace for the narrated check. Pass select and wait when the user is recording the register, " +
       "and re-read queryProject as the hand lands. The tour waits for the user's start. " +
       "A local path is refused before a socket opens. A quote the page does not contain is a near passage.",
@@ -561,6 +562,10 @@ server.registerTool(
             path: z.string().optional().describe("Refused. Pass a URL"),
             claim: z.string(),
             quote: z.string().optional(),
+            narration: z
+              .string()
+              .optional()
+              .describe("One or two short sentences on why this quote bears on the claim. Cut at 300 characters."),
           }),
         )
         .min(1),

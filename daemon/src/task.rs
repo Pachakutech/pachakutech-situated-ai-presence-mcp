@@ -9,7 +9,7 @@ use crate::highlight::MarkColor;
 use crate::ledger::{Ledger, LedgerError, LedgerKind, ObservedAppend, PHRASE_CAP};
 use crate::protocol::{
     ClientControls, CreateTaskBody, ListPhraseFlagsBody, MatchInfo, MatchStatus, ObservedViewed, Proposal, ProposalResult,
-    ResolveItemBody, TaskItemBody, TaskMode, TaskPace, TourSignalBody, TourSignalKind,
+    ResolveItemBody, TaskItemBody, TaskMode, TaskPace, TourSignalBody, TourSignalKind, NARRATION_CAP,
 };
 use crate::ui_input::{apply_ui_event, ClickTarget, Hotkey, UiEvent};
 use serde_json::{json, Value};
@@ -112,7 +112,6 @@ pub const CONTROL_PX: i32 = 28;
 pub const CONTROL_GAP: i32 = 8;
 pub const PAIR_GAP: i32 = 4;
 const PROMPT_CAP: usize = 120;
-const NARRATION_CAP: usize = 300;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskState {
@@ -195,6 +194,8 @@ struct Task {
     index: usize,
     entered_ms: Option<u64>,
     narration_done: bool,
+    /// Wait clock for an item that has narration. Set once, at the first narrationDone.
+    hand_clock_ms: Option<u64>,
     last_move_ms: Option<u64>,
 }
 
@@ -338,6 +339,7 @@ impl TaskBook {
             index: 0,
             entered_ms: None,
             narration_done: false,
+            hand_clock_ms: None,
             last_move_ms: None,
         });
         Ok(id)
@@ -927,10 +929,25 @@ impl TaskBook {
             let Some(task) = self.tasks.iter().find(|task| task.state == TaskState::Active) else { return };
             let Some(entered) = task.entered_ms else { return };
             let Some(item) = task.items.get(task.index) else { return };
-            (task.pace, task.mode, entered, task.narration_done, task.item_timeout_seconds, item.phrase_id.clone(), item.matched)
+            (
+                task.pace,
+                task.mode,
+                entered,
+                task.narration_done,
+                task.item_timeout_seconds,
+                item.phrase_id.clone(),
+                item.matched,
+                item.narration.clone(),
+                task.hand_clock_ms,
+            )
         };
-        let (pace, mode, entered, narration_done, timeout_s, phrase, matched) = snapshot;
-        let timed_out = now_ms >= entered.saturating_add(u64::from(timeout_s) * 1000);
+        let (pace, mode, entered, narration_done, timeout_s, phrase, matched, narration, hand_clock) = snapshot;
+        let window = u64::from(timeout_s).saturating_mul(1000);
+        let timed_out = if pace == TaskPace::Wait && !narration.trim().is_empty() {
+            hand_clock.is_some_and(|at| now_ms >= at.saturating_add(window))
+        } else {
+            now_ms >= entered.saturating_add(window)
+        };
         let miss = hides_control(matched);
         let advance = match pace {
             TaskPace::Wait => timed_out || (!miss && item_answered(ledger, mode, &phrase)),
@@ -963,6 +980,7 @@ impl TaskBook {
             self.tasks[pos].state = TaskState::Done;
             self.tasks[pos].entered_ms = None;
             self.tasks[pos].narration_done = false;
+            self.tasks[pos].hand_clock_ms = None;
             self.clear_shown_for(&task_id);
             return;
         }
@@ -973,6 +991,7 @@ impl TaskBook {
     fn enter_at(&mut self, pos: usize, ledger: &mut Ledger, now_ms: u64) {
         self.tasks[pos].entered_ms = Some(now_ms);
         self.tasks[pos].narration_done = false;
+        self.tasks[pos].hand_clock_ms = None;
         let task_id = self.tasks[pos].id.clone();
         let current = self.tasks[pos].items.get(self.tasks[pos].index).map(|item| (item.phrase_id.clone(), item.query.clone()));
         if let Some((phrase, query)) = current {
@@ -1020,6 +1039,10 @@ impl TaskBook {
             return Err(TaskError::TaskNotActive);
         }
         self.tasks[pos].narration_done = true;
+        let narrated = self.tasks[pos].items.get(self.tasks[pos].index).is_some_and(|item| !item.narration.trim().is_empty());
+        if narrated && self.tasks[pos].hand_clock_ms.is_none() {
+            self.tasks[pos].hand_clock_ms = Some(now_ms);
+        }
         self.stop_pending = false;
         if self.tasks[pos].state == TaskState::Active {
             self.consider(ledger, now_ms);
@@ -1479,6 +1502,7 @@ fn insert_task(
         index: 0,
         entered_ms: None,
         narration_done: false,
+        hand_clock_ms: None,
         last_move_ms: None,
     });
     Ok(id)
@@ -2371,6 +2395,39 @@ mod tests {
         assert!(row(&opened.ledger, &phrase)["decision"].is_null());
         assert!(opened.ledger.events().iter().all(|ev| ev.viewed != Some(ViewedTier::Acknowledged)));
         assert!(opened.ledger.events().iter().all(|ev| !matches!(ev.kind, LedgerKind::Approved | LedgerKind::Discarded | LedgerKind::Cleared)));
+    }
+
+    #[test]
+    fn e6_narrated_wait_clock_starts_at_narration_done() {
+        let mut opened = open(&task_line(
+            "select",
+            r#","itemTimeoutSeconds":1"#,
+            r#"{"query":"one","narration":"why this sentence"},{"query":"two","narration":"the next line"}"#,
+        ));
+        assert_eq!(signal(&mut opened.book, &mut opened.ledger, &opened.id, "begin", 0).status, "ok");
+        opened.book.tick(&mut opened.ledger, 1000);
+        assert_eq!(book_query(&opened.book, &opened.id)["index"], 0);
+        assert_eq!(signal(&mut opened.book, &mut opened.ledger, &opened.id, "narrationDone", 2000).status, "ok");
+        opened.book.tick(&mut opened.ledger, 2999);
+        assert_eq!(book_query(&opened.book, &opened.id)["index"], 0);
+        assert_eq!(signal(&mut opened.book, &mut opened.ledger, &opened.id, "narrationDone", 2500).status, "ok");
+        opened.book.tick(&mut opened.ledger, 3000);
+        assert_eq!(book_query(&opened.book, &opened.id)["index"], 1);
+        assert_eq!(book_query(&opened.book, &opened.id)["state"], "active");
+
+        let mut plain = open(&task_line("select", r#","itemTimeoutSeconds":1"#, r#"{"query":"one"},{"query":"two"}"#));
+        assert_eq!(signal(&mut plain.book, &mut plain.ledger, &plain.id, "begin", 0).status, "ok");
+        assert_eq!(signal(&mut plain.book, &mut plain.ledger, &plain.id, "narrationDone", 100).status, "ok");
+        plain.book.tick(&mut plain.ledger, 999);
+        assert_eq!(book_query(&plain.book, &plain.id)["index"], 0);
+        plain.book.tick(&mut plain.ledger, 1000);
+        assert_eq!(book_query(&plain.book, &plain.id)["index"], 1);
+
+        let mut answered = open(&task_line("select", "", r#"{"query":"one","narration":"why this sentence"},{"query":"two"}"#));
+        signal(&mut answered.book, &mut answered.ledger, &answered.id, "begin", 0);
+        let ids = item_ids(&answered.book, &answered.id);
+        assert!(click(&mut answered.book, &mut answered.ledger, &ids[0], ClickTarget::Check, 50));
+        assert_eq!(book_query(&answered.book, &answered.id)["index"], 1);
     }
 
     #[test]

@@ -178,6 +178,9 @@ pub struct Source {
     pub claim: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quote: Option<String>,
+    /// The model's line for an exact citation. Cut at 300 characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub narration: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -238,7 +241,8 @@ pub struct Locus {
     pub stance_conf: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub match_kind: Option<MatchKind>,
-    /// Stored when a quote missed. Selection does not speak it.
+    /// Exact: the model's line, cut at 300. Near: the missed-quote sentence.
+    /// Selection does not speak it. The tour item does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub narration: Option<String>,
     #[serde(default)]
@@ -324,6 +328,7 @@ struct PreparedSource {
     reason: Option<String>,
     claim: Option<String>,
     quote: Option<String>,
+    narration: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -422,6 +427,7 @@ impl ProjectStore {
                 reason: None,
                 claim: None,
                 quote: None,
+                narration: None,
             })
             .collect::<Vec<_>>();
         self.write_new(by, title, asks, &prepared, granted_roots, false, now_ms)
@@ -515,6 +521,7 @@ impl ProjectStore {
                 reason: None,
                 claim: None,
                 quote: None,
+                narration: None,
             })
             .collect::<Vec<_>>();
         self.add_prepared(id, &prepared)
@@ -1087,8 +1094,18 @@ fn confirm_id(store: &mut ProjectStore, id: &str, probe: &dyn Probe) -> Result<(
         .sources
         .iter()
         .map(|source| match source.kind {
-            SourceKind::Web => intake::Item::Url { url: source.reference.clone(), claim: source.claim.clone(), quote: source.quote.clone() },
-            SourceKind::File => intake::Item::Path { path: source.reference.clone(), claim: source.claim.clone(), quote: source.quote.clone() },
+            SourceKind::Web => intake::Item::Url {
+                url: source.reference.clone(),
+                claim: source.claim.clone(),
+                quote: source.quote.clone(),
+                narration: source.narration.clone(),
+            },
+            SourceKind::File => intake::Item::Path {
+                path: source.reference.clone(),
+                claim: source.claim.clone(),
+                quote: source.quote.clone(),
+                narration: source.narration.clone(),
+            },
             SourceKind::Dir => intake::Item::Dir { path: source.reference.clone() },
         })
         .collect::<Vec<_>>();
@@ -1118,6 +1135,7 @@ fn prepared_from(row: intake::Prepared) -> PreparedSource {
         reason: row.reason,
         claim: row.claim,
         quote: row.quote,
+        narration: row.narration,
     }
 }
 
@@ -1135,6 +1153,7 @@ fn source_records(sources: &[PreparedSource]) -> Vec<Source> {
             reason: if source.status == SourceStatus::Failed { source.reason.clone() } else { None },
             claim: source.claim.clone(),
             quote: source.quote.clone(),
+            narration: source.narration.clone(),
         })
         .collect()
 }

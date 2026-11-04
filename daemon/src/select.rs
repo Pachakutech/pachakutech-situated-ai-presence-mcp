@@ -5,7 +5,7 @@
 use crate::docmap::{DocMap, IndexedPassage};
 use crate::gate::Tier;
 use crate::project::{self, LocusInput, MatchKind, Project, ProjectStore, Source, SourceStatus, Stance, StoreError};
-use crate::protocol::{Proposal, ProposalResult, SelectLociBody, StanceLabelIn};
+use crate::protocol::{cut_narration, Proposal, ProposalResult, SelectLociBody, StanceLabelIn};
 use serde_json::json;
 use std::collections::HashSet;
 
@@ -184,11 +184,12 @@ fn cite_source(source: &Source, passages: &[IndexedPassage], ask: &str) -> Chose
     let quote = filled(&source.quote);
     let query = filled(&source.claim).unwrap_or(ask);
     if let Some(quote) = quote {
+        let line = cut_narration(source.narration.as_deref());
         if let Some(hit) = find_slice(passages, |text| exact_in(text, quote)) {
-            return from_hit(source, hit, MatchKind::Exact, None);
+            return from_hit(source, hit, MatchKind::Exact, line);
         }
         if let Some(hit) = find_slice(passages, |text| loose_in(text, quote)) {
-            return from_hit(source, hit, MatchKind::Exact, None);
+            return from_hit(source, hit, MatchKind::Exact, line);
         }
     }
     if let Some((index, _)) = best_passage(passages, query) {
@@ -537,6 +538,17 @@ mod tests {
     }
 
     fn create_cited(scratch: &mut Scratch, body: &str, ask: &str, quote: Option<&str>, claim: Option<&str>) -> String {
+        create_cited_with(scratch, body, ask, quote, claim, None)
+    }
+
+    fn create_cited_with(
+        scratch: &mut Scratch,
+        body: &str,
+        ask: &str,
+        quote: Option<&str>,
+        claim: Option<&str>,
+        narration: Option<&str>,
+    ) -> String {
         let path = scratch.root.join("page.txt");
         fs::write(&path, body).unwrap();
         let mut source = json!({ "path": path.display().to_string() });
@@ -545,6 +557,9 @@ mod tests {
         }
         if let Some(claim) = claim {
             source["claim"] = json!(claim);
+        }
+        if let Some(narration) = narration {
+            source["narration"] = json!(narration);
         }
         let wire = json!({
             "kind": "createProject",
@@ -721,6 +736,79 @@ mod tests {
         assert_eq!((locus.span_start, locus.span_end), (0, 0));
         assert!(locus.narration.is_none());
         assert!(!locus.doc_key.is_empty());
+    }
+
+    #[test]
+    fn u6_exact_locus_keeps_the_model_line_cut_at_300() {
+        let line = "The contiguous carbons are why this sentence bears on the claim.";
+        let mut kept = scratch("u6");
+        let id = create_cited_with(
+            &mut kept,
+            "The refund policy is stated here.\n",
+            "where is the refund policy",
+            Some("refund policy"),
+            None,
+            Some(&format!("  {line}  ")),
+        );
+        let result = select(&mut kept, &id, "ak-1", Tier::T1User, &KeepJudge);
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        let locus = one_locus(&kept, &id);
+        assert_eq!(locus.match_kind, Some(MatchKind::Exact));
+        assert_eq!(locus.narration.as_deref(), Some(line));
+
+        let mut cut = scratch("u6-cut");
+        let long = format!("x{}", "y".repeat(crate::protocol::NARRATION_CAP));
+        let id = create_cited_with(
+            &mut cut,
+            "The refund policy is stated here.\n",
+            "where is the refund policy",
+            Some("refund policy"),
+            None,
+            Some(&long),
+        );
+        let result = select(&mut cut, &id, "ak-1", Tier::T1User, &KeepJudge);
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        let locus = one_locus(&cut, &id);
+        assert_eq!(locus.match_kind, Some(MatchKind::Exact));
+        let stored = locus.narration.unwrap();
+        assert_eq!(stored.chars().count(), crate::protocol::NARRATION_CAP);
+        assert_eq!(stored, long.chars().take(crate::protocol::NARRATION_CAP).collect::<String>());
+    }
+
+    #[test]
+    fn u7_a_miss_keeps_the_correction_and_drops_the_model_line() {
+        let mut scratch = scratch("u7");
+        let id = create_cited_with(
+            &mut scratch,
+            "The refund policy lives in section two.\n",
+            "where is the refund policy",
+            Some("quoted words that are absent"),
+            None,
+            Some("the model line must not replace the correction"),
+        );
+        let result = select(&mut scratch, &id, "ak-1", Tier::T1User, &KeepJudge);
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        let locus = one_locus(&scratch, &id);
+        assert_eq!(locus.match_kind, Some(MatchKind::Near));
+        assert_eq!(locus.narration.as_deref(), Some(MISSED_QUOTE));
+    }
+
+    #[test]
+    fn u8_no_match_drops_the_model_line() {
+        let mut scratch = scratch("u8");
+        let id = create_cited_with(
+            &mut scratch,
+            "apples and oranges\n",
+            "moonlight sonata",
+            Some("quantum ledger"),
+            Some("zebra habitat"),
+            Some("the model line stays off a miss"),
+        );
+        let result = select(&mut scratch, &id, "ak-1", Tier::T1User, &KeepJudge);
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        let locus = one_locus(&scratch, &id);
+        assert_eq!(locus.match_kind, Some(MatchKind::None));
+        assert!(locus.narration.is_none());
     }
 
     #[test]
