@@ -608,6 +608,19 @@ pub struct ProjectAskIn {
     pub kind: ProjectAskKind,
 }
 
+/// Spoken citation line. Intake stores this cut. Cite copies the same cut onto an exact locus.
+pub const NARRATION_CAP: usize = 300;
+
+/// Empty and whitespace-only text are absent. A longer line is cut on a character boundary.
+pub fn cut_narration(value: Option<&str>) -> Option<String> {
+    let text = value?.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let cut: String = text.chars().take(NARRATION_CAP).collect();
+    if cut.is_empty() { None } else { Some(cut) }
+}
+
 /// Exactly one of `url`, `path`, or `dir` is a source. The handler rejects the rest.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -623,6 +636,9 @@ pub struct ProjectSourceIn {
     pub claim: Option<String>,
     #[serde(default)]
     pub quote: Option<String>,
+    /// Spoken line for this citation. Cut at [`NARRATION_CAP`]. Empty is absent.
+    #[serde(default)]
+    pub narration: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

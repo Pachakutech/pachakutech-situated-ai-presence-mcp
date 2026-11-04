@@ -529,7 +529,7 @@ fn seed_for(desk: &TourDesk, source: &Source, rows: &[Locus]) -> TourSeed {
         .iter()
         .map(|locus| TourSeedItem {
             query: opening_words(&locus.words),
-            narration: if locus.match_kind == Some(MatchKind::Near) {
+            narration: if matches!(locus.match_kind, Some(MatchKind::Exact | MatchKind::Near)) {
                 locus.narration.clone().unwrap_or_default()
             } else {
                 String::new()
@@ -1496,6 +1496,26 @@ mod tests {
         assert_eq!(items[1]["query"], "closest passage");
         assert_eq!(items[1]["narration"], sentence);
         assert!(items.iter().all(|item| item["query"] != "NOT-ON-THE-TOUR"));
+    }
+
+    #[test]
+    fn m11_exact_item_speaks_the_locus_line() {
+        let mut scratch = bench("m11-line");
+        let id = project(&mut scratch.store, &[SourceInput { kind: SourceKind::Web, reference: "https://example.com/a".into() }]);
+        let line = "This sentence bears on the claim because the carbons are contiguous.";
+        let long = "y".repeat(301);
+        put(&mut scratch.store, &id, "sr-1", "exact words", MatchKind::Exact, Some(line), None, 0);
+        put(&mut scratch.store, &id, "sr-1", "second words", MatchKind::Exact, Some(&long), None, 30);
+        let mut book = TaskBook::new();
+        let mut ledger = Ledger::new();
+        let mut desk = TourDesk::default();
+        let mut opener = Rec::new();
+        let result = go(&mut scratch, &mut book, &mut ledger, &mut desk, &mut opener, &id, Tier::T1User, 0);
+        let task_id = result.detail.unwrap()["taskId"].as_str().unwrap().to_string();
+        let items = book.query_value(&task_id).unwrap()["items"].as_array().unwrap().clone();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["narration"], line);
+        assert_eq!(items[1]["narration"], "y".repeat(300));
     }
 
     #[test]

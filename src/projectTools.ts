@@ -14,6 +14,7 @@ export type ProjectSourceInput = {
   file?: string;
   claim?: string;
   quote?: string;
+  narration?: string;
 };
 
 export type CreateProjectInput = {
@@ -53,6 +54,7 @@ export type CitationInput = {
   path?: string;
   claim: string;
   quote?: string;
+  narration?: string;
 };
 
 export type ShowCitationsInput = {
@@ -132,10 +134,17 @@ function assertUrls(sources: ProjectSourceInput[]): void {
   }
 }
 
+function spokenLine(value: string | undefined): string | undefined {
+  const text = value?.trim();
+  return text ? text : undefined;
+}
+
 function sourceFields(source: ProjectSourceInput): Record<string, string> {
   const fields: Record<string, string> = { url: source.url as string };
   if (source.claim) fields.claim = source.claim;
   if (source.quote) fields.quote = source.quote;
+  const narration = spokenLine(source.narration);
+  if (narration) fields.narration = narration;
   return fields;
 }
 
@@ -206,6 +215,8 @@ export async function showCitations(
     sources: citations.map((row) => {
       const source: Record<string, string> = { url: row.url as string, claim: row.claim };
       if (row.quote) source.quote = row.quote;
+      const narration = spokenLine(row.narration);
+      if (narration) source.narration = narration;
       return source;
     }),
   });

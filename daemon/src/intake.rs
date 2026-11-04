@@ -3,7 +3,7 @@
 //! `path_not_in_granted_root` write nothing. This module does not map text
 //! and does not open a window.
 
-use crate::protocol::ProjectSourceIn;
+use crate::protocol::{cut_narration, ProjectSourceIn};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -41,8 +41,8 @@ pub enum Role {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Item {
-    Url { url: String, claim: Option<String>, quote: Option<String> },
-    Path { path: String, claim: Option<String>, quote: Option<String> },
+    Url { url: String, claim: Option<String>, quote: Option<String>, narration: Option<String> },
+    Path { path: String, claim: Option<String>, quote: Option<String>, narration: Option<String> },
     Dir { path: String },
 }
 
@@ -60,6 +60,7 @@ pub struct Prepared {
     pub reason: Option<String>,
     pub claim: Option<String>,
     pub quote: Option<String>,
+    pub narration: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -190,9 +191,15 @@ pub fn shape_draft(sources: &[ProjectSourceIn]) -> Result<Vec<Prepared>, CheckEr
     Ok(parse_items(sources)?
         .into_iter()
         .map(|item| match item {
-            Item::Url { url, claim, quote } => Prepared { class: SourceClass::Web, reference: url, reason: None, claim, quote },
-            Item::Path { path, claim, quote } => Prepared { class: SourceClass::File, reference: path, reason: None, claim, quote },
-            Item::Dir { path } => Prepared { class: SourceClass::Dir, reference: path, reason: None, claim: None, quote: None },
+            Item::Url { url, claim, quote, narration } => {
+                Prepared { class: SourceClass::Web, reference: url, reason: None, claim, quote, narration }
+            }
+            Item::Path { path, claim, quote, narration } => {
+                Prepared { class: SourceClass::File, reference: path, reason: None, claim, quote, narration }
+            }
+            Item::Dir { path } => {
+                Prepared { class: SourceClass::Dir, reference: path, reason: None, claim: None, quote: None, narration: None }
+            }
         })
         .collect())
 }
@@ -237,6 +244,7 @@ pub fn check_items(
             reason,
             claim: candidate.claim,
             quote: candidate.quote,
+            narration: candidate.narration,
         });
     }
     Ok(prepared)
@@ -264,6 +272,7 @@ struct Candidate {
     reference: String,
     claim: Option<String>,
     quote: Option<String>,
+    narration: Option<String>,
     pre_fail: Option<&'static str>,
     pdf: bool,
 }
@@ -278,16 +287,16 @@ fn expand(role: Role, items: &[Item], roots: &[String], allow_private: bool, alr
                 }
                 for file in snapshot_dir(path)? {
                     let text = file.to_string_lossy().into_owned();
-                    out.push(file_candidate(Role::T1, &text, roots, None, None)?);
+                    out.push(file_candidate(Role::T1, &text, roots, None, None, None)?);
                     if already + out.len() > SOURCE_CAP {
                         return Err(CheckError::QuotaSources);
                     }
                 }
             }
-            Item::Path { path, claim, quote } => {
-                out.push(file_candidate(role, path, roots, claim.clone(), quote.clone())?);
+            Item::Path { path, claim, quote, narration } => {
+                out.push(file_candidate(role, path, roots, claim.clone(), quote.clone(), narration.clone())?);
             }
-            Item::Url { url, claim, quote } => {
+            Item::Url { url, claim, quote, narration } => {
                 if !url_allowed(url, allow_private) {
                     return Err(CheckError::UrlNotAllowed);
                 }
@@ -296,6 +305,7 @@ fn expand(role: Role, items: &[Item], roots: &[String], allow_private: bool, alr
                     reference: url.clone(),
                     claim: claim.clone(),
                     quote: quote.clone(),
+                    narration: narration.clone(),
                     pre_fail: None,
                     pdf: false,
                 });
@@ -327,7 +337,14 @@ fn snapshot_dir(dir: &str) -> Result<Vec<PathBuf>, CheckError> {
     Ok(files)
 }
 
-fn file_candidate(role: Role, path: &str, roots: &[String], claim: Option<String>, quote: Option<String>) -> Result<Candidate, CheckError> {
+fn file_candidate(
+    role: Role,
+    path: &str,
+    roots: &[String],
+    claim: Option<String>,
+    quote: Option<String>,
+    narration: Option<String>,
+) -> Result<Candidate, CheckError> {
     let miss = match role {
         Role::T1 => CheckError::Schema,
         Role::T2 => CheckError::PathNotInGrantedRoot,
@@ -350,6 +367,7 @@ fn file_candidate(role: Role, path: &str, roots: &[String], claim: Option<String
         reference,
         claim,
         quote,
+        narration,
         pre_fail: if meta.len() > MAX_BYTES { Some("oversize") } else { None },
         pdf,
     })
@@ -608,21 +626,22 @@ fn parse_items(sources: &[ProjectSourceIn]) -> Result<Vec<Item>, CheckError> {
     for source in sources {
         let claim = optional_text(source.claim.as_deref())?;
         let quote = optional_text(source.quote.as_deref())?;
+        let narration = cut_narration(source.narration.as_deref());
         match (&source.url, &source.path, &source.dir) {
             (Some(url), None, None) => {
                 if url.is_empty() || url.chars().count() > REF_CAP {
                     return Err(CheckError::Schema);
                 }
-                out.push(Item::Url { url: url.clone(), claim, quote });
+                out.push(Item::Url { url: url.clone(), claim, quote, narration });
             }
             (None, Some(path), None) => {
                 if path.is_empty() || path.chars().count() > REF_CAP {
                     return Err(CheckError::Schema);
                 }
-                out.push(Item::Path { path: path.clone(), claim, quote });
+                out.push(Item::Path { path: path.clone(), claim, quote, narration });
             }
             (None, None, Some(dir)) => {
-                if claim.is_some() || quote.is_some() || dir.is_empty() || dir.chars().count() > REF_CAP {
+                if claim.is_some() || quote.is_some() || narration.is_some() || dir.is_empty() || dir.chars().count() > REF_CAP {
                     return Err(CheckError::Schema);
                 }
                 out.push(Item::Dir { path: dir.clone() });
@@ -1024,6 +1043,55 @@ mod tests {
         assert!(got[2].reference.ends_with("a.txt"));
         assert!(got[3].reference.ends_with("b.txt"));
         assert!(got.iter().all(|source| source.doc_key.is_none() && source.status == SourceStatus::Pending));
+        assert!(got.iter().all(|source| source.narration.is_none()));
+    }
+
+    #[test]
+    fn narration_is_stored_cut_and_a_directory_refuses_it() {
+        let tmp = scratch("narr");
+        let root = tmp.0.join("store");
+        let file = tmp.0.join("paper.txt");
+        let docs = tmp.0.join("docs");
+        fs::write(&file, b"paper").unwrap();
+        fs::create_dir(&docs).unwrap();
+        let mut store = ProjectStore::open(&root).unwrap();
+        let probe = probe_ok(&["https://example.com/a"]);
+        let padded = format!("  {}", "n".repeat(301));
+        let sources = format!(
+            r#"{{"url":"https://example.com/a","claim":"the claim","quote":"the quote","narration":{}}},{{"path":"{}","narration":"   "}}"#,
+            serde_json::to_string(&padded).unwrap(),
+            file.display()
+        );
+        let created = route(&mut store, Tier::T1User, &create_json("Narr", "", &sources), &probe);
+        assert_eq!(created.status, "ok", "{:?}", created.error);
+        let id = created.detail.unwrap()["projectId"].as_str().unwrap().to_string();
+        let got = &store.get(&id).unwrap().sources;
+        assert_eq!(got[0].claim.as_deref(), Some("the claim"));
+        assert_eq!(got[0].quote.as_deref(), Some("the quote"));
+        assert_eq!(got[0].narration.as_deref(), Some("n".repeat(300).as_str()));
+        assert!(got[1].narration.is_none());
+        let drafted = route(
+            &mut store,
+            Tier::T3Sidecar,
+            &create_json("Draft", "", r#"{"url":"https://example.com/a","narration":"why it bears"}"#),
+            &probe,
+        );
+        assert_eq!(drafted.status, "ok", "{:?}", drafted.error);
+        let draft_id = drafted.detail.unwrap()["projectId"].as_str().unwrap().to_string();
+        assert_eq!(store.get(&draft_id).unwrap().sources[0].narration.as_deref(), Some("why it bears"));
+        let confirmed = route(
+            &mut store,
+            Tier::T1User,
+            &format!(r#"{{"kind":"confirmProject","proposalId":"k","projectId":"{draft_id}"}}"#),
+            &probe,
+        );
+        assert_eq!(confirmed.status, "ok", "{:?}", confirmed.error);
+        assert!(!store.get(&draft_id).unwrap().draft);
+        assert_eq!(store.get(&draft_id).unwrap().sources[0].narration.as_deref(), Some("why it bears"));
+        let denied = create_json("Dir", "", &format!(r#"{{"dir":"{}","narration":"a line"}}"#, docs.display()));
+        let refused = route(&mut store, Tier::T1User, &denied, &probe);
+        assert_eq!(refused.error.as_deref(), Some("schema"));
+        assert_eq!(project_count(&root), 2);
     }
 
     #[test]
