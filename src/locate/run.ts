@@ -11,6 +11,7 @@ import { BOX_PAD, pageContaining, parseTsv, type Box, type Word } from "./core.j
 import { cueGroups, resolveCues, speechHoldSeconds, splitSentences, type CueIn } from "./sentences.js";
 import { WINDOW_PATH, locatePdf } from "./pdf.js";
 import { locateStill, type StillDeps } from "./surface.js";
+import { noteOwnedScroll } from "./scrollHold.js";
 import { locateWeb, type Client, type LocateErr, type LocateOk, type LocateResult, type WebOpts } from "./web.js";
 
 const MAX_SECONDS = 360;
@@ -427,10 +428,49 @@ async function findPdfPage(path: string, query: string): Promise<number | null> 
   return pageContaining(result.stdout, query);
 }
 
+export async function readScrollTop(): Promise<number | null> {
+  ensureCdpPort();
+  if (!cdpPort) return null;
+  const reply = await cdpCall(`(() => {
+    const el = document.scrollingElement || document.documentElement;
+    return el ? el.scrollTop : null;
+  })()`);
+  return reply.ok && typeof reply.value === "number" ? reply.value : null;
+}
+
+export async function nudgePage(dy: number): Promise<boolean> {
+  return scrollBy("", dy);
+}
+
+export async function outputSize(): Promise<{ w: number; h: number }> {
+  return screenSize();
+}
+
+/** True when the cursor sits on a Chromium window. A missing cursor is false. */
+export async function pointerOverChromium(): Promise<boolean> {
+  try {
+    const raw = (await hyprJson(["cursorpos", "-j"])) as { x?: number; y?: number };
+    if (typeof raw.x !== "number" || typeof raw.y !== "number") return false;
+    const clients = asClients(await hyprJson(["clients", "-j"]));
+    return clients.some(
+      (client) =>
+        /chromium/i.test(client.className) &&
+        raw.x! >= client.x &&
+        raw.y! >= client.y &&
+        raw.x! < client.x + client.w &&
+        raw.y! < client.y + client.h,
+    );
+  } catch {
+    return false;
+  }
+}
+
 async function scrollBy(address: string, dy: number): Promise<boolean> {
   if (dy === 0) return true;
   ensureCdpPort();
   if (cdpPort && (await cdpEval(`window.scrollBy(0, ${Math.round(dy)}); document.scrollingElement && document.scrollingElement.scrollTop`))) {
+    const top = await readScrollTop();
+    if (top != null) noteOwnedScroll(top);
     return true;
   }
   if (!(await focus(address))) return false;

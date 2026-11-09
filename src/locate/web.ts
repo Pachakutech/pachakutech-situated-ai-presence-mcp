@@ -1,6 +1,7 @@
 // Web adapter. The viewer's find moves the page. This file photographs the
 // line, nudges it into the band, and checks the crop before anyone may mark it.
 
+import { nudgeHeld, scrollTaken } from "./scrollHold.js";
 import {
   bandOf,
   coveredBy,
@@ -114,6 +115,13 @@ function fail(error: string, hint: string): LocateErr {
   return { ok: false, source: "web", error, hint };
 }
 
+/** Their scroll, or a pointer hold, withholds the nudge. Focus failure stays a failure. */
+async function ownedNudge(deps: Deps, address: string, dy: number): Promise<"moved" | "held" | "focus"> {
+  if (scrollTaken() || nudgeHeld()) return "held";
+  const moved = await deps.scrollBy(address, dy);
+  return moved ? "moved" : "focus";
+}
+
 function sameWindow(a: Client, b: Client): boolean {
   return a.address === b.address && a.x === b.x && a.y === b.y && a.w === b.w && a.h === b.h;
 }
@@ -172,8 +180,9 @@ export async function locateWeb(opts: WebOpts, deps: Deps): Promise<LocateResult
       deps.log("locate: line at the edge; the page is already at that end of the scroll");
       return "held";
     }
-    const moved = await deps.scrollBy(win.address, dy);
-    if (!moved) return "focus";
+    const moved = await ownedNudge(deps, win.address, dy);
+    if (moved === "focus") return "focus";
+    if (moved === "held") return "held";
     state = { nudgePx: state.nudgePx + NUDGE_PX };
     // The find rectangle stays as measured. A shifted y reads as the center band.
     deps.log(`locate: scroll ${dy}`);
@@ -288,13 +297,15 @@ export async function locateWeb(opts: WebOpts, deps: Deps): Promise<LocateResult
         if (await atScrollEnd(win.address, NUDGE_PX)) {
           deps.log("locate: the passage continues past the photograph; the page is already at the bottom");
         } else {
-          endUsed += 1;
-          lastFp = fp;
-          const moved = await deps.scrollBy(win.address, NUDGE_PX);
-          if (!moved) return fail("focus_failed", "Could not focus the browser, so the page was not scrolled.");
-          deps.log(`locate: scroll ${NUDGE_PX}`);
-          await deps.sleep(WINDOW_SETTLE_MS);
-          continue;
+          const moved = await ownedNudge(deps, win.address, NUDGE_PX);
+          if (moved === "focus") return fail("focus_failed", "Could not focus the browser, so the page was not scrolled.");
+          if (moved === "moved") {
+            endUsed += 1;
+            lastFp = fp;
+            deps.log(`locate: scroll ${NUDGE_PX}`);
+            await deps.sleep(WINDOW_SETTLE_MS);
+            continue;
+          }
         }
       }
       if (passage && placedRect && !endMayBeBelow) {
@@ -339,13 +350,15 @@ export async function locateWeb(opts: WebOpts, deps: Deps): Promise<LocateResult
       }
 
       if (decision.action.type !== "accept") {
-        lastFp = fp;
-        state = decision.state;
-        const moved = await deps.scrollBy(win.address, decision.action.dy);
-        if (!moved) return fail("focus_failed", "Could not focus the browser, so the page was not scrolled.");
-        deps.log(`locate: scroll ${decision.action.dy}`);
-        await deps.sleep(WINDOW_SETTLE_MS);
-        continue;
+        const moved = await ownedNudge(deps, win.address, decision.action.dy);
+        if (moved === "focus") return fail("focus_failed", "Could not focus the browser, so the page was not scrolled.");
+        if (moved === "moved") {
+          lastFp = fp;
+          state = decision.state;
+          deps.log(`locate: scroll ${decision.action.dy}`);
+          await deps.sleep(WINDOW_SETTLE_MS);
+          continue;
+        }
       }
       state = decision.state;
     }

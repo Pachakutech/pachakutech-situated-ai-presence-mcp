@@ -26,6 +26,9 @@ pub enum Proposal {
         /// `durationSeconds` remains the safety cap if speech never finishes.
         #[serde(rename = "untilSpeech", default)]
         until_speech: bool,
+        /// Tour locus. The mark is keyed by this id. Absent keeps one box per presence.
+        #[serde(default, rename = "phraseId")]
+        phrase_id: Option<String>,
     },
     #[serde(rename = "spawnPresence")]
     SpawnPresence {
@@ -147,6 +150,9 @@ pub enum Proposal {
         proposal_id: String,
         #[serde(rename = "presenceId")]
         presence_id: String,
+        /// Drop this locus mark. Absent keeps the presence-wide conceal.
+        #[serde(default, rename = "phraseId")]
+        phrase_id: Option<String>,
     },
     /// Read the derived phrase view, or the event log when `events` is set.
     #[serde(rename = "listPhraseFlags")]
@@ -533,6 +539,9 @@ pub enum TourSignalKind {
     NarrationDone,
     #[serde(rename = "preempt")]
     Preempt,
+    /// The glass pass found no remaining skip. End the tour and write no hand.
+    #[serde(rename = "settle")]
+    Settle,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -740,6 +749,9 @@ pub struct StartProjectTourBody {
     pub mode: TaskMode,
     #[serde(default)]
     pub pace: Option<TaskPace>,
+    /// After the list, continue over skips still on the glass. Omitted leaves the tour ended.
+    #[serde(default)]
+    pub again: bool,
     #[serde(default, rename = "kind")]
     pub wire_kind: Option<String>,
 }

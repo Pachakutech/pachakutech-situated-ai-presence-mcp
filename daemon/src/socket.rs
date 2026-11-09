@@ -537,22 +537,29 @@ fn dispatch(
     }
 
     let result = match proposal {
-        Proposal::ConcealHighlight { presence_id, .. } => {
-            let concealed = reg.conceal_for_jump(&presence_id, Instant::now());
-            reg.note_task_hidden(&presence_id);
-            ProposalResult::ok(&proposal_id, Some(json!({ "concealed": concealed })))
+        Proposal::ConcealHighlight { presence_id, phrase_id, .. } => {
+            if let Some(phrase) = phrase_id.as_deref().map(str::trim).filter(|id| !id.is_empty()) {
+                reg.retire_interest(phrase);
+                ProposalResult::ok(&proposal_id, Some(json!({ "concealed": true })))
+            } else {
+                let concealed = reg.conceal_for_jump(&presence_id, Instant::now());
+                reg.note_task_hidden(&presence_id);
+                ProposalResult::ok(&proposal_id, Some(json!({ "concealed": concealed })))
+            }
         }
-        Proposal::HighlightRegion { presence_id, description, u, v, w, h, duration_seconds, until_speech, .. } => {
+        Proposal::HighlightRegion { presence_id, description, u, v, w, h, duration_seconds, until_speech, phrase_id, .. } => {
             match reg.declare_interest(
                 &presence_id,
+                phrase_id.as_deref(),
                 &description,
                 crate::highlight::UvBox { u, v, w, h },
                 duration_seconds,
                 Instant::now(),
             ) {
                 Ok((box_, secs)) => {
-                    if until_speech { reg.hold_interest_for_speech(&presence_id); }
-                    reg.note_task_highlight(&presence_id, now_ms());
+                    let key = phrase_id.as_deref().map(str::trim).filter(|id| !id.is_empty()).unwrap_or(presence_id.as_str());
+                    if until_speech { reg.hold_interest_for_speech(key); }
+                    reg.note_task_highlight(&presence_id, phrase_id.as_deref(), now_ms());
                     ProposalResult::ok(
                         &proposal_id,
                         Some(json!({
@@ -757,12 +764,12 @@ mod tests {
         let mut reg = Registry::new();
         let now = Instant::now();
         let raw = UvBox { u: 0.1, v: 0.2, w: 0.3, h: 0.4 };
-        let err = reg.declare_interest("p-a", "banner", raw, 5, now).unwrap_err();
+        let err = reg.declare_interest("p-a", None, "banner", raw, 5, now).unwrap_err();
         assert!(err.contains("no live presence with id p-a"), "{err}");
         let mut cmds = vec![];
         run(&mut reg, &mut cmds, &spawn("p-a"));
         assert!(!reg.has_avatar("p-a"));
-        let (got, secs) = reg.declare_interest("p-a", "banner", raw, 400, now).unwrap();
+        let (got, secs) = reg.declare_interest("p-a", None, "banner", raw, 400, now).unwrap();
         assert_eq!(secs, 360);
         assert_eq!(got, raw);
         assert_eq!(reg.visible_interests(now).len(), 1);

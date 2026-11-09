@@ -2,7 +2,7 @@
 // allowed to start the locate window. It does not press Start and it does
 // not create a project. The viewer stays up.
 
-import type { LocateHit, TourDeps, TourItem, TourView } from "./tour.js";
+import type { GlassHit, LocateHit, TourDeps, TourItem, TourView } from "./tour.js";
 
 export const POLL_MS = 200;
 
@@ -37,7 +37,7 @@ export type DriveIo = {
   locate?(item: TourItem): Promise<LocateHit>;
   highlight?(hit: LocateHit, item: TourItem): Promise<void>;
   speak?(text: string): Promise<void>;
-  waitSpeech?(): Promise<"done" | "lost" | "missed">;
+  waitSpeech?(): Promise<"done" | "lost" | "missed" | "handoff">;
   resolveItem?(body: {
     taskId: string;
     phraseId: string;
@@ -47,9 +47,19 @@ export type DriveIo = {
     w?: number;
     h?: number;
   }): Promise<void>;
-  tourSignal?(body: { taskId: string; signal: "begin" | "narrationDone" | "preempt" }): Promise<void>;
+  tourSignal?(body: {
+    taskId: string;
+    signal: "begin" | "narrationDone" | "preempt" | "settle";
+    reason?: "page" | "pointer";
+  }): Promise<void>;
   stopSpeech?(): Promise<void>;
   now?(): number;
+  preempted?(): Promise<boolean>;
+  conceal?(): Promise<void>;
+  pointerHold?(): Promise<boolean>;
+  glass?(task: TourView): Promise<GlassHit[]>;
+  center?(hit: LocateHit): Promise<LocateHit | null>;
+  releaseScroll?(): void;
 };
 
 export function permittedMove(task: TourView): "webFind" | "pdfPage" | "miss" {
@@ -95,11 +105,16 @@ function tourDeps(io: DriveIo, taskId: string): TourDeps {
     async tourSignal(body) {
       if (io.tourSignal) await io.tourSignal(body);
     },
+    conceal: io.conceal,
+    pointerHold: io.pointerHold,
+    glass: io.glass,
+    center: io.center,
+    releaseScroll: io.releaseScroll,
     async stopSpeech() {
       if (io.stopSpeech) await io.stopSpeech();
     },
     async preempted() {
-      return false;
+      return io.preempted ? io.preempted() : false;
     },
     now: () => (io.now ? io.now() : 0),
     async sleep(ms) {

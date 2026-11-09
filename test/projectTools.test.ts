@@ -14,6 +14,7 @@ import {
   createProject,
   exportProject,
   showCitations,
+  startProjectTour,
   type Connect,
   type MapWait,
 } from "../src/projectTools.ts";
@@ -28,7 +29,7 @@ const THREE =
 const PROJECT =
   "**Project.** A project is a list of sources the daemon keeps on disk. Read it with `queryProject`. The register on that reply is skip, accept, and deny for the loci the tour has put up. A locus with no hand row yet is skip. You do not write those rows. Notes on the loci are the user's words. The cursor on that reply is where the tour resumes. You may propose sources and a stance.";
 const CITATIONS =
-  "**Citations.** You choose the quotes. Read the page and copy a short sentence that is on it and bears on the claim. `showCitations` takes one citation per sentence: the page's URL, the claim, and that sentence. When one page has several such sentences, send one citation for each and repeat the URL. With each quote, send `narration`: one or two short sentences on why that sentence bears on the claim. The line is cut at 300 characters. The tour waits for the user's start. Once that tour is waiting, `presence tour-start <projectId>` confirms it on the command socket, and `presence tour-drive <projectId>` opens the parked page. Spawn a presence if none owns the body, and pass that id as `presence tour-drive <projectId> --presence <id>`. The driver tints each quote on that body and speaks that line. A missed quote keeps the correction sentence. The line you sent does not replace it. Omit `mode` and `pace` for the narrated check. Pass `select` and `wait` when the user is recording the register, and re-read `queryProject` as the hand lands. A mapped passage is at most 2000 characters, and a page keeps at most 2000 passages. Text past either limit is not in the map. Copy a sentence short enough to sit inside one piece. A quote the page does not contain, or one that crosses a cut, is a near passage. Present a locus as the quote you sent only when its `matchKind` is `exact`.";
+  "**Citations.** You choose the quotes. Read the page and copy a short sentence that is on it and bears on the claim. `showCitations` takes one citation per sentence: the page's URL, the claim, and that sentence. When one page has several such sentences, send one citation for each and repeat the URL. With each quote, send `narration`: one or two short sentences on why that sentence bears on the claim. The line is cut at 300 characters. The tour waits for the user's start. Once that tour is waiting, `presence tour-start <projectId>` confirms it on the command socket, and `presence tour-drive <projectId>` opens the parked page. Spawn a presence if none owns the body, and pass that id as `presence tour-drive <projectId> --presence <id>`. The driver tints each quote on that body and speaks that line. A missed quote keeps the correction sentence. The line you sent does not replace it. Omit `mode` and `pace` for the narrated check. Pass `select` and `wait` when the user is recording the register, and re-read `queryProject` as the hand lands. A mapped passage is at most 2000 characters, and a page keeps at most 2000 passages. Text past either limit is not in the map. Copy a sentence short enough to sit inside one piece. A quote the page does not contain, or one that crosses a cut, is a near passage. Present a locus as the quote you sent only when its `matchKind` is `exact`. Their scroll stops the tour's nudge and does not stop the voice. The mark comes down before the page moves. A tap on a locus other than the one the tour is on writes the hand, she says Understood, and the tour takes the next item. Pass `again` on `startProjectTour` only when the tour should, after the list, continue over skips still on the glass and stop when a reading finds none. Omit `again` and the tour ends with the list.";
 
 function handler(src: string, name: string): string {
   const marker = `registerTool(\n  "${name}",`;
@@ -218,9 +219,10 @@ test("V4 showCitations with two URLs and no mode sends explain and flow", async 
     assert.equal(created.sources[0].path, undefined);
     assert.equal(sock.lines().join("\n").includes('"path"'), false);
     assert.equal((bodies[2] as { askId: string }).askId, "ak-1");
-    const tour = bodies[3] as { mode: string; pace: string; kind: string };
+    const tour = bodies[3] as { mode: string; pace: string; kind: string; again?: boolean };
     assert.equal(tour.mode, "explain");
     assert.equal(tour.pace, "flow");
+    assert.equal(tour.again, undefined);
     assert.equal(bodies.some((body) => body.kind === "Start" || body.kind === "confirmTour"), false);
   } finally {
     await sock.close();
@@ -390,6 +392,27 @@ test("R5 showCitations and tour-drive do not confirm, and the tint ignores the d
   const tintEnd = task.indexOf("fn note_highlight", tintAt);
   assert.ok(tintAt >= 0 && tintEnd > tintAt);
   assert.equal(task.slice(tintAt, tintEnd).includes("DOUBLE_CLICK_MS"), false);
+});
+
+test("startProjectTour omits again unless the tour should continue", async () => {
+  const sock = await serve();
+  try {
+    await startProjectTour({ projectId: "pj-0123456789abcdef", mode: "explain" }, connectAt(sock.path));
+    await startProjectTour(
+      { projectId: "pj-0123456789abcdef", mode: "explain", again: true },
+      connectAt(sock.path),
+    );
+    await startProjectTour(
+      { projectId: "pj-0123456789abcdef", mode: "explain", again: false },
+      connectAt(sock.path),
+    );
+    const bodies = sock.lines().map((line) => JSON.parse(line) as { again?: boolean });
+    assert.equal(bodies[0].again, undefined);
+    assert.equal(bodies[1].again, true);
+    assert.equal(bodies[2].again, undefined);
+  } finally {
+    await sock.close();
+  }
 });
 
 test("V5 the tool module does not send subscribeLedger, addNote, or observePhrase", () => {

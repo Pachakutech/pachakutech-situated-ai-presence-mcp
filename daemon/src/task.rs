@@ -9,7 +9,7 @@ use crate::highlight::MarkColor;
 use crate::ledger::{Ledger, LedgerError, LedgerKind, ObservedAppend, PHRASE_CAP};
 use crate::protocol::{
     ClientControls, CreateTaskBody, ListPhraseFlagsBody, MatchInfo, MatchStatus, ObservedViewed, Proposal, ProposalResult,
-    ResolveItemBody, TaskItemBody, TaskMode, TaskPace, TourSignalBody, TourSignalKind, NARRATION_CAP,
+    PreemptReason, ResolveItemBody, TaskItemBody, TaskMode, TaskPace, TourSignalBody, TourSignalKind, NARRATION_CAP,
 };
 use crate::ui_input::{apply_ui_event, ClickTarget, Hotkey, UiEvent};
 use serde_json::{json, Value};
@@ -39,6 +39,8 @@ pub struct TourSeed {
     pub items: Vec<TourSeedItem>,
     /// Locus ids in this chunk, parallel to `items`. Each item's phrase id.
     pub locus_ids: Vec<String>,
+    /// After the list, one more pass over skips that are still on the glass.
+    pub again: bool,
 }
 
 /// One pointer sample, stamped with the daemon clock when the compositor delivered it.
@@ -175,6 +177,8 @@ struct Item {
     page: Option<u32>,
     matched: ItemMatch,
     attempts: u8,
+    /// Shown once during the after-list pass. A later pass does not return to it.
+    continued: bool,
 }
 
 struct Task {
@@ -197,6 +201,18 @@ struct Task {
     /// Wait clock for an item that has narration. Set once, at the first narrationDone.
     hand_clock_ms: Option<u64>,
     last_move_ms: Option<u64>,
+    /// Their scroll. Further moves are refused. The task stays active and the voice is not stopped.
+    yield_scroll: bool,
+    /// The next nudge is refused once.
+    hold_nudge: bool,
+    again: bool,
+    /// The driver may place a skip from the glass only. It does not find or nudge.
+    pass_only: bool,
+    say_seq: u64,
+    say_open: bool,
+    /// The locus a re-entry tap left. A second tap inside the grace rewrites the hand.
+    left_phrase: Option<String>,
+    left_until_ms: u64,
 }
 
 /// The only moves a tour may ask the locator to perform. This enum is not
@@ -216,6 +232,8 @@ pub enum MoveError {
     TooSoon,
     AttemptsExhausted,
     NeedsStartConfirm,
+    /// Their scroll, or the one nudge a pointer withheld.
+    Yielded,
 }
 
 struct Surface {
@@ -258,6 +276,8 @@ pub struct TaskBook {
     tint_press: Option<TintPress>,
     /// Color cached when the highlight was noted and when a gesture completed.
     tints: HashMap<String, MarkColor>,
+    /// Locus marks to take down after a re-entry tap.
+    dropped: Vec<String>,
 }
 
 impl TaskBook {
@@ -275,6 +295,7 @@ impl TaskBook {
             pointer: None,
             tint_press: None,
             tints: HashMap::new(),
+            dropped: Vec::new(),
         }
     }
 
@@ -319,6 +340,7 @@ impl TaskBook {
                 page: raw.page,
                 matched: ItemMatch::Pending,
                 attempts: 0,
+                continued: false,
             });
         }
         let id = self.mint_task_id();
@@ -341,6 +363,14 @@ impl TaskBook {
             narration_done: false,
             hand_clock_ms: None,
             last_move_ms: None,
+            yield_scroll: false,
+            hold_nudge: false,
+            again: seed.again,
+            pass_only: false,
+            say_seq: 0,
+            say_open: false,
+            left_phrase: None,
+            left_until_ms: 0,
         });
         Ok(id)
     }
@@ -383,6 +413,13 @@ impl TaskBook {
             }
             task.index
         };
+        if self.tasks[pos].yield_scroll {
+            return Err(MoveError::Yielded);
+        }
+        if self.tasks[pos].hold_nudge && matches!(mv, ViewerMove::Nudge { .. }) {
+            self.tasks[pos].hold_nudge = false;
+            return Err(MoveError::Yielded);
+        }
         if let Some(last) = self.tasks[pos].last_move_ms {
             if now_ms < last.saturating_add(MOVE_WAIT_MS) {
                 return Err(MoveError::TooSoon);
@@ -532,47 +569,49 @@ impl TaskBook {
     }
 
     /// Pointer samples already stamped. A finished gesture appends one hand row.
-    pub fn apply_tint_samples(&mut self, ledger: &mut Ledger, samples: Vec<TintSample>) {
+    pub fn apply_tint_samples(&mut self, ledger: &mut Ledger, samples: Vec<TintSample>) -> Vec<String> {
         for sample in samples {
             self.apply_tint_sample(ledger, sample);
         }
+        std::mem::take(&mut self.dropped)
     }
 
     fn apply_tint_sample(&mut self, ledger: &mut Ledger, sample: TintSample) {
         if sample.down {
             let Some(mark) = sample.mark else {
-                return;
-            };
-            let Some(shown) = self.shown.as_ref() else {
                 self.tint_press = None;
                 return;
             };
-            if !shown.mark_id.is_empty() && shown.mark_id != mark.id {
+            let Some(phrase) = self.phrase_of_mark(&mark.id) else {
                 self.tint_press = None;
                 return;
-            }
+            };
             self.tint_press = Some(TintPress {
                 mark_id: mark.id,
                 generation: mark.generation,
                 button: sample.button,
                 ts_ms: sample.ts_ms,
-                phrase_id: shown.phrase_id.clone(),
+                phrase_id: phrase,
             });
             return;
         }
         let Some(press) = self.tint_press.take() else {
             return;
         };
-        let still = self.shown.as_ref().is_some_and(|shown| shown.phrase_id == press.phrase_id);
-        if !still {
-            return;
-        }
         let release_generation = sample.mark.as_ref().filter(|mark| mark.id == press.mark_id).map(|mark| mark.generation);
         let Some(tap) = classify_tap(press.button, sample.button, press.ts_ms, sample.ts_ms, press.generation, release_generation) else {
             return;
         };
         let from = self.tints.get(&press.mark_id).copied().unwrap_or(MarkColor::Yellow);
         let (color, kind) = switch_tint(from, tap);
+        if self.is_reentry(&press.phrase_id) {
+            self.reenter(ledger, press.phrase_id, press.mark_id, color, kind, sample.ts_ms);
+            return;
+        }
+        let still = self.shown.as_ref().is_some_and(|shown| shown.phrase_id == press.phrase_id);
+        if !still {
+            return;
+        }
         let event = match kind {
             LedgerKind::Accept => UiEvent::Accept { phrase_id: press.phrase_id.clone() },
             LedgerKind::Deny => UiEvent::Deny { phrase_id: press.phrase_id.clone() },
@@ -584,6 +623,83 @@ impl TaskBook {
         }
         self.tints.insert(press.mark_id, color);
         self.consider(ledger, sample.ts_ms);
+    }
+
+    fn current_phrase(&self) -> Option<String> {
+        self.tasks
+            .iter()
+            .find(|task| live(task.state))
+            .and_then(|task| task.items.get(task.index).map(|item| item.phrase_id.clone()))
+    }
+
+    fn phrase_of_mark(&self, mark_id: &str) -> Option<String> {
+        if let Some(phrase) = self.tasks.iter().find(|task| live(task.state)).and_then(|task| {
+            task.items.iter().find(|item| item.phrase_id == mark_id).map(|item| item.phrase_id.clone())
+        }) {
+            return Some(phrase);
+        }
+        let shown = self.shown.as_ref()?;
+        if shown.mark_id == mark_id {
+            return Some(shown.phrase_id.clone());
+        }
+        None
+    }
+
+    fn is_reentry(&self, phrase_id: &str) -> bool {
+        self.current_phrase().as_deref() != Some(phrase_id)
+            && self.tasks.iter().any(|task| live(task.state) && task.items.iter().any(|item| item.phrase_id == phrase_id))
+    }
+
+    fn reenter(
+        &mut self,
+        ledger: &mut Ledger,
+        phrase_id: String,
+        mark_id: String,
+        color: MarkColor,
+        kind: LedgerKind,
+        now_ms: u64,
+    ) {
+        let Some(pos) = self.tasks.iter().position(|task| {
+            live(task.state) && task.items.iter().any(|item| item.phrase_id == phrase_id)
+        }) else {
+            return;
+        };
+        let grace = self.tasks[pos].left_phrase.as_deref() == Some(phrase_id.as_str()) && now_ms < self.tasks[pos].left_until_ms;
+        if !grace {
+            if let Some(index) = self.tasks[pos].items.iter().position(|item| item.phrase_id == phrase_id) {
+                if self.tasks[pos].index != index {
+                    self.tasks[pos].index = index;
+                    self.enter_at(pos, ledger, now_ms);
+                }
+            }
+        }
+        let event = match kind {
+            LedgerKind::Accept => UiEvent::Accept { phrase_id: phrase_id.clone() },
+            LedgerKind::Deny => UiEvent::Deny { phrase_id: phrase_id.clone() },
+            LedgerKind::Skip => UiEvent::Skip { phrase_id: phrase_id.clone() },
+            _ => return,
+        };
+        if apply_ui_event(ledger, event, now_ms).is_err() {
+            return;
+        }
+        self.tints.insert(mark_id, color);
+        self.tasks[pos].say_seq = self.tasks[pos].say_seq.saturating_add(1);
+        self.tasks[pos].say_open = true;
+        if grace {
+            return;
+        }
+        self.tasks[pos].left_phrase = Some(phrase_id.clone());
+        self.tasks[pos].left_until_ms = now_ms.saturating_add(GRACE_MS);
+        self.dropped.push(phrase_id);
+        self.advance_active(ledger, now_ms);
+    }
+
+    /// A locus mark. The current item becomes the shown phrase. Another locus only takes its color.
+    pub fn note_phrase_mark(&mut self, phrase_id: &str, ledger: &mut Ledger, now_ms: u64) {
+        self.remember_tint(phrase_id, ledger, phrase_id);
+        if self.current_phrase().as_deref() == Some(phrase_id) {
+            self.note_shown_on(ledger, phrase_id, phrase_id, now_ms);
+        }
     }
 
     pub fn note_highlight(&mut self, presence_id: &str, ledger: &mut Ledger, now_ms: u64) {
@@ -976,22 +1092,55 @@ impl TaskBook {
             self.append_tour(ledger, &phrase, &task_id, query, dwell, now_ms);
         }
         self.freeze_current(&task_id, now_ms);
+        if self.tasks[pos].pass_only {
+            let idx = self.tasks[pos].index;
+            self.tasks[pos].items[idx].continued = true;
+            if self.continue_skips(pos, ledger, now_ms) {
+                return;
+            }
+            self.finish_task(pos, &task_id);
+            return;
+        }
         if self.tasks[pos].index + 1 >= self.tasks[pos].items.len() {
-            self.tasks[pos].state = TaskState::Done;
-            self.tasks[pos].entered_ms = None;
-            self.tasks[pos].narration_done = false;
-            self.tasks[pos].hand_clock_ms = None;
-            self.clear_shown_for(&task_id);
+            if self.tasks[pos].again && self.continue_skips(pos, ledger, now_ms) {
+                return;
+            }
+            self.finish_task(pos, &task_id);
             return;
         }
         self.tasks[pos].index += 1;
         self.enter_at(pos, ledger, now_ms);
     }
 
+    /// The next skip that this pass has not already shown. The scroll stays yielded.
+    fn continue_skips(&mut self, pos: usize, ledger: &mut Ledger, now_ms: u64) -> bool {
+        let Some(skip_at) = self.tasks[pos].items.iter().position(|item| {
+            !item.continued && hand_condition(ledger, &item.phrase_id) == "skip"
+        }) else {
+            return false;
+        };
+        self.tasks[pos].index = skip_at;
+        self.enter_at(pos, ledger, now_ms);
+        self.tasks[pos].pass_only = true;
+        self.tasks[pos].yield_scroll = true;
+        true
+    }
+
+    fn finish_task(&mut self, pos: usize, task_id: &str) {
+        self.tasks[pos].state = TaskState::Done;
+        self.tasks[pos].entered_ms = None;
+        self.tasks[pos].narration_done = false;
+        self.tasks[pos].hand_clock_ms = None;
+        self.tasks[pos].pass_only = false;
+        self.clear_shown_for(task_id);
+    }
+
     fn enter_at(&mut self, pos: usize, ledger: &mut Ledger, now_ms: u64) {
         self.tasks[pos].entered_ms = Some(now_ms);
         self.tasks[pos].narration_done = false;
         self.tasks[pos].hand_clock_ms = None;
+        self.tasks[pos].yield_scroll = false;
+        self.tasks[pos].hold_nudge = false;
         let task_id = self.tasks[pos].id.clone();
         let current = self.tasks[pos].items.get(self.tasks[pos].index).map(|item| (item.phrase_id.clone(), item.query.clone()));
         if let Some((phrase, query)) = current {
@@ -1050,12 +1199,28 @@ impl TaskBook {
         Ok(())
     }
 
-    fn preempt_task(&mut self, task_id: &str) -> Result<(), TaskError> {
+    fn preempt_task(&mut self, task_id: &str, reason: Option<PreemptReason>) -> Result<(), TaskError> {
         let task = self.task_mut(task_id).ok_or(TaskError::NoSuchTask)?;
         if task.state != TaskState::Active {
             return Err(TaskError::TaskNotActive);
         }
-        task.state = TaskState::Paused;
+        match reason {
+            Some(PreemptReason::Pointer) => task.hold_nudge = true,
+            Some(PreemptReason::Page) | None => task.yield_scroll = true,
+        }
+        Ok(())
+    }
+
+    /// The glass pass found nothing left to show. No hand is written.
+    fn settle_task(&mut self, task_id: &str) -> Result<(), TaskError> {
+        let task = self.task_mut(task_id).ok_or(TaskError::NoSuchTask)?;
+        if task.state != TaskState::Active {
+            return Err(TaskError::TaskNotActive);
+        }
+        task.state = TaskState::Done;
+        task.pass_only = false;
+        task.yield_scroll = false;
+        task.entered_ms = None;
         Ok(())
     }
 
@@ -1402,7 +1567,7 @@ pub fn route_task(
         Proposal::CreateTask(body) => Some(route_create(tier, book, ledger, body, presence_alive, now_ms, false)),
         Proposal::DraftTask(body) => Some(route_create(tier, book, ledger, body, presence_alive, now_ms, true)),
         Proposal::CancelTask(body) => Some(route_cancel(tier, book, body)),
-        Proposal::QueryTask(body) => Some(route_query(tier, book, body)),
+        Proposal::QueryTask(body) => Some(route_query(tier, book, ledger, body)),
         Proposal::ResolveItem(body) => Some(route_resolve(tier, book, ledger, body, now_ms)),
         Proposal::TourSignal(body) => Some(route_signal(tier, book, ledger, body, now_ms)),
         _ => None,
@@ -1472,6 +1637,7 @@ fn insert_task(
             page: raw.page,
             matched: ItemMatch::Pending,
             attempts: 0,
+            continued: false,
         });
     }
     let id = book.mint_task_id();
@@ -1504,6 +1670,14 @@ fn insert_task(
         narration_done: false,
         hand_clock_ms: None,
         last_move_ms: None,
+        yield_scroll: false,
+        hold_nudge: false,
+        again: false,
+        pass_only: false,
+        say_seq: 0,
+        say_open: false,
+        left_phrase: None,
+        left_until_ms: 0,
     });
     Ok(id)
 }
@@ -1641,12 +1815,8 @@ fn route_signal(
     let result = match body.signal {
         TourSignalKind::Begin => book.begin_task(&body.task_id, ledger, now_ms),
         TourSignalKind::NarrationDone => book.mark_narration(&body.task_id, ledger, now_ms),
-        TourSignalKind::Preempt => {
-            match body.reason {
-                Some(crate::protocol::PreemptReason::Page | crate::protocol::PreemptReason::Pointer) | None => {}
-            }
-            book.preempt_task(&body.task_id)
-        }
+        TourSignalKind::Preempt => book.preempt_task(&body.task_id, body.reason),
+        TourSignalKind::Settle => book.settle_task(&body.task_id),
     };
     match result {
         Ok(()) => ProposalResult::ok(&body.proposal_id, book.query_value(&body.task_id)),
@@ -1654,13 +1824,30 @@ fn route_signal(
     }
 }
 
-fn route_query(tier: Tier, book: &TaskBook, body: &crate::protocol::QueryTaskBody) -> ProposalResult {
+fn route_query(tier: Tier, book: &TaskBook, ledger: &Ledger, body: &crate::protocol::QueryTaskBody) -> ProposalResult {
     if !matches!(tier, Tier::T1User | Tier::T2Client) {
         return ProposalResult::err(&body.proposal_id, "not_allowed_for_tier:queryTask");
     }
     match book.query_value(&body.task_id) {
-        Some(detail) => ProposalResult::ok(&body.proposal_id, Some(detail)),
+        Some(mut detail) => {
+            stamp_hands(&mut detail, ledger);
+            ProposalResult::ok(&body.proposal_id, Some(detail))
+        }
         None => ProposalResult::err(&body.proposal_id, "no_such_task"),
+    }
+}
+
+fn stamp_hands(detail: &mut Value, ledger: &Ledger) {
+    let Some(items) = detail.get_mut("items").and_then(|value| value.as_array_mut()) else {
+        return;
+    };
+    for item in items {
+        let Some(id) = item.get("phraseId").and_then(|value| value.as_str()).map(str::to_string) else {
+            continue;
+        };
+        if let Some(obj) = item.as_object_mut() {
+            obj.insert("hand".to_string(), json!(hand_condition(ledger, &id)));
+        }
     }
 }
 
@@ -1719,6 +1906,10 @@ impl TaskBook {
             "index": task.index,
             "items": items,
             "stopUtterance": self.stop_pending,
+            "again": task.again,
+            "passOnly": task.pass_only,
+            "saySeq": task.say_seq,
+            "say": if task.say_open { Value::String("Understood.".into()) } else { Value::Null },
         }))
     }
 
@@ -2285,7 +2476,7 @@ mod tests {
             result.detail.unwrap()["taskId"].as_str().unwrap().to_string()
         };
         reg.task_book_mut().admit().unwrap();
-        reg.note_task_highlight("p", 5);
+        reg.note_task_highlight("p", None, 5);
         let before = reg.ledger().events().len();
         assert!(before >= 1);
         reg.retire_presence("p").unwrap();
@@ -2527,13 +2718,20 @@ mod tests {
 
     #[test]
     fn preempt_pauses_without_a_decision() {
-        let mut opened = open(&explain_line());
-        signal(&mut opened.book, &mut opened.ledger, &opened.id, "begin", 0);
-        let before = opened.ledger.events().len();
-        assert_eq!(signal(&mut opened.book, &mut opened.ledger, &opened.id, "preempt", 5).status, "ok");
-        assert_eq!(book_query(&opened.book, &opened.id)["state"], "paused");
-        assert_eq!(opened.ledger.events().len(), before);
-        assert!(row(&opened.ledger, &opened.phrase)["decision"].is_null());
+        let mut book = TaskBook::new();
+        let mut ledger = Ledger::new();
+        let result = create(&mut book, &mut ledger, &scroll_line(r#"{"query":"the line","scroll":true}"#), Tier::T1User, 0);
+        let id = result.detail.unwrap()["taskId"].as_str().unwrap().to_string();
+        book.admit().unwrap();
+        book.authorize(&id, &web_find("doc-a", "the line"), true, &mut ledger, 0).unwrap();
+        let before = ledger.events().len();
+        assert_eq!(signal(&mut book, &mut ledger, &id, "preempt", 5).status, "ok");
+        assert_eq!(book_query(&book, &id)["state"], "active");
+        assert_eq!(ledger.events().len(), before);
+        let phrase = item_ids(&book, &id)[0].clone();
+        assert!(row(&ledger, &phrase)["decision"].is_null());
+        assert_eq!(book.authorize(&id, &web_find("doc-a", "the line"), true, &mut ledger, 2_000), Err(MoveError::Yielded));
+        assert_eq!(book.moves_issued(), 1);
     }
 
     fn place(book: &mut TaskBook, id: &str, x: i32, now: u64) {
@@ -2690,7 +2888,7 @@ mod tests {
     fn teaching_highlight_without_a_task_writes_no_phrase() {
         let mut reg = Registry::new();
         reg.spawn_presence("p", "ctx", None, None);
-        reg.note_task_highlight("p", 5);
+        reg.note_task_highlight("p", None, 5);
         assert!(reg.ledger().events().is_empty());
         assert_eq!(reg.ledger().occupancy(), 0);
     }
@@ -2796,21 +2994,38 @@ mod tests {
 
     #[test]
     fn g6_g7_page_and_pointer_pause_and_issue_no_further_move() {
-        for reason in ["page", "pointer"] {
-            let mut book = TaskBook::new();
-            let mut ledger = Ledger::new();
-            let result = create(&mut book, &mut ledger, &scroll_line(r#"{"query":"the line","scroll":true}"#), Tier::T1User, 0);
-            let id = result.detail.unwrap()["taskId"].as_str().unwrap().to_string();
-            book.admit().unwrap();
-            book.authorize(&id, &web_find("doc-a", "the line"), true, &mut ledger, 0).unwrap();
-            let before = ledger.events().len();
-            preempt(&mut book, &mut ledger, &id, reason);
-            assert_eq!(book_query(&book, &id)["state"], "paused");
-            assert_eq!(ledger.events().len(), before);
-            assert_eq!(book.authorize(&id, &web_find("doc-a", "the line"), true, &mut ledger, 2_000), Err(MoveError::NoActiveTour));
-            assert_eq!(book.moves_issued(), 1);
-            assert!(ledger.events().iter().all(|ev| !matches!(ev.kind, LedgerKind::Approved | LedgerKind::Discarded | LedgerKind::Cleared)));
-        }
+        let mut book = TaskBook::new();
+        let mut ledger = Ledger::new();
+        let result = create(&mut book, &mut ledger, &scroll_line(r#"{"query":"the line","scroll":true}"#), Tier::T1User, 0);
+        let id = result.detail.unwrap()["taskId"].as_str().unwrap().to_string();
+        book.admit().unwrap();
+        book.authorize(&id, &web_find("doc-a", "the line"), true, &mut ledger, 0).unwrap();
+        let before = ledger.events().len();
+        preempt(&mut book, &mut ledger, &id, "page");
+        assert_eq!(book_query(&book, &id)["state"], "active");
+        assert_eq!(ledger.events().len(), before);
+        assert_eq!(book.authorize(&id, &web_find("doc-a", "the line"), true, &mut ledger, 2_000), Err(MoveError::Yielded));
+        assert_eq!(book.moves_issued(), 1);
+        assert!(ledger.events().iter().all(|ev| !matches!(ev.kind, LedgerKind::Approved | LedgerKind::Discarded | LedgerKind::Cleared)));
+
+        let mut book = TaskBook::new();
+        let mut ledger = Ledger::new();
+        let result = create(&mut book, &mut ledger, &scroll_line(r#"{"query":"the line","scroll":true}"#), Tier::T1User, 0);
+        let id = result.detail.unwrap()["taskId"].as_str().unwrap().to_string();
+        book.admit().unwrap();
+        book.authorize(&id, &web_find("doc-a", "the line"), true, &mut ledger, 0).unwrap();
+        let before = ledger.events().len();
+        preempt(&mut book, &mut ledger, &id, "pointer");
+        assert_eq!(book_query(&book, &id)["state"], "active");
+        assert_eq!(ledger.events().len(), before);
+        let nudge = ViewerMove::Nudge { dy_px: NUDGE_PX };
+        assert_eq!(book.authorize(&id, &nudge, true, &mut ledger, 2_000), Err(MoveError::Yielded));
+        assert_eq!(book.moves_issued(), 1);
+        book.authorize(&id, &web_find("doc-a", "the line"), true, &mut ledger, 2_000).unwrap();
+        assert_eq!(book.moves_issued(), 2);
+        book.authorize(&id, &nudge, true, &mut ledger, 3_500).unwrap();
+        assert_eq!(book.moves_issued(), 3);
+        assert!(ledger.events().iter().all(|ev| !matches!(ev.kind, LedgerKind::Approved | LedgerKind::Discarded | LedgerKind::Cleared)));
     }
 
     #[test]
@@ -3082,6 +3297,7 @@ mod tests {
                     doc_key: None,
                     items,
                     locus_ids,
+                    again: false,
                 },
                 1_000,
             )
@@ -3148,6 +3364,7 @@ mod tests {
                 doc_key: None,
                 items: vec![TourSeedItem { query: "a".into(), narration: String::new(), page: None }],
                 locus_ids: vec![],
+                again: false,
             },
             0,
         );
@@ -3163,6 +3380,7 @@ mod tests {
                 doc_key: None,
                 items: vec![TourSeedItem { query: "a".into(), narration: String::new(), page: None }],
                 locus_ids: vec!["  ".into()],
+                again: false,
             },
             0,
         );
@@ -3178,6 +3396,7 @@ mod tests {
                     doc_key: None,
                     items: vec![TourSeedItem { query: "the line".into(), narration: String::new(), page: None }],
                     locus_ids: vec!["lc-9".into()],
+                    again: false,
                 },
                 0,
             )
@@ -3257,5 +3476,119 @@ mod tests {
         assert_eq!(tint_of(&book), Some(crate::highlight::MarkColor::Red));
         assert_eq!(book_query(&book, &id)["index"], 1);
         assert_eq!(book_query(&book, &id)["state"], "active");
+    }
+
+    fn gesture_on(book: &mut TaskBook, ledger: &mut Ledger, mark: &str, down_ms: u64, up_ms: u64) -> Vec<String> {
+        book.apply_tint_samples(
+            ledger,
+            vec![
+                TintSample {
+                    down: true,
+                    button: BTN_LEFT,
+                    ts_ms: down_ms,
+                    mark: Some(TintMark { id: mark.into(), generation: 1 }),
+                },
+                TintSample {
+                    down: false,
+                    button: BTN_LEFT,
+                    ts_ms: up_ms,
+                    mark: Some(TintMark { id: mark.into(), generation: 1 }),
+                },
+            ],
+        )
+    }
+
+    fn queried(book: &mut TaskBook, ledger: &mut Ledger, id: &str) -> Value {
+        let line = format!(r#"{{"kind":"queryTask","proposalId":"q","taskId":"{id}"}}"#);
+        route_task(&parse(&line), Tier::T2Client, book, ledger, true, 0).unwrap().detail.unwrap()
+    }
+
+    #[test]
+    fn a_tap_on_another_locus_says_understood_and_takes_the_next() {
+        let (mut book, mut ledger, id) = show_tour(crate::protocol::TaskPace::Flow, &["lc-a", "lc-b", "lc-c"]);
+        assert_eq!(queried(&mut book, &mut ledger, &id)["items"][1]["hand"], "skip");
+        let dropped = gesture_on(&mut book, &mut ledger, "lc-b", 3_000, 3_200);
+        assert_eq!(dropped, vec!["lc-b".to_string()]);
+        assert_eq!(hand_kinds(&ledger), vec![LedgerKind::Accept]);
+        assert_eq!(row(&ledger, "lc-b")["decision"], "accept");
+        let view = queried(&mut book, &mut ledger, &id);
+        assert_eq!(view["say"], "Understood.");
+        assert_eq!(view["index"], 2);
+        assert_eq!(view["state"], "active");
+        assert_eq!(view["items"][1]["hand"], "accept");
+        let seq = view["saySeq"].as_u64().unwrap();
+        let again = gesture_on(&mut book, &mut ledger, "lc-b", 3_300, 3_400);
+        assert!(again.is_empty());
+        let view = queried(&mut book, &mut ledger, &id);
+        assert_eq!(view["index"], 2);
+        assert_eq!(view["state"], "active");
+        assert_eq!(view["saySeq"].as_u64().unwrap(), seq + 1);
+        assert_eq!(row(&ledger, "lc-b")["decision"].as_str(), None);
+        assert_eq!(hand_kinds(&ledger), vec![LedgerKind::Accept, LedgerKind::Skip]);
+    }
+
+    #[test]
+    fn a_tap_on_the_last_locus_ends_the_list() {
+        let (mut book, mut ledger, id) = show_tour(crate::protocol::TaskPace::Flow, &["lc-a", "lc-b"]);
+        gesture_on(&mut book, &mut ledger, "lc-b", 3_000, 3_200);
+        let view = book_query(&book, &id);
+        assert_eq!(view["state"], "done");
+        assert_eq!(view["index"], 1);
+        assert_eq!(view["say"], "Understood.");
+        assert_eq!(row(&ledger, "lc-b")["decision"], "accept");
+    }
+
+    #[test]
+    fn again_walks_remaining_skips_without_a_scroll_and_settle_ends() {
+        let mut book = TaskBook::new();
+        let mut ledger = Ledger::new();
+        let id = book
+            .insert_tour_chunk(
+                &mut ledger,
+                TourSeed {
+                    origin_user: true,
+                    mode: crate::protocol::TaskMode::Explain,
+                    pace: crate::protocol::TaskPace::Flow,
+                    doc_key: Some("doc-a".into()),
+                    items: vec![
+                        TourSeedItem { query: "one".into(), narration: String::new(), page: None },
+                        TourSeedItem { query: "two".into(), narration: String::new(), page: None },
+                    ],
+                    locus_ids: vec!["lc-a".into(), "lc-b".into()],
+                    again: true,
+                },
+                1_000,
+            )
+            .unwrap();
+        book.admit().unwrap();
+        book.begin_task(&id, &mut ledger, 2_000).unwrap();
+        let walk = |book: &mut TaskBook, ledger: &mut Ledger, at: u64| {
+            book.tick(ledger, at);
+            assert_eq!(signal(book, ledger, &id, "narrationDone", at).status, "ok");
+        };
+        walk(&mut book, &mut ledger, 2_000 + DWELL_MS);
+        assert_eq!(book_query(&book, &id)["index"], 1);
+        assert_eq!(book_query(&book, &id)["passOnly"], false);
+        walk(&mut book, &mut ledger, 2_000 + DWELL_MS * 2);
+        assert_eq!(book_query(&book, &id)["state"], "active");
+        assert_eq!(book_query(&book, &id)["passOnly"], true);
+        assert_eq!(book_query(&book, &id)["index"], 0);
+        assert_eq!(book_query(&book, &id)["again"], true);
+        assert_eq!(book.authorize(&id, &web_find("doc-a", "one"), true, &mut ledger, 2_000 + DWELL_MS * 2), Err(MoveError::Yielded));
+        let hands = hand_kinds(&ledger);
+        walk(&mut book, &mut ledger, 2_000 + DWELL_MS * 3);
+        assert_eq!(book_query(&book, &id)["index"], 1);
+        assert_eq!(book_query(&book, &id)["passOnly"], true);
+        walk(&mut book, &mut ledger, 2_000 + DWELL_MS * 4);
+        assert_eq!(book_query(&book, &id)["state"], "done");
+        assert_eq!(hand_kinds(&ledger), hands);
+
+        let (mut settled, mut settled_ledger, settled_id) = show_tour(crate::protocol::TaskPace::Flow, &["lc-a", "lc-b"]);
+        let before = hand_kinds(&settled_ledger);
+        assert_eq!(signal(&mut settled, &mut settled_ledger, &settled_id, "settle", 4_000).status, "ok");
+        assert_eq!(book_query(&settled, &settled_id)["state"], "done");
+        assert_eq!(book_query(&settled, &settled_id)["passOnly"], false);
+        assert!(book_query(&settled, &settled_id)["say"].is_null());
+        assert_eq!(hand_kinds(&settled_ledger), before);
     }
 }
