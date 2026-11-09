@@ -179,7 +179,7 @@ Scrolling the user's window is an actuator, so it gets its own rules in the gate
 
 1. **The viewer's find moves the page; the presence only nudges.** Per `viewer_find.md`: Chromium `window.find` on the opening phrase, or a Poppler page hit plus Evince `goToPage`. The presence's own scroll vocabulary is the short centering nudge (`NUDGE_PX`, 80 px) while the phrase is already on the glass. No anchor jumps, no walking the page, no clicks, keys or text.
 2. **Only inside an active tour,** and only to the window matching the task's `source.docKey`.
-3. **User preempts.** Any real user scroll, pointer movement over the target, or key press cancels or pauses the tour immediately. The daemon never fights the user.
+3. **User preempts.** Any real user scroll, pointer movement over the target, or key press cancels or pauses the tour immediately. The daemon never fights the user. `scroll_highlight.md` is the later order: their scroll stops our moves, the narration continues, and the mark follows the glass or drops at the edge.
 4. **Start confirmation for agent-originated tours.** A tour created by T2 that wants to scroll the user's window needs one T0 start press. User-originated tours (T1) don't need it, since the user just asked.
 5. **Bounded.** A scroll budget per item (about 3 attempts) and a tour length cap. Rate limit scroll commands.
 6. **Verify, don't trust.** After scrolling, run the normal OCR locate. On failure, record `mismatch` (or `not_found`) and move on in flow, or hold with an "I can't find this" notice in wait. Never loop.

@@ -45,7 +45,7 @@ No new gesture. No new socket kind. The driver already calls `highlightRegion` a
 
 ## Left where it is
 
-Rewind, the scroll takeover, C11b, C12, and B1b. A second mouth through `highlightAndSpeak` beside the driver. The driver for this project.
+The scroll, the mark that follows it, and the hop back in from a tap are `scroll_highlight.md`. C12 and B1b stay out. A second mouth through `highlightAndSpeak` beside the driver stays out. The driver for this project stays down.
 
 ## Read with this
 

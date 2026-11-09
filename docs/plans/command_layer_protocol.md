@@ -335,6 +335,8 @@ Daemon socket tests follow the existing style (spawn the daemon in test mode, co
 | G12 | Tour length cap | Enforced |
 | G13 | Rate limit on scroll commands | Enforced |
 
+`scroll_highlight.md` (8 November 2026) is the later order for G6 and G7. A scroll the person takes stops further moves from us and does not stop the narration. The mark tracks a scroll the viewer reports, and it drops in the outer 5 percent of the window. A pointer in the window during a hop we are still performing withholds the next nudge. It does not cut the voice.
+
 ### H. Sidecar (T3)
 
 | ID | Test | Expect |
