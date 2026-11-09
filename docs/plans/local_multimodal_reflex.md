@@ -130,7 +130,7 @@ Opening further sources in a multi-source project tour is a separate internal ca
 
 ### Doc map
 
-Per-source index for shortlisting and citation loci: heading tree, phrase and paragraph offsets, page and extractor line (PDF, text) or heading path (HTML), optional short section summaries. SQLite with full-text search. Built once for a URL or file, or incrementally from OCR as the user scrolls. It is document content, hence untrusted data. It informs suggestions and ordering and never carries commands or scroll targets: the viewer's own find moves the page (`complete/viewer_find.md`). Precise highlighting remains with locate and OCR.
+Per-source index for shortlisting and citation loci: heading tree, phrase and paragraph offsets, page and extractor line (PDF, text) or heading path (HTML), optional short section summaries. SQLite with full-text search. Built once for a URL or file, or incrementally from OCR as the user scrolls. It is document content, hence untrusted data. It informs suggestions and ordering and never carries commands or scroll targets: the viewer's own find moves the page (`complete/viewer_find.md`). Precise highlighting remains with locate and OCR. What the daemon stores today, and the reading of discourse structure against that store, is `index_and_loci.md`. The sentences in this paragraph stay the design.
 
 ### Research asks (multi-source)
 

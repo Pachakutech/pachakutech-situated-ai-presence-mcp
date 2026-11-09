@@ -39,6 +39,7 @@ export type StartTourInput = {
   mode: "explain" | "select" | "approve";
   pace?: "flow" | "wait";
   askId?: string;
+  again?: boolean;
   path?: string;
 };
 
@@ -181,6 +182,7 @@ export async function startProjectTour(input: StartTourInput, connect: Connect):
   const fields: Record<string, unknown> = { projectId: input.projectId, mode: input.mode };
   if (input.pace) fields.pace = input.pace;
   if (input.askId) fields.askId = input.askId;
+  if (input.again) fields.again = true;
   return client.call("startProjectTour", fields);
 }
 

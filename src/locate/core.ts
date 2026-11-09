@@ -468,6 +468,99 @@ export function meanConfidence(lines: Line[], run: Run): number {
   return Math.min(1, Math.max(0, mean));
 }
 
+export const MARK_CAP = 3;
+/** The mark drops when its box enters this fraction of the window, top or bottom. */
+export const EDGE_BAND = 0.05;
+
+export type HandName = "skip" | "accept" | "deny";
+
+export type GlassLocus = {
+  phraseId: string;
+  opening: string;
+  hand: HandName;
+  current: boolean;
+};
+
+export type Uv = { u: number; v: number; w: number; h: number };
+
+export type GlassMark = Uv & {
+  phraseId: string;
+  color: "yellow" | "green" | "red";
+};
+
+export function handColor(hand: HandName): GlassMark["color"] {
+  if (hand === "accept") return "green";
+  if (hand === "deny") return "red";
+  return "yellow";
+}
+
+function placeGlass(hits: GlassMark[], locus: GlassLocus, lines: Line[], screen: { w: number; h: number }): void {
+  if (hits.length >= MARK_CAP) return;
+  if (!locus.opening.trim()) return;
+  if (hits.some((mark) => mark.phraseId === locus.phraseId)) return;
+  const run = findRun(lines, locus.opening);
+  if (!run || run === "ambiguous") return;
+  const box = unionBox(lines, run, 0, screen);
+  if (!box || screen.w <= 0 || screen.h <= 0) return;
+  hits.push({
+    phraseId: locus.phraseId,
+    color: handColor(locus.hand),
+    u: box.x / screen.w,
+    v: box.y / screen.h,
+    w: box.w / screen.w,
+    h: box.h / screen.h,
+  });
+}
+
+/** Current locus first, then other skips on the glass, then one decided locus. A miss is absent. */
+export function glassMarks(loci: GlassLocus[], lines: Line[], screen: { w: number; h: number }): GlassMark[] {
+  const hits: GlassMark[] = [];
+  const current = loci.find((locus) => locus.current);
+  if (current) placeGlass(hits, current, lines, screen);
+  for (const locus of loci) {
+    if (locus.current || locus.hand !== "skip") continue;
+    placeGlass(hits, locus, lines, screen);
+  }
+  for (const locus of loci) {
+    if (locus.hand === "skip") continue;
+    const before = hits.length;
+    placeGlass(hits, locus, lines, screen);
+    if (hits.length > before) break;
+  }
+  return hits;
+}
+
+/** Positive dy scrolls the document down, so the ink moves up. A zero delta leaves the mark. */
+export function followScroll(mark: Uv, dyPx: number, screenH: number): Uv | "drop" {
+  if (!(screenH > 0) || dyPx === 0) return mark;
+  const next = { ...mark, v: mark.v - dyPx / screenH };
+  if (next.v < EDGE_BAND || next.v + next.h > 1 - EDGE_BAND) return "drop";
+  return next;
+}
+
+export function inOuterBand(mark: Uv): boolean {
+  return mark.v < EDGE_BAND || mark.v + mark.h > 1 - EDGE_BAND;
+}
+
+/** One centering nudge while we own the scroll. Null when the mark already sits inside the seat. */
+export function centerWithMark(mark: Uv, screenH: number, nudgePx: number): { dy: number; mark: Uv } | null {
+  if (!inOuterBand(mark) || !(screenH > 0) || nudgePx === 0) return null;
+  const low = mark.v + mark.h > 1 - EDGE_BAND;
+  const dy = low ? Math.abs(nudgePx) : -Math.abs(nudgePx);
+  return { dy, mark: { ...mark, v: mark.v - dy / screenH } };
+}
+
+/** Columns from one screen-text message, grouped into lines for findRun. */
+export function linesFromColumns(text: string[], x: number[], y: number[], w: number[], h: number[]): Line[] {
+  const words: Word[] = [];
+  const n = Math.min(text.length, x.length, y.length, w.length, h.length);
+  for (let i = 0; i < n; i++) {
+    if (!text[i] || !(w[i] > 0) || !(h[i] > 0)) continue;
+    words.push({ x: x[i], y: y[i], w: w[i], h: h[i], text: text[i], conf: 1 });
+  }
+  return groupLines(words);
+}
+
 /**
  * What to do after one photograph of a view the viewer has already placed.
  * A missing phrase stops. A phrase in the band is the box. A phrase high or

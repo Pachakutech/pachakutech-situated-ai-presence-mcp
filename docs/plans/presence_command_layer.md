@@ -199,6 +199,8 @@ A small per-source index used for **shortlisting and citation loci**. It is not 
 - It is document content, so it is untrusted data (T4). It can inform suggestions and ordering but never carry a command or a scroll target.
 - Non-goal: whole-document search or extraction. Precise finding stays with locate and OCR.
 
+The landed store, as distinct from the list above, is written up in `index_and_loci.md`.
+
 ## 7. Reporting interface
 
 Yes, `listPhraseFlags` is ready made for this, with these additions:

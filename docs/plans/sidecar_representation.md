@@ -36,7 +36,7 @@ The sidecar can read a shortlist and can draft a session task. Writing the proje
 
 The durable form, the one a project tour and a bibliography can carry, is a locus with that stance and that narration. Getting there is a later ticket. The shape to keep in mind: the sidecar proposes a span, the daemon checks that the words are the adapter text at those offsets, and the stored locus is that checked span. The proposal stays advisory until T0 keeps it. The check runs off the overlay thread. A model call stays out of `selectLoci`.
 
-A frontier account is often a paraphrase. Token overlap with the page can be zero on a passage a reader would still count. `queryDocMap` and `selectLoci` both rank by tokens, so both miss that passage. The failover for a zero-overlap shortlist was noted earlier as B1b and is still unwritten. This file does not specify it.
+A frontier account is often a paraphrase. Token overlap with the page can be zero on a passage a reader would still count. `queryDocMap` and `selectLoci` both rank by tokens, so both miss that passage. The failover for that empty shortlist is `B1b_retrieval.md`. That note records the hole and picks no method. This file does not specify it either. The landed index, the one-ask score, and the discourse-structure reading are `index_and_loci.md`.
 
 B1's judge is one completion and a 3 second timeout, and the process exits after the job. A walk of a collection is a larger job than that. One 4-bit completion at a time is still the machine budget in section 5 of `local_multimodal_reflex.md`. This job can be slower than a frame, because it runs in the sidecar process. It stays off the overlay thread. It leaves the B1 judge and the B1 acceptance tests as they are.
 

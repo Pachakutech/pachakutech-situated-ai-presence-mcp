@@ -268,7 +268,10 @@ impl Registry {
     }
 
     pub fn apply_tint_samples(&mut self, samples: Vec<crate::task::TintSample>) {
-        self.tasks.apply_tint_samples(&mut self.ledger, samples);
+        let dropped = self.tasks.apply_tint_samples(&mut self.ledger, samples);
+        for id in dropped {
+            self.interests.retire(&id);
+        }
     }
 
     pub fn mark_colors(&self) -> Vec<(String, crate::highlight::MarkColor)> {
@@ -289,8 +292,12 @@ impl Registry {
         }
     }
 
-    pub fn note_task_highlight(&mut self, presence_id: &str, now_ms: u64) {
-        self.tasks.note_highlight(presence_id, &mut self.ledger, now_ms);
+    pub fn note_task_highlight(&mut self, presence_id: &str, phrase_id: Option<&str>, now_ms: u64) {
+        if let Some(phrase) = phrase_id.map(str::trim).filter(|id| !id.is_empty()) {
+            self.tasks.note_phrase_mark(phrase, &mut self.ledger, now_ms);
+        } else {
+            self.tasks.note_highlight(presence_id, &mut self.ledger, now_ms);
+        }
     }
 
     pub fn note_task_hidden(&mut self, presence_id: &str) {
@@ -302,6 +309,7 @@ impl Registry {
     pub fn declare_interest(
         &mut self,
         presence_id: &str,
+        phrase_id: Option<&str>,
         description: &str,
         raw: UvBox,
         secs: u32,
@@ -310,8 +318,9 @@ impl Registry {
         if !self.has_presence(presence_id) {
             return Err(format!("no live presence with id {presence_id}"));
         }
+        let key = phrase_id.map(str::trim).filter(|id| !id.is_empty()).unwrap_or(presence_id);
         let secs = secs.clamp(1, MAX_SECS);
-        let got = self.interests.declare(presence_id, raw, secs, now)?;
+        let got = self.interests.declare(key, raw, secs, now)?;
         println!(
             "[registry] highlight {presence_id} uv {:.3},{:.3} {:.3}x{:.3} for {secs}s — {description}",
             got.u, got.v, got.w, got.h
@@ -332,6 +341,10 @@ impl Registry {
 
     pub fn hold_interest_for_speech(&mut self, presence_id: &str) {
         self.interests.hold_for_speech(presence_id);
+    }
+
+    pub fn retire_interest(&mut self, id: &str) {
+        self.interests.retire(id);
     }
 
     /// Hide a mark that was held for the utterance. The box stays.
@@ -826,7 +839,7 @@ mod tests {
             let (book, ledger) = reg.task_and_ledger();
             book.begin_task(&task_id, ledger, 4_000).unwrap();
         }
-        reg.note_task_highlight("driver", 4_100);
+        reg.note_task_highlight("driver", None, 4_100);
         assert_eq!(hand_condition(reg.ledger(), &locus), "skip");
         let events = root.join("projects").join(&id).join("events.jsonl");
         assert!(hand_rows(&events).is_empty());
@@ -924,6 +937,7 @@ mod tests {
                     doc_key: None,
                     items: vec![TourSeedItem { query: "the quoted line".into(), narration: String::new(), page: None }],
                     locus_ids: vec![locus.clone()],
+                    again: false,
                 },
                 50_000,
             )

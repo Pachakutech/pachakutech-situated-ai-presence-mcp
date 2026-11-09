@@ -77,6 +77,8 @@ struct Active {
     last_open_ms: Option<u64>,
     open_source: Option<String>,
     task_id: Option<String>,
+    /// After the list, one pass over skips still on the glass.
+    again: bool,
     /// Locus ids in the task inserted for this tour. The next chunk starts after the last one.
     chunk: Vec<String>,
     /// One listed source waiting for the locate process. Absent once that process reports.
@@ -393,6 +395,7 @@ fn plan(
         last_open_ms: None,
         open_source: None,
         task_id: None,
+        again: body.again,
         chunk: Vec::new(),
         park: None,
     });
@@ -545,6 +548,7 @@ fn seed_for(desk: &TourDesk, source: &Source, rows: &[Locus]) -> TourSeed {
         doc_key: chosen.first().map(|locus| locus.doc_key.clone()),
         items,
         locus_ids,
+        again: active.again,
     }
 }
 

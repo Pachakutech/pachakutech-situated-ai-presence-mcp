@@ -66,6 +66,19 @@ test("a two-item task walks both items without a page move", async () => {
   assert.equal(calls.preempt, 0);
 });
 
+test("a taken scroll is one preempt and the voice continues", async () => {
+  const items: TourItem[] = [
+    { phraseId: "ph-1", query: "first line", narration: "First.", scroll: false },
+    { phraseId: "ph-2", query: "second line", narration: "Second.", scroll: false },
+  ];
+  const { calls, deps } = scripted(items, false);
+  deps.preempted = async () => true;
+  await runTour("tk-1", deps);
+  assert.equal(calls.preempt, 1);
+  assert.equal(calls.speak, 2);
+  assert.equal(calls.locate, 2);
+});
+
 test("a scrolled item is a miss until a move is permitted", async () => {
   const items: TourItem[] = [{ phraseId: "ph-1", query: "below", narration: "Below.", scroll: true }];
   const { calls, deps } = scripted(items, false, false);

@@ -514,6 +514,12 @@ server.registerTool(
       mode: tourMode,
       pace: tourPace.optional(),
       askId: z.string().optional(),
+      again: z
+        .boolean()
+        .optional()
+        .describe(
+          "Omit it and the tour ends with the list. Set it when the tour should, after the list, continue over skips still on the glass and stop when a reading finds none.",
+        ),
       path: z.string().optional().describe("Refused"),
     },
   },
