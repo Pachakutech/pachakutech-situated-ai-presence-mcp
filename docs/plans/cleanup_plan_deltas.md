@@ -21,7 +21,7 @@ Status: cleaned 3 November 2026. The 31 October record described code through C7
 | `exportProject` writer | The MCP tool forwards the kind. The daemon has no writer, so the call returns the daemon's error. It is not a success stub. | C12. A value read across a stretch of the register waits for that pass. |
 | Sidecar process | `sidecar.sock` is bound. Nothing connects. | B1. |
 | Retrieval brief | Not written. | B1b. |
-| Pause-time highlight | No brief. | C11b. |
+| Pause-time highlight | The brief is `scroll_highlight.md`. The driver does not do it yet. | C11b, when that file is implemented. |
 | Terminal watch of the register | The file moves. The command is still unnamed. | The ticket that writes the command. |
 | `GLB lacks viseme_aa` | One failing daemon test, left in place. | Not this list. |
 | Section 4a | Recorded, not adopted. The default judge keeps every shortlisted span. | A ticket that adopts 4a. |

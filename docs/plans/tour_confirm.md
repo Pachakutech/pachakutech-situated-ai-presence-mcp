@@ -62,7 +62,7 @@ No new crate. The viseme failure stays. The squares stay unpainted.
 
 ## Out of scope
 
-Plus, minus, and the arrow keys as accept, deny, or skip. A Hyprland binding. Painting the squares. A CDP client in the daemon. A second Chromium on the locate profile. C12's export writer. The unnamed terminal watch. A rewind when a lingering highlight is tapped after the tour has moved, which stays with the scroll-takeover brief. A flash on the waiting yellow. Closing the viewer.
+Plus, minus, and the arrow keys as accept, deny, or skip. A Hyprland binding. Painting the squares. A CDP client in the daemon. A second Chromium on the locate profile. C12's export writer. The unnamed terminal watch. A tap that re-enters the tour from a highlight, which is `scroll_highlight.md`. A flash on the waiting yellow. Closing the viewer.
 
 ## Done when
 

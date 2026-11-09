@@ -136,9 +136,7 @@ Order on a successful insert:
 
 ## When the person takes the scroll
 
-A person may scroll the page while a tour is moving it. The protocol already names that case. G6 and G7 in `command_layer_protocol.md`: a user scroll mid-tour, or the pointer over the target while a move is in flight, pauses the tour and issues no further move. C3c records the pause when a `tourSignal` of `preempt` arrives. The tour driver in this tree reports that signal as false, so a scroll during the current walk does not pause it. C11b, the pause-time highlight, is the brief that has not been written. The highlight would have to live with a page the person is moving themselves.
-
-That behavior is real and it still needs code. The demo does not need it. The person at the keyboard for the demo stays with the tour. This ticket does not implement the pause, and it does not write the C11b brief.
+A person may scroll the page while a tour is moving it. The order for that scroll, the mark that follows the glass, and the hop back in from a tap is `scroll_highlight.md`. That file is the C11b brief. It supersedes the pause-and-stop reading of G6 and G7 for the voice and the mark. This ticket does not implement it.
 
 ## Tests
 
@@ -159,7 +157,7 @@ The checks live in `task.rs` and in `registry.rs` (`a_bound_hand_lands_in_the_pr
 
 The terminal watch, and the name of that command. `review_demo.md` leaves the name to the ticket that writes the command. This ticket writes the rows that watch will read.
 
-C12's bibliography files. C13's read on `queryProject`. `docs/plans/B1b_retrieval.md`. The C11b pause-time highlight, recognized above and left unwritten. Section 4a of `research_tours.md`. Painting the squares. A flash on the waiting yellow. Changing `locus_id()`. Editing the design sentence. A client or a sidecar setting the color. Closing the viewer. A person taking the scroll, beyond naming it.
+C12's bibliography files. C13's read on `queryProject`. `docs/plans/B1b_retrieval.md`. Section 4a of `research_tours.md`. Painting the squares. A flash on the waiting yellow. Changing `locus_id()`. Editing the design sentence. A client or a sidecar setting the color. Closing the viewer. The scroll itself, which is `scroll_highlight.md`.
 
 ## Read with this
 
@@ -167,5 +165,6 @@ C12's bibliography files. C13's read on `queryProject`. `docs/plans/B1b_retrieva
 - `docs/plans/review_demo.md`, the register of skip, accept, and deny
 - `docs/plans/local_multimodal_reflex.md`, the phrase-id sentence, left as written
 - `docs/plans/C11c_tour_window.md`, the window, which still does not paint. The binding this ticket added sits on the commit after that window reports the source open
-- `docs/plans/command_layer_protocol.md`, rows G6 and G7, the scroll the demo leaves alone
+- `docs/plans/scroll_highlight.md`, the C11b order for a scroll the person takes
+- `docs/plans/command_layer_protocol.md`, rows G6 and G7, superseded there for the voice and the mark
 - `skills/presence/SKILL.md`, the three conditions, and the note that any further contract over them belongs to the model

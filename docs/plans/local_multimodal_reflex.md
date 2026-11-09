@@ -241,4 +241,4 @@ A late click on the previous item has no surface once the next `declare` has rep
 
 The screen-text message is one capture of the whole desktop, including chrome and whatever else is in the frame. The doc map is the text adapter: Poppler for a PDF, DOM text for a page, the file for plain text. Querying `queryScreenText` does not build a map.
 
-Cue-follow, in Node, is the tour runner that exists today: conceal, locate, mark, speak, wait. C3b and C11 drive that path. A second scroll implementation in the daemon will fight it. The gate's vocabulary for a move is the internal `ViewerMove`. The Node locator is the code that performs it.
+Cue-follow, in Node, is the tour runner that exists today: conceal, locate, mark, speak, wait. C3b and C11 drive that path. A second scroll implementation in the daemon will fight it. The gate's vocabulary for a move is the internal `ViewerMove`. The Node locator is the code that performs it. A person taking the scroll, and the mark that follows the glass, is `scroll_highlight.md`.

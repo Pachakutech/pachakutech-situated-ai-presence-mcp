@@ -52,7 +52,7 @@ The register moves when all of these are true. The list is the gate for this goa
 
 C12 writes the bibliography files after the review. The demo is done without those files. An explain tour uses the same component. The register counts the same three conditions.
 
-A person may take the scroll while the tour is moving the page. G6 and G7 already say the tour pauses. That code is not in the driver yet, and C11b, the pause-time highlight, has no brief. The demo does not need it. The person running the demo stays with the tour.
+A person may take the scroll while the tour is moving the page. The order is `scroll_highlight.md`. The demo does not need it. The person running the demo stays with the tour.
 
 ## Done
 
