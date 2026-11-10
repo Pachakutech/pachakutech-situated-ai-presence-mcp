@@ -20,7 +20,7 @@ The sampler does not start when find starts, and it does not wait for the scroll
 
 ## Web
 
-Find stays. It is how a web page brings the sentence into view. After that scroll has finished, the tour reads a desktop frame whose capture started after the settle, and tints from `glassMarks`. A frame from before the settle is left unused. The locator's window Tesseract and `verifyBox` leave this path. A miss on that one frame is a miss of the reading. `found_when_shown.md` still applies when a later frame of the same sampler puts the mark up.
+Find stays. It is how a web page brings the sentence into view. After that scroll has finished, the tour reads a desktop frame whose capture started after the settle, and tints from `glassMarks`. That read is `queryScreenText` on the message the daemon's sampler is already posting. The delay is waiting until that same loop posts a message captured after the settle. The tour does not start a Tesseract. A frame from before the settle is left unused. The locator's window Tesseract and `verifyBox` leave this path. A miss on that one frame is a miss of the reading. `found_when_shown.md` still applies when a later frame of the same sampler puts the mark up.
 
 ## PDF
 
