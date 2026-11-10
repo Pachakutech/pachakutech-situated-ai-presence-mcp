@@ -911,7 +911,7 @@ impl MatchInfo {
             "status": match self.status {
                 MatchStatus::Located => "located",
                 MatchStatus::Ambiguous => "ambiguous",
-                MatchStatus::NotFound => "notFound",
+                MatchStatus::NotFound => "notYetFound",
             },
             "conf": self.conf,
             "ocrSnippet": self.ocr_snippet,
@@ -1718,7 +1718,7 @@ mod tests {
         let detail = ledger.list_value(&bare_list(false)).unwrap();
         assert_eq!(detail["rows"][0]["decision"], "approved");
         assert_eq!(detail["rows"][0]["decisionBy"], "T0");
-        assert_eq!(detail["rows"][0]["match"]["status"], "notFound");
+        assert_eq!(detail["rows"][0]["match"]["status"], "notYetFound");
     }
 
     #[test]

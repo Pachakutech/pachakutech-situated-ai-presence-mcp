@@ -8,7 +8,7 @@ import { holdNudge, releaseScroll as clearScrollHold, scrollDrifted, scrollTaken
 import { nudgePage, outputSize, pointerOverChromium, readPageGeneration, readScrollTop } from "./run.js";
 import { runTour, type GlassHit, type TourItem, type TourView } from "./tour.js";
 import { driveTour, type DriveIo, type OpenRequest } from "./driveTour.js";
-import { NUDGE_PX } from "./core.js";
+import { NUDGE_PX, frameAfterSettle, glassPhraseBox, type GlassFrame } from "./core.js";
 
 function asTourView(detail: Record<string, unknown>, taskId: string): TourView {
   const items = Array.isArray(detail.items) ? (detail.items as TourItem[]) : [];
@@ -22,6 +22,23 @@ function asTourView(detail: Record<string, unknown>, taskId: string): TourView {
     say: typeof detail.say === "string" ? detail.say : null,
     saySeq: typeof detail.saySeq === "number" ? detail.saySeq : 0,
     passOnly: detail.passOnly === true,
+  };
+}
+
+function asGlassFrame(detail: Record<string, unknown>): GlassFrame {
+  const nums = (value: unknown): number[] => (Array.isArray(value) ? (value as number[]) : []);
+  return {
+    fresh: detail.fresh === true,
+    seq: typeof detail.seq === "number" ? detail.seq : 0,
+    ageMs: typeof detail.ageMs === "number" ? detail.ageMs : null,
+    workedMs: typeof detail.workedMs === "number" ? detail.workedMs : null,
+    width: typeof detail.width === "number" ? detail.width : 0,
+    height: typeof detail.height === "number" ? detail.height : 0,
+    text: Array.isArray(detail.text) ? (detail.text as string[]) : [],
+    x: nums(detail.x),
+    y: nums(detail.y),
+    w: nums(detail.w),
+    h: nums(detail.h),
   };
 }
 
@@ -195,24 +212,32 @@ function liveIo(client: DaemonClient, presenceId: string | undefined): DriveIo {
     },
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     async locate(item) {
-      const { locateRegion } = await import("./run.js");
       const source = item.page != null ? "pdf" : "web";
       const beforeTop = await readScrollTop();
       const beforeGen = generation;
-      const located = await locateRegion({
+      const { placeForTour } = await import("./run.js");
+      const placed = await placeForTour({
         source,
         query: item.query ?? "",
         uri: reference,
         pad: 0,
         timeoutS: 15,
         noOpen: true,
-        verify: Boolean(presenceId),
         page: item.page ?? undefined,
-        presence: presenceId,
       });
       await trackTravel(beforeTop, beforeGen);
-      if (!located.ok) return { ok: false };
-      return { ok: true, u: located.u, v: located.v, w: located.w, h: located.h };
+      if (!placed.ok) return { ok: false };
+      const settle = Date.now();
+      const frame = await frameAfterSettle(
+        settle,
+        async () => asGlassFrame(await client.call("queryScreenText", {})),
+        () => Date.now(),
+        (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+      );
+      if (!frame) return { ok: false };
+      const box = glassPhraseBox(item.phraseId, item.query ?? "", frame);
+      if (!box) return { ok: false };
+      return { ok: true, ...box };
     },
     async highlight(hit, item) {
       if (!presenceId || hit.u === undefined || hit.v === undefined || hit.w === undefined || hit.h === undefined) return;

@@ -351,7 +351,7 @@ server.registerTool(
       "Reads the daemon's phrase ledger, the list of phrases and the user's answers. " +
       "The ledger is empty when the daemon starts and is not kept across a restart. " +
       "acknowledged and decisions come from the user's hands; filter them with decidedBy T0. " +
-      "mismatch and notFound mean the find failed. A client that lost its context reads this again. " +
+      "mismatch and notYetFound mean the phrase is not yet found. A client that lost its context reads this again. " +
       "It may propose a new phrase. It does not rebuild the list from memory.",
     inputSchema: {
       since: z.number().int().nonnegative().optional().describe("Exclusive event seq. Rows and events after this seq."),

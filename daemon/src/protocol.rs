@@ -321,14 +321,14 @@ impl Proposal {
     }
 }
 
-/// `notFound` is camelCase on the wire. The other statuses are single words.
+/// `notYetFound` is camelCase on the wire. `notFound` still parses. The other statuses are single words.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum MatchStatus {
     #[serde(rename = "located")]
     Located,
     #[serde(rename = "ambiguous")]
     Ambiguous,
-    #[serde(rename = "notFound")]
+    #[serde(rename = "notYetFound", alias = "notFound")]
     NotFound,
 }
 

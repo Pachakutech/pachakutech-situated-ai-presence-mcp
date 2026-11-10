@@ -5,7 +5,7 @@
 import { basename } from "node:path";
 import { chooseSurface, escapeRegExp, pageAdvanceCount } from "./choose.js";
 import { locateStill, type StillDeps } from "./surface.js";
-import type { Client, LocateErr, LocateResult } from "./web.js";
+import type { LocateErr, LocateResult } from "./web.js";
 
 const WINDOW_PATH = "/org/gnome/Evince/window/1";
 
@@ -70,7 +70,10 @@ async function goToPage(bus: string, page: number, deps: PdfBus): Promise<Locate
   return { ok: true, page };
 }
 
-export async function locatePdf(opts: PdfOpts, deps: StillDeps & PdfBus): Promise<LocateResult> {
+export type PdfPlacement = { ok: true; page?: number; fresh?: boolean };
+
+/** Text-layer page, then the Evince turn. The caller reads the glass after this returns. */
+export async function placePdf(opts: PdfOpts, deps: StillDeps & PdfBus): Promise<PdfPlacement | LocateErr> {
   if (!opts.noOpen && !opts.uri) return fail("uri_required", "Pass --uri with the PDF path, or --no-open for an Evince window that is already up.");
 
   let target = opts.page;
@@ -121,7 +124,52 @@ export async function locatePdf(opts: PdfOpts, deps: StillDeps & PdfBus): Promis
   const titleRe =
     opts.windowTitle ??
     (opts.uri ? new RegExp(escapeRegExp(basename(opts.uri)), "i") : undefined);
+  const deadline = deps.now() + opts.timeoutMs;
+  while (deps.now() < deadline) {
+    const where = await deps.focused();
+    if (where.workspace < 0) {
+      return fail("window_not_found", "Hyprland did not report the active workspace.");
+    }
+    const picked = chooseSurface(await deps.clients(), {
+      workspace: where.workspace,
+      focusedAddress: where.address,
+      classRe: opts.windowClass ?? /evince/i,
+      titleRe,
+    });
+    if (picked === "ambiguous") {
+      return fail("ambiguous_window", "More than one window matches. Focus the one you mean, or pass --window-title.");
+    }
+    if (!picked) {
+      deps.log("locate: waiting for a window");
+      await deps.sleep(500);
+      continue;
+    }
+    if (target === undefined && !opened) {
+      return { ok: true, ...(already !== undefined ? { page: already } : {}) };
+    }
+    const bus = await resolveBus(picked.pid, deps, deps.now() + 4000, deps.now);
+    if (!bus) return fail("pdf_page_failed", "Evince is up, and its window was not on the session bus.");
+    if (opened) {
+      try {
+        await deps.fitWidth(bus);
+      } catch {
+        // Zoom is a preference. The box is still the words.
+      }
+    }
+    if (target === undefined) return { ok: true, ...(already !== undefined ? { page: already } : {}) };
+    const went = await goToPage(bus, target, deps);
+    if (!went.ok) return went;
+    return { ok: true, page: went.page, fresh: true };
+  }
+  return fail("window_not_found", `No matching window on this workspace within ${Math.round(opts.timeoutMs / 1000)}s.`);
+}
 
+export async function locatePdf(opts: PdfOpts, deps: StillDeps & PdfBus): Promise<LocateResult> {
+  const placed = await placePdf(opts, deps);
+  if (!placed.ok) return placed;
+  const titleRe =
+    opts.windowTitle ??
+    (opts.uri ? new RegExp(escapeRegExp(basename(opts.uri)), "i") : undefined);
   return locateStill(
     {
       source: "pdf",
@@ -138,23 +186,11 @@ export async function locatePdf(opts: PdfOpts, deps: StillDeps & PdfBus): Promis
           classRe: opts.windowClass ?? /evince/i,
           titleRe,
         }),
-      prepare: async (win: Client) => {
-        if (target === undefined && !opened) {
-          return { ok: true, ...(already !== undefined ? { page: already } : {}) };
-        }
-        const bus = await resolveBus(win.pid, deps, deps.now() + 4000, deps.now);
-        if (!bus) return fail("pdf_page_failed", "Evince is up, and its window was not on the session bus.");
-        if (opened) {
-          try {
-            await deps.fitWidth(bus);
-          } catch {
-            // Zoom is a preference. The box is still the words.
-          }
-        }
-        if (target === undefined) return { ok: true, ...(already !== undefined ? { page: already } : {}) };
-        const went = await goToPage(bus, target, deps);
-        return went.ok ? { ...went, fresh: true } : went;
-      },
+      prepare: async () => ({
+        ok: true as const,
+        ...(placed.page !== undefined ? { page: placed.page } : {}),
+        ...(placed.fresh ? { fresh: true as const } : {}),
+      }),
     },
     deps,
   );

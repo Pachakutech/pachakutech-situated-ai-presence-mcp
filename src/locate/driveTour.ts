@@ -41,7 +41,7 @@ export type DriveIo = {
   resolveItem?(body: {
     taskId: string;
     phraseId: string;
-    match: "located" | "ambiguous" | "notFound";
+    match: "located" | "ambiguous" | "notYetFound";
     u?: number;
     v?: number;
     w?: number;

@@ -520,8 +520,8 @@ impl TaskBook {
         Ok(())
     }
 
-    /// Locate status for one item. `notFound` and `ambiguous` draw no control.
-    /// A shown phrase keeps `located` when a later resolve says `notFound`.
+    /// Locate status for one item. `notYetFound` and `ambiguous` draw no control.
+    /// A shown phrase keeps `located` when a later resolve says the phrase is not yet found.
     pub fn note_match(&mut self, task_id: &str, phrase_id: &str, matched: ItemMatch) -> Result<(), TaskError> {
         let shown = self.shown.as_ref().is_some_and(|mark| mark.phrase_id == phrase_id);
         let task = self.task_mut(task_id).ok_or(TaskError::NoSuchTask)?;
@@ -716,7 +716,7 @@ impl TaskBook {
         }
     }
 
-    /// The current phrase is on the glass. `notFound` and a match still pending become `located`.
+    /// The current phrase is on the glass. A phrase not yet found, and a match still pending, become `located`.
     /// `ambiguous` stays a miss.
     fn locate_shown(&mut self, phrase_id: &str) {
         if self.current_phrase().as_deref() != Some(phrase_id) {
@@ -1950,7 +1950,7 @@ fn match_wire(matched: ItemMatch) -> &'static str {
         ItemMatch::Pending => "pending",
         ItemMatch::Located => "located",
         ItemMatch::Ambiguous => "ambiguous",
-        ItemMatch::NotFound => "notFound",
+        ItemMatch::NotFound => "notYetFound",
     }
 }
 
@@ -2674,7 +2674,7 @@ mod tests {
         let phrase = opened.phrase.clone();
         let missed = resolve(&mut opened.book, &mut opened.ledger, &opened.id, &phrase, "notFound", "", Tier::T2Client, 1_000);
         assert_eq!(missed.status, "ok");
-        assert_eq!(book_query(&opened.book, &opened.id)["items"][0]["match"], "notFound");
+        assert_eq!(book_query(&opened.book, &opened.id)["items"][0]["match"], "notYetFound");
         assert_eq!(book_query(&opened.book, &opened.id)["index"], 0);
         opened.book.note_phrase_mark(&phrase, &mut opened.ledger, 2_000);
         assert_eq!(book_query(&opened.book, &opened.id)["items"][0]["match"], "located");
@@ -2989,7 +2989,7 @@ mod tests {
         let miss = resolve(&mut opened.book, &mut opened.ledger, &opened.id, &opened.phrase, "notFound", "", Tier::T1User, 4);
         assert_eq!(miss.status, "ok");
         assert_eq!(book_query(&opened.book, &opened.id)["index"], 1);
-        assert_eq!(book_query(&opened.book, &opened.id)["items"][0]["match"], "notFound");
+        assert_eq!(book_query(&opened.book, &opened.id)["items"][0]["match"], "notYetFound");
         assert_eq!(opened.ledger.events().iter().filter(|ev| ev.kind == LedgerKind::Located).count(), 1);
         assert_eq!(opened.ledger.events().iter().find(|ev| ev.kind == LedgerKind::Located).unwrap().by, Tier::T1User);
         assert!(opened.ledger.events().iter().all(|ev| ev.kind != LedgerKind::Viewed));
