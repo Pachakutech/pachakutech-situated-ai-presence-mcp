@@ -37,7 +37,7 @@ export type DriveIo = {
   locate?(item: TourItem): Promise<LocateHit>;
   highlight?(hit: LocateHit, item: TourItem): Promise<void>;
   speak?(text: string): Promise<void>;
-  waitSpeech?(): Promise<"done" | "lost" | "missed" | "handoff">;
+  waitSpeech?(): Promise<"done" | "lost" | "missed" | "handoff" | "left">;
   resolveItem?(body: {
     taskId: string;
     phraseId: string;
@@ -60,6 +60,8 @@ export type DriveIo = {
   glass?(task: TourView): Promise<GlassHit[]>;
   center?(hit: LocateHit): Promise<LocateHit | null>;
   releaseScroll?(): void;
+  holdPhrase?(): Promise<void>;
+  markShown?(phraseId: string): Promise<boolean>;
 };
 
 export function permittedMove(task: TourView): "webFind" | "pdfPage" | "miss" {
@@ -110,6 +112,8 @@ function tourDeps(io: DriveIo, taskId: string): TourDeps {
     glass: io.glass,
     center: io.center,
     releaseScroll: io.releaseScroll,
+    holdPhrase: io.holdPhrase,
+    markShown: io.markShown,
     async stopSpeech() {
       if (io.stopSpeech) await io.stopSpeech();
     },

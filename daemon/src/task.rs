@@ -197,9 +197,8 @@ struct Task {
     items: Vec<Item>,
     index: usize,
     entered_ms: Option<u64>,
+    /// The clip finished. A narrated citation does not leave because of this.
     narration_done: bool,
-    /// Wait clock for an item that has narration. Set once, at the first narrationDone.
-    hand_clock_ms: Option<u64>,
     last_move_ms: Option<u64>,
     /// Their scroll. Further moves are refused. The task stays active and the voice is not stopped.
     yield_scroll: bool,
@@ -361,7 +360,6 @@ impl TaskBook {
             index: 0,
             entered_ms: None,
             narration_done: false,
-            hand_clock_ms: None,
             last_move_ms: None,
             yield_scroll: false,
             hold_nudge: false,
@@ -523,9 +521,14 @@ impl TaskBook {
     }
 
     /// Locate status for one item. `notFound` and `ambiguous` draw no control.
+    /// A shown phrase keeps `located` when a later resolve says `notFound`.
     pub fn note_match(&mut self, task_id: &str, phrase_id: &str, matched: ItemMatch) -> Result<(), TaskError> {
+        let shown = self.shown.as_ref().is_some_and(|mark| mark.phrase_id == phrase_id);
         let task = self.task_mut(task_id).ok_or(TaskError::NoSuchTask)?;
         let item = task.items.iter_mut().find(|item| item.phrase_id == phrase_id).ok_or(TaskError::Schema)?;
+        if matched == ItemMatch::NotFound && item.matched == ItemMatch::Located && shown {
+            return Ok(());
+        }
         item.matched = matched;
         Ok(())
     }
@@ -622,6 +625,7 @@ impl TaskBook {
             return;
         }
         self.tints.insert(press.mark_id, color);
+        self.locate_shown(&press.phrase_id);
         self.consider(ledger, sample.ts_ms);
     }
 
@@ -698,6 +702,7 @@ impl TaskBook {
     pub fn note_phrase_mark(&mut self, phrase_id: &str, ledger: &mut Ledger, now_ms: u64) {
         self.remember_tint(phrase_id, ledger, phrase_id);
         if self.current_phrase().as_deref() == Some(phrase_id) {
+            self.locate_shown(phrase_id);
             self.note_shown_on(ledger, phrase_id, phrase_id, now_ms);
         }
     }
@@ -705,8 +710,25 @@ impl TaskBook {
     pub fn note_highlight(&mut self, presence_id: &str, ledger: &mut Ledger, now_ms: u64) {
         let phrase = self.phrase_for_mark(presence_id);
         if let Some(phrase) = phrase {
+            self.locate_shown(&phrase);
             self.note_shown_on(ledger, &phrase, presence_id, now_ms);
             self.remember_tint(presence_id, ledger, &phrase);
+        }
+    }
+
+    /// The current phrase is on the glass. `notFound` and a match still pending become `located`.
+    /// `ambiguous` stays a miss.
+    fn locate_shown(&mut self, phrase_id: &str) {
+        if self.current_phrase().as_deref() != Some(phrase_id) {
+            return;
+        }
+        let Some(task) = self.tasks.iter_mut().find(|task| live(task.state)) else { return };
+        let Some(item) = task.items.get_mut(task.index) else { return };
+        if item.phrase_id != phrase_id {
+            return;
+        }
+        if matches!(item.matched, ItemMatch::Pending | ItemMatch::NotFound) {
+            item.matched = ItemMatch::Located;
         }
     }
 
@@ -1054,19 +1076,17 @@ impl TaskBook {
                 item.phrase_id.clone(),
                 item.matched,
                 item.narration.clone(),
-                task.hand_clock_ms,
             )
         };
-        let (pace, mode, entered, narration_done, timeout_s, phrase, matched, narration, hand_clock) = snapshot;
+        let (pace, mode, entered, narration_done, timeout_s, phrase, matched, narration) = snapshot;
         let window = u64::from(timeout_s).saturating_mul(1000);
-        let timed_out = if pace == TaskPace::Wait && !narration.trim().is_empty() {
-            hand_clock.is_some_and(|at| now_ms >= at.saturating_add(window))
-        } else {
-            now_ms >= entered.saturating_add(window)
-        };
+        let narrated = !narration.trim().is_empty();
+        // A narrated citation stays until a hand. The item clock is for a list with no cue.
+        let timed_out = !narrated && now_ms >= entered.saturating_add(window);
         let miss = hides_control(matched);
         let advance = match pace {
             TaskPace::Wait => timed_out || (!miss && item_answered(ledger, mode, &phrase)),
+            TaskPace::Flow if narrated => !miss && item_answered(ledger, mode, &phrase),
             TaskPace::Flow => miss || (narration_done && self.dwell_floor_met(&phrase, entered, now_ms)),
         };
         if advance {
@@ -1130,7 +1150,6 @@ impl TaskBook {
         self.tasks[pos].state = TaskState::Done;
         self.tasks[pos].entered_ms = None;
         self.tasks[pos].narration_done = false;
-        self.tasks[pos].hand_clock_ms = None;
         self.tasks[pos].pass_only = false;
         self.clear_shown_for(task_id);
     }
@@ -1138,7 +1157,6 @@ impl TaskBook {
     fn enter_at(&mut self, pos: usize, ledger: &mut Ledger, now_ms: u64) {
         self.tasks[pos].entered_ms = Some(now_ms);
         self.tasks[pos].narration_done = false;
-        self.tasks[pos].hand_clock_ms = None;
         self.tasks[pos].yield_scroll = false;
         self.tasks[pos].hold_nudge = false;
         let task_id = self.tasks[pos].id.clone();
@@ -1188,10 +1206,6 @@ impl TaskBook {
             return Err(TaskError::TaskNotActive);
         }
         self.tasks[pos].narration_done = true;
-        let narrated = self.tasks[pos].items.get(self.tasks[pos].index).is_some_and(|item| !item.narration.trim().is_empty());
-        if narrated && self.tasks[pos].hand_clock_ms.is_none() {
-            self.tasks[pos].hand_clock_ms = Some(now_ms);
-        }
         self.stop_pending = false;
         if self.tasks[pos].state == TaskState::Active {
             self.consider(ledger, now_ms);
@@ -1668,7 +1682,6 @@ fn insert_task(
         index: 0,
         entered_ms: None,
         narration_done: false,
-        hand_clock_ms: None,
         last_move_ms: None,
         yield_scroll: false,
         hold_nudge: false,
@@ -2589,7 +2602,7 @@ mod tests {
     }
 
     #[test]
-    fn e6_narrated_wait_clock_starts_at_narration_done() {
+    fn e6_narrated_citation_stays_until_a_hand() {
         let mut opened = open(&task_line(
             "select",
             r#","itemTimeoutSeconds":1"#,
@@ -2599,10 +2612,13 @@ mod tests {
         opened.book.tick(&mut opened.ledger, 1000);
         assert_eq!(book_query(&opened.book, &opened.id)["index"], 0);
         assert_eq!(signal(&mut opened.book, &mut opened.ledger, &opened.id, "narrationDone", 2000).status, "ok");
-        opened.book.tick(&mut opened.ledger, 2999);
         assert_eq!(book_query(&opened.book, &opened.id)["index"], 0);
-        assert_eq!(signal(&mut opened.book, &mut opened.ledger, &opened.id, "narrationDone", 2500).status, "ok");
-        opened.book.tick(&mut opened.ledger, 3000);
+        assert_eq!(book_query(&opened.book, &opened.id)["state"], "active");
+        opened.book.tick(&mut opened.ledger, 60_000);
+        assert_eq!(book_query(&opened.book, &opened.id)["index"], 0);
+        assert_eq!(book_query(&opened.book, &opened.id)["state"], "active");
+        let ids = item_ids(&opened.book, &opened.id);
+        assert!(click(&mut opened.book, &mut opened.ledger, &ids[0], ClickTarget::Check, 60_100));
         assert_eq!(book_query(&opened.book, &opened.id)["index"], 1);
         assert_eq!(book_query(&opened.book, &opened.id)["state"], "active");
 
@@ -2614,11 +2630,126 @@ mod tests {
         plain.book.tick(&mut plain.ledger, 1000);
         assert_eq!(book_query(&plain.book, &plain.id)["index"], 1);
 
-        let mut answered = open(&task_line("select", "", r#"{"query":"one","narration":"why this sentence"},{"query":"two"}"#));
-        signal(&mut answered.book, &mut answered.ledger, &answered.id, "begin", 0);
-        let ids = item_ids(&answered.book, &answered.id);
-        assert!(click(&mut answered.book, &mut answered.ledger, &ids[0], ClickTarget::Check, 50));
-        assert_eq!(book_query(&answered.book, &answered.id)["index"], 1);
+        let mut flowing = open(&task_line(
+            "explain",
+            "",
+            r#"{"query":"one","narration":"why this sentence"},{"query":"two","narration":"the next line"}"#,
+        ));
+        signal(&mut flowing.book, &mut flowing.ledger, &flowing.id, "begin", 0);
+        flowing.book.note_shown(&mut flowing.ledger, &flowing.phrase, 0);
+        signal(&mut flowing.book, &mut flowing.ledger, &flowing.id, "narrationDone", 1_200);
+        flowing.book.tick(&mut flowing.ledger, 5_000);
+        assert_eq!(book_query(&flowing.book, &flowing.id)["index"], 0);
+        assert_eq!(book_query(&flowing.book, &flowing.id)["state"], "active");
+        flowing.book.note_highlight("p", &mut flowing.ledger, 5_100);
+        flowing.book.apply_tint_samples(
+            &mut flowing.ledger,
+            vec![
+                TintSample {
+                    down: true,
+                    button: BTN_LEFT,
+                    ts_ms: 5_200,
+                    mark: Some(TintMark { id: "p".into(), generation: 1 }),
+                },
+                TintSample {
+                    down: false,
+                    button: BTN_LEFT,
+                    ts_ms: 5_300,
+                    mark: Some(TintMark { id: "p".into(), generation: 1 }),
+                },
+            ],
+        );
+        assert_eq!(book_query(&flowing.book, &flowing.id)["index"], 1);
+        assert_eq!(book_query(&flowing.book, &flowing.id)["state"], "active");
+    }
+
+    #[test]
+    fn a_shown_mark_clears_not_found_and_the_hand_leaves() {
+        let mut opened = open(&task_line(
+            "select",
+            "",
+            r#"{"query":"allyl","narration":"why this sentence"},{"query":"inductive","narration":"the next line"}"#,
+        ));
+        assert_eq!(signal(&mut opened.book, &mut opened.ledger, &opened.id, "begin", 0).status, "ok");
+        let phrase = opened.phrase.clone();
+        let missed = resolve(&mut opened.book, &mut opened.ledger, &opened.id, &phrase, "notFound", "", Tier::T2Client, 1_000);
+        assert_eq!(missed.status, "ok");
+        assert_eq!(book_query(&opened.book, &opened.id)["items"][0]["match"], "notFound");
+        assert_eq!(book_query(&opened.book, &opened.id)["index"], 0);
+        opened.book.note_phrase_mark(&phrase, &mut opened.ledger, 2_000);
+        assert_eq!(book_query(&opened.book, &opened.id)["items"][0]["match"], "located");
+        assert_eq!(book_query(&opened.book, &opened.id)["index"], 0);
+        let again = resolve(&mut opened.book, &mut opened.ledger, &opened.id, &phrase, "notFound", "", Tier::T2Client, 2_500);
+        assert_eq!(again.status, "ok");
+        assert_eq!(book_query(&opened.book, &opened.id)["items"][0]["match"], "located");
+        opened.book.apply_tint_samples(
+            &mut opened.ledger,
+            vec![
+                TintSample {
+                    down: true,
+                    button: BTN_LEFT,
+                    ts_ms: 3_000,
+                    mark: Some(TintMark { id: phrase.clone(), generation: 1 }),
+                },
+                TintSample {
+                    down: false,
+                    button: BTN_LEFT,
+                    ts_ms: 3_200,
+                    mark: Some(TintMark { id: phrase, generation: 1 }),
+                },
+            ],
+        );
+        assert_eq!(book_query(&opened.book, &opened.id)["index"], 1);
+        assert_eq!(book_query(&opened.book, &opened.id)["state"], "active");
+
+        let mut pending = open(&task_line("select", "", r#"{"query":"one","narration":"why"},{"query":"two","narration":"next"}"#));
+        signal(&mut pending.book, &mut pending.ledger, &pending.id, "begin", 0);
+        pending.book.note_highlight("p", &mut pending.ledger, 100);
+        assert_eq!(book_query(&pending.book, &pending.id)["items"][0]["match"], "located");
+        let stuck = resolve(
+            &mut pending.book,
+            &mut pending.ledger,
+            &pending.id,
+            &pending.phrase,
+            "notFound",
+            "",
+            Tier::T2Client,
+            200,
+        );
+        assert_eq!(stuck.status, "ok");
+        assert_eq!(book_query(&pending.book, &pending.id)["items"][0]["match"], "located");
+        assert_eq!(book_query(&pending.book, &pending.id)["index"], 0);
+
+        let mut ambiguous = open(&task_line(
+            "select",
+            "",
+            r#"{"query":"one","narration":"why"},{"query":"two","narration":"next"}"#,
+        ));
+        signal(&mut ambiguous.book, &mut ambiguous.ledger, &ambiguous.id, "begin", 0);
+        resolve(&mut ambiguous.book, &mut ambiguous.ledger, &ambiguous.id, &ambiguous.phrase, "ambiguous", "", Tier::T2Client, 100);
+        ambiguous.book.note_phrase_mark(&ambiguous.phrase, &mut ambiguous.ledger, 200);
+        assert_eq!(book_query(&ambiguous.book, &ambiguous.id)["items"][0]["match"], "ambiguous");
+        let amb_phrase = ambiguous.phrase.clone();
+        ambiguous.book.apply_tint_samples(
+            &mut ambiguous.ledger,
+            vec![
+                TintSample {
+                    down: true,
+                    button: BTN_LEFT,
+                    ts_ms: 300,
+                    mark: Some(TintMark { id: amb_phrase.clone(), generation: 1 }),
+                },
+                TintSample {
+                    down: false,
+                    button: BTN_LEFT,
+                    ts_ms: 900,
+                    mark: Some(TintMark { id: amb_phrase, generation: 1 }),
+                },
+            ],
+        );
+        assert_eq!(book_query(&ambiguous.book, &ambiguous.id)["items"][0]["match"], "ambiguous");
+        assert_eq!(book_query(&ambiguous.book, &ambiguous.id)["index"], 0);
+        assert_eq!(book_query(&ambiguous.book, &ambiguous.id)["state"], "active");
     }
 
     #[test]
