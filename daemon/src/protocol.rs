@@ -26,6 +26,9 @@ pub enum Proposal {
         /// `durationSeconds` remains the safety cap if speech never finishes.
         #[serde(rename = "untilSpeech", default)]
         until_speech: bool,
+        /// The tint stays until conceal. A timer and the end of speech do not take it down.
+        #[serde(rename = "untilConceal", default)]
+        until_conceal: bool,
         /// Tour locus. The mark is keyed by this id. Absent keeps one box per presence.
         #[serde(default, rename = "phraseId")]
         phrase_id: Option<String>,

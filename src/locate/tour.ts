@@ -44,7 +44,7 @@ export type TourDeps = {
   locate(item: TourItem): Promise<LocateHit>;
   highlight(hit: LocateHit, item: TourItem): Promise<void>;
   speak(text: string): Promise<void>;
-  waitSpeech(): Promise<"done" | "lost" | "missed" | "handoff">;
+  waitSpeech(): Promise<"done" | "lost" | "missed" | "handoff" | "left">;
   resolveItem(body: {
     taskId: string;
     phraseId: string;
@@ -64,16 +64,20 @@ export type TourDeps = {
   preempted(): Promise<boolean>;
   now(): number;
   sleep(ms: number): Promise<void>;
-  /** Drops the mark before a move we own. */
+  /** Not used to travel. The mark stays until the phrase leaves or the page is replaced. */
   conceal?(): Promise<void>;
   /** True when the pointer is in the target window during this hop. One nudge is then withheld. */
   pointerHold?(): Promise<boolean>;
-  /** Latest screen-text reading. Absent marks are the ones to drop. */
+  /** Latest screen-text reading. A miss leaves a mark already placed. */
   glass?(task: TourView): Promise<GlassHit[]>;
   /** One centering nudge, with the mark already shifted by that delta. */
   center?(hit: LocateHit): Promise<LocateHit | null>;
   /** Their scroll is over and the next hop is ours. */
   releaseScroll?(): void;
+  /** Blocks on the phrase just shown. Returns when the daemon leaves it. */
+  holdPhrase?(): Promise<void>;
+  /** True when this phrase already has a mark. A miss then stays located. */
+  markShown?(phraseId: string): Promise<boolean>;
   /** False until a move is permitted. A scrolled item is then a miss unless it is already on the glass. */
   movesEnabled: boolean;
   alreadyOnGlass?(item: TourItem): Promise<boolean>;
@@ -87,19 +91,30 @@ const STEP_CAP = ITEM_CAP * 2;
 async function sayHandoff(deps: TourDeps, task: TourView, said: number): Promise<number> {
   if (!task.say || !task.saySeq || task.saySeq === said) return said;
   await deps.speak(task.say);
-  if (deps.conceal) await deps.conceal();
   return task.saySeq;
 }
 
+/** A miss with no mark. A mark already up stays located. A box we tint is resolved by the caller. */
+async function reportMiss(deps: TourDeps, taskId: string, item: TourItem, placed: string | null): Promise<void> {
+  const up = placed === item.phraseId || (deps.markShown ? await deps.markShown(item.phraseId) : false);
+  if (up && item.match !== "ambiguous") {
+    await deps.resolveItem({ taskId, phraseId: item.phraseId, match: "located" });
+    return;
+  }
+  if (up) return;
+  await deps.resolveItem({ taskId, phraseId: item.phraseId, match: "notFound" });
+}
+
 /**
- * Begin the task, then locate, mark, speak, and resolve each item the daemon
- * still calls current. Their scroll does not end the walk. Returns when the
- * task is no longer active.
+ * Begin the task, then locate, mark, and speak each item the daemon still
+ * calls current. The find finishes before the mark. A narrated phrase stays
+ * until a hand. Their scroll does not start the next cue.
  */
 export async function runTour(taskId: string, deps: TourDeps): Promise<void> {
   await deps.tourSignal({ taskId, signal: "begin" });
   let yielded = false;
   let said = 0;
+  let placed: string | null = null;
   for (let step = 0; step < STEP_CAP; step++) {
     if (!yielded && (await deps.preempted())) {
       yielded = true;
@@ -111,6 +126,11 @@ export async function runTour(taskId: string, deps: TourDeps): Promise<void> {
     said = await sayHandoff(deps, task, said);
     const item = task.items[task.index];
     if (!item) return;
+    if (placed === item.phraseId) {
+      if (!deps.holdPhrase) return;
+      await deps.holdPhrase();
+      continue;
+    }
     if (task.passOnly) {
       const marks = deps.glass ? await deps.glass(task) : [];
       const mark = marks.find((row) => row.phraseId === item.phraseId);
@@ -124,27 +144,31 @@ export async function runTour(taskId: string, deps: TourDeps): Promise<void> {
         await deps.speak(line);
         const waited = await deps.waitSpeech();
         if (waited === "lost") return;
-        if (waited === "handoff") {
+        if (waited === "handoff" || waited === "left") {
           if (deps.releaseScroll) deps.releaseScroll();
           continue;
         }
       }
       await deps.tourSignal({ taskId, signal: "narrationDone" });
+      placed = item.phraseId;
       continue;
     }
-    if (deps.conceal) await deps.conceal();
     if (deps.pointerHold && (await deps.pointerHold())) {
       await deps.tourSignal({ taskId, signal: "preempt", reason: "pointer" });
     }
     const onGlass = deps.alreadyOnGlass ? await deps.alreadyOnGlass(item) : false;
     const permitted = item.scroll && deps.movesEnabled && deps.requestMove ? await deps.requestMove(item) : null;
-    if (item.scroll && !onGlass && (!deps.movesEnabled || !deps.requestMove || !permitted || permitted.permitted === "miss" || permitted.permitted === "nudge")) {
-      await deps.resolveItem({ taskId, phraseId: item.phraseId, match: "notFound" });
+    const withheld =
+      item.scroll &&
+      !onGlass &&
+      (!deps.movesEnabled || !deps.requestMove || !permitted || permitted.permitted === "miss" || permitted.permitted === "nudge");
+    if (withheld) {
+      await reportMiss(deps, taskId, item, placed);
     } else {
       const found = await deps.locate(item);
       const hit = found.ok && deps.center ? (await deps.center(found)) ?? found : found;
       if (!hit.ok) {
-        await deps.resolveItem({ taskId, phraseId: item.phraseId, match: "notFound" });
+        await reportMiss(deps, taskId, item, placed);
       } else {
         await deps.highlight(hit, item);
         await deps.resolveItem({
@@ -161,7 +185,7 @@ export async function runTour(taskId: string, deps: TourDeps): Promise<void> {
           await deps.speak(line);
           const waited = await deps.waitSpeech();
           if (waited === "lost") return;
-          if (waited === "handoff") {
+          if (waited === "handoff" || waited === "left") {
             if (deps.releaseScroll) deps.releaseScroll();
             continue;
           }
@@ -169,5 +193,6 @@ export async function runTour(taskId: string, deps: TourDeps): Promise<void> {
       }
     }
     await deps.tourSignal({ taskId, signal: "narrationDone" });
+    placed = item.phraseId;
   }
 }

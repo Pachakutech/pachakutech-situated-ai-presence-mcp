@@ -343,6 +343,10 @@ impl Registry {
         self.interests.hold_for_speech(presence_id);
     }
 
+    pub fn hold_interest_until_conceal(&mut self, id: &str) {
+        self.interests.hold_until_conceal(id);
+    }
+
     pub fn retire_interest(&mut self, id: &str) {
         self.interests.retire(id);
     }

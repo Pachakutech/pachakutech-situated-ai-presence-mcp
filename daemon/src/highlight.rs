@@ -21,6 +21,8 @@ struct Interest {
     shown_until: Instant,
     /// The mark stays up for the utterance, then the speech-finished path conceals it.
     until_speech: bool,
+    /// Stays up until conceal. A timer and the end of speech do not take it down.
+    held: bool,
 }
 
 pub struct InterestBook {
@@ -42,8 +44,9 @@ impl InterestBook {
             existing.box_ = box_;
             existing.shown_until = shown_until;
             existing.until_speech = false;
+            existing.held = false;
         } else {
-            self.items.push(Interest { id: id.to_string(), box_, shown_until, until_speech: false });
+            self.items.push(Interest { id: id.to_string(), box_, shown_until, until_speech: false, held: false });
         }
         Ok(box_)
     }
@@ -53,6 +56,15 @@ impl InterestBook {
     pub fn hold_for_speech(&mut self, id: &str) {
         if let Some(existing) = self.items.iter_mut().find(|it| it.id == id) {
             existing.until_speech = true;
+            existing.held = false;
+        }
+    }
+
+    /// The mark stays until it is retired. Speech ending and the lease do not hide it.
+    pub fn hold_until_conceal(&mut self, id: &str) {
+        if let Some(existing) = self.items.iter_mut().find(|it| it.id == id) {
+            existing.held = true;
+            existing.until_speech = false;
         }
     }
 
@@ -80,7 +92,7 @@ impl InterestBook {
     pub fn visible(&self, now: Instant) -> Vec<(String, UvBox)> {
         self.items
             .iter()
-            .filter(|it| it.shown_until > now)
+            .filter(|it| it.held || it.shown_until > now)
             .take(MAX_MARKS)
             .map(|it| (it.id.clone(), it.box_))
             .collect()
@@ -240,6 +252,22 @@ mod tests {
         book.declare("p-a", box_at(0.5, 0.5, 0.9, 0.9), 5, t0).unwrap();
         assert_eq!(book.get("p-a").unwrap().u, 0.5);
         assert!(book.get("p-a").unwrap().w <= 0.5);
+    }
+
+    #[test]
+    fn a_held_mark_stays_past_the_lease_until_it_is_retired() {
+        let mut book = InterestBook::new();
+        let t0 = Instant::now();
+        book.declare("p-a", box_at(0.1, 0.2, 0.3, 0.4), 1, t0).unwrap();
+        book.hold_until_conceal("p-a");
+        assert!(!book.conceal_if_speech_held("p-a", t0));
+        assert_eq!(book.visible(t0 + Duration::from_secs(10_000)).len(), 1);
+        book.declare("p-a", box_at(0.2, 0.2, 0.2, 0.2), 1, t0).unwrap();
+        book.hold_until_conceal("p-a");
+        assert_eq!(book.get("p-a").unwrap().u, 0.2);
+        assert_eq!(book.visible(t0 + Duration::from_secs(10_000)).len(), 1);
+        book.retire("p-a");
+        assert!(book.visible(t0).is_empty());
     }
 
     #[test]

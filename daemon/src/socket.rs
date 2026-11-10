@@ -547,7 +547,7 @@ fn dispatch(
                 ProposalResult::ok(&proposal_id, Some(json!({ "concealed": concealed })))
             }
         }
-        Proposal::HighlightRegion { presence_id, description, u, v, w, h, duration_seconds, until_speech, phrase_id, .. } => {
+        Proposal::HighlightRegion { presence_id, description, u, v, w, h, duration_seconds, until_speech, until_conceal, phrase_id, .. } => {
             match reg.declare_interest(
                 &presence_id,
                 phrase_id.as_deref(),
@@ -558,7 +558,11 @@ fn dispatch(
             ) {
                 Ok((box_, secs)) => {
                     let key = phrase_id.as_deref().map(str::trim).filter(|id| !id.is_empty()).unwrap_or(presence_id.as_str());
-                    if until_speech { reg.hold_interest_for_speech(key); }
+                    if until_conceal {
+                        reg.hold_interest_until_conceal(key);
+                    } else if until_speech {
+                        reg.hold_interest_for_speech(key);
+                    }
                     reg.note_task_highlight(&presence_id, phrase_id.as_deref(), now_ms());
                     ProposalResult::ok(
                         &proposal_id,

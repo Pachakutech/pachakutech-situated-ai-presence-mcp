@@ -66,17 +66,21 @@ test("a two-item task walks both items without a page move", async () => {
   assert.equal(calls.preempt, 0);
 });
 
-test("a taken scroll is one preempt and the voice continues", async () => {
+test("a taken scroll is one preempt and does not start the next cue", async () => {
   const items: TourItem[] = [
     { phraseId: "ph-1", query: "first line", narration: "First.", scroll: false },
     { phraseId: "ph-2", query: "second line", narration: "Second.", scroll: false },
   ];
   const { calls, deps } = scripted(items, false);
   deps.preempted = async () => true;
+  deps.tourSignal = async (body) => {
+    if (body.signal === "begin") calls.begin += 1;
+    if (body.signal === "preempt") calls.preempt += 1;
+  };
   await runTour("tk-1", deps);
   assert.equal(calls.preempt, 1);
-  assert.equal(calls.speak, 2);
-  assert.equal(calls.locate, 2);
+  assert.equal(calls.speak, 1);
+  assert.equal(calls.locate, 1);
 });
 
 test("a scrolled item is a miss until a move is permitted", async () => {
@@ -86,6 +90,35 @@ test("a scrolled item is a miss until a move is permitted", async () => {
   assert.equal(calls.locate, 0);
   assert.equal(calls.highlight, 0);
   assert.deepEqual(calls.resolve, ["notFound"]);
+});
+
+test("a mark already up stays located when the find misses", async () => {
+  const items: TourItem[] = [{ phraseId: "ph-1", query: "below", narration: "Below.", scroll: true }];
+  const withheld = scripted(items, true, false);
+  withheld.deps.requestMove = async () => ({ permitted: "miss" });
+  withheld.deps.markShown = async () => true;
+  await runTour("tk-1", withheld.deps);
+  assert.equal(withheld.calls.locate, 0);
+  assert.equal(withheld.calls.highlight, 0);
+  assert.deepEqual(withheld.calls.resolve, ["located"]);
+
+  const missed = scripted(items, true, false);
+  missed.deps.requestMove = async () => ({ permitted: "webFind" });
+  missed.deps.markShown = async () => true;
+  missed.deps.locate = async () => {
+    missed.calls.locate += 1;
+    return { ok: false };
+  };
+  await runTour("tk-1", missed.deps);
+  assert.equal(missed.calls.locate, 1);
+  assert.equal(missed.calls.highlight, 0);
+  assert.deepEqual(missed.calls.resolve, ["located"]);
+
+  const tinted = scripted(items, true, false);
+  tinted.deps.requestMove = async () => ({ permitted: "webFind" });
+  await runTour("tk-1", tinted.deps);
+  assert.equal(tinted.calls.highlight, 1);
+  assert.deepEqual(tinted.calls.resolve, ["located"]);
 });
 
 test("a permitted find is located once, and a miss is not nudged", async () => {

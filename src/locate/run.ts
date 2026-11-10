@@ -428,6 +428,14 @@ async function findPdfPage(path: string, query: string): Promise<number | null> 
   return pageContaining(result.stdout, query);
 }
 
+/** Document creation time. A new number is a refresh or a navigation. */
+export async function readPageGeneration(): Promise<number | null> {
+  ensureCdpPort();
+  if (!cdpPort) return null;
+  const reply = await cdpCall(`performance.timeOrigin`);
+  return reply.ok && typeof reply.value === "number" ? reply.value : null;
+}
+
 export async function readScrollTop(): Promise<number | null> {
   ensureCdpPort();
   if (!cdpPort) return null;

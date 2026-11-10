@@ -22,6 +22,9 @@ Status: cleaned 3 November 2026. The 31 October record described code through C7
 | Sidecar process | `sidecar.sock` is bound. Nothing connects. | B1. |
 | Retrieval brief | Working memory is `B1b_retrieval.md`. The hole is the empty shortlist. No method is chosen. | B1b, when a ticket picks the method. |
 | Pause-time highlight | The brief is `scroll_highlight.md`. The driver does not do it yet. | C11b, when that file is implemented. |
+| Narrated 20 second wait | `tour_hold.md` removes that clock and the highlight drops that are not the phrase leaving the glass. | When that ticket is implemented. |
+| `notFound` under a mark | `found_when_shown.md` clears that flag when the find box is tinted, when the highlight is up, and when a tap lands on it. | When that ticket is implemented. |
+| One glass reading | `one_glass_read.md` keeps find and the PDF page turn, and takes the box from the desktop sampler after that motion settles. The locator's window Tesseract and the crop leave the tour. | When that ticket is implemented. |
 | Terminal watch of the register | The file moves. The command is still unnamed. | The ticket that writes the command. |
 | `GLB lacks viseme_aa` | One failing daemon test, left in place. | Not this list. |
 | Section 4a | Recorded, not adopted. The default judge keeps every shortlisted span. | A ticket that adopts 4a. |

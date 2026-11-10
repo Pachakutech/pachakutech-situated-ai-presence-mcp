@@ -6,9 +6,10 @@ export {
   EDGE_BAND,
   handColor,
   glassMarks,
+  keepHeld,
   followScroll,
   inOuterBand,
   centerWithMark,
   linesFromColumns,
 } from "./core.js";
-export type { HandName, GlassLocus, Uv, GlassMark } from "./core.js";
+export type { HandName, GlassLocus, Uv, GlassMark, HeldMark } from "./core.js";

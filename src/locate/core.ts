@@ -512,7 +512,7 @@ function placeGlass(hits: GlassMark[], locus: GlassLocus, lines: Line[], screen:
   });
 }
 
-/** Current locus first, then other skips on the glass, then one decided locus. A miss is absent. */
+/** Current locus first, then other skips on the glass, then one decided locus. A miss is absent from this list. */
 export function glassMarks(loci: GlassLocus[], lines: Line[], screen: { w: number; h: number }): GlassMark[] {
   const hits: GlassMark[] = [];
   const current = loci.find((locus) => locus.current);
@@ -528,6 +528,23 @@ export function glassMarks(loci: GlassLocus[], lines: Line[], screen: { w: numbe
     if (hits.length > before) break;
   }
   return hits;
+}
+
+export type HeldMark = { phraseId: string; box: Uv };
+
+/** A reading that sees the phrase moves its mark. A miss leaves the placed box. */
+export function keepHeld(held: HeldMark[], seen: (Uv & { phraseId: string })[]): HeldMark[] {
+  const next = held.map((mark) => {
+    const hit = seen.find((row) => row.phraseId === mark.phraseId);
+    if (!hit) return mark;
+    return { phraseId: mark.phraseId, box: { u: hit.u, v: hit.v, w: hit.w, h: hit.h } };
+  });
+  for (const hit of seen) {
+    if (next.length >= MARK_CAP) break;
+    if (next.some((mark) => mark.phraseId === hit.phraseId)) continue;
+    next.push({ phraseId: hit.phraseId, box: { u: hit.u, v: hit.v, w: hit.w, h: hit.h } });
+  }
+  return next;
 }
 
 /** Positive dy scrolls the document down, so the ink moves up. A zero delta leaves the mark. */

@@ -14,7 +14,7 @@ The daemon already runs that reading. The `screen-text` thread owns one screenco
 
 Locate's own grim of a window, used while placing a box during a move, stays that move's measure. The idle recovery pass does not copy it. Section tints stay. The cost of sampling the window faster than this pass is the thing this brief refuses.
 
-A pass looks for tour loci whose opening words are in that message, one `findRun` each. A hit paints or moves that locus's mark to the ink. A miss, for a mark we were holding, drops the mark. Up to three marks, the cap the overlay already has. The locus the tour is on takes the first. Visible skips take the next. A decided locus takes a free mark after those.
+A pass looks for tour loci whose opening words are in that message, one `findRun` each. A hit paints or moves that locus's mark to the ink. A miss leaves a mark we already placed. `tour_hold.md` is the later order on that point: a failed reading is not a reason to take the highlight down. Up to three marks, the cap the overlay already has. The locus the tour is on takes the first. Visible skips take the next. A decided locus takes a free mark after those.
 
 The color is the register, read from `queryProject`. No hand row is yellow. The latest accept is green. The latest deny is red. The pass does not write a hand row. T0 remains the only writer of those rows.
 
@@ -48,7 +48,7 @@ A client may ask the tour to continue over loci that still read skip, in tour or
 
 ## Stays as it is
 
-Yellow, green, and red, and the three register names. A hand accept adds no keep. Keyboard interactivity on the mark stays `None`. The phrase id of a tour locus stays the locus id. The design sentence in `local_multimodal_reflex.md` stays. One mouth. Narration still cuts at 300 characters. The 20 second hand clock for a narrated item still starts at `narrationDone`. This brief does not implement the driver, the pass, or the listener.
+Yellow, green, and red, and the three register names. A hand accept adds no keep. Keyboard interactivity on the mark stays `None`. The phrase id of a tour locus stays the locus id. The design sentence in `local_multimodal_reflex.md` stays. One mouth. Narration still cuts at 300 characters. The 20 second hand clock is removed by `tour_hold.md`. This brief does not implement the driver, the pass, or the listener.
 
 ## Read with this
 

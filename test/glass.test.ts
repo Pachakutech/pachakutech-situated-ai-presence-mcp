@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { centerWithMark, followScroll, glassMarks, linesFromColumns, type GlassLocus } from "../src/locate/core.ts";
+import { centerWithMark, followScroll, glassMarks, keepHeld, linesFromColumns, type GlassLocus } from "../src/locate/core.ts";
 import { holdNudge, nudgeHeld, resetScrollHold, scrollDrifted, scrollTaken, takeScroll } from "../src/locate/scrollHold.ts";
 import type { Line } from "../src/locate/core.ts";
 
@@ -49,6 +49,16 @@ test("a held locus that has left the message is absent", () => {
     screen,
   );
   assert.deepEqual(marks, []);
+});
+
+test("a miss leaves a placed mark and a hit moves it", () => {
+  const placed = { phraseId: "lc-a", box: { u: 0.2, v: 0.3, w: 0.1, h: 0.04 } };
+  const missed = keepHeld([placed], []);
+  assert.deepEqual(missed, [placed]);
+  const moved = keepHeld([placed], [{ phraseId: "lc-a", color: "yellow", u: 0.4, v: 0.5, w: 0.1, h: 0.04 }]);
+  assert.equal(moved[0].box.v, 0.5);
+  const added = keepHeld([placed], [{ phraseId: "lc-b", color: "green", u: 0.1, v: 0.2, w: 0.1, h: 0.04 }]);
+  assert.deepEqual(added.map((mark) => mark.phraseId), ["lc-a", "lc-b"]);
 });
 
 test("a scroll into the outer band drops the mark and a centering nudge moves it with the page", () => {

@@ -35,7 +35,7 @@ One optional `narration` on each citation. `showCitations` passes it through `cr
 
 The skill sentence that belongs with that field: with each quote, one or two short sentences on why it bears on the claim. It stays out of the skill until the field accepts it. A line the tool drops is not an instruction the model can follow.
 
-`select` and `wait` stay the register. When the item has narration, the 20 second hand clock starts at `narrationDone`, so the utterance and the tap share the stop. Locate on this run used the whole 20 seconds before a hand could land. Flow already waits for the signal. The clock change is what keeps a narrated review from walking off the sentence.
+`select` and `wait` stay the register. The 20 second hand clock described in this paragraph is removed by `tour_hold.md`. That ticket is the later order: the highlight stays until the phrase scrolls off or the page is replaced, and the tour leaves the phrase on a green, a red, or the person taking the scroll.
 
 No new gesture. No new socket kind. The driver already calls `highlightRegion` and then the speech for that presence.
 
