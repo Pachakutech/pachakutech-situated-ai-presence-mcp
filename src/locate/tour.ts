@@ -48,7 +48,7 @@ export type TourDeps = {
   resolveItem(body: {
     taskId: string;
     phraseId: string;
-    match: "located" | "ambiguous" | "notFound";
+    match: "located" | "ambiguous" | "notYetFound";
     u?: number;
     v?: number;
     w?: number;
@@ -94,7 +94,7 @@ async function sayHandoff(deps: TourDeps, task: TourView, said: number): Promise
   return task.saySeq;
 }
 
-/** A miss with no mark. A mark already up stays located. A box we tint is resolved by the caller. */
+/** A miss with no mark is not yet found. A mark already up stays located. A box we tint is resolved by the caller. */
 async function reportMiss(deps: TourDeps, taskId: string, item: TourItem, placed: string | null): Promise<void> {
   const up = placed === item.phraseId || (deps.markShown ? await deps.markShown(item.phraseId) : false);
   if (up && item.match !== "ambiguous") {
@@ -102,7 +102,7 @@ async function reportMiss(deps: TourDeps, taskId: string, item: TourItem, placed
     return;
   }
   if (up) return;
-  await deps.resolveItem({ taskId, phraseId: item.phraseId, match: "notFound" });
+  await deps.resolveItem({ taskId, phraseId: item.phraseId, match: "notYetFound" });
 }
 
 /**

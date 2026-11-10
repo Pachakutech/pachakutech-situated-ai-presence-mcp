@@ -1,5 +1,5 @@
-// Web adapter. The viewer's find moves the page. This file photographs the
-// line, nudges it into the band, and checks the crop before anyone may mark it.
+// Web adapter. The viewer's find moves the page. placeWeb stops once that
+// scroll has settled. locateWeb then photographs the line.
 
 import { nudgeHeld, scrollTaken } from "./scrollHold.js";
 import {
@@ -137,8 +137,14 @@ export function chooseWindow(clients: Client[], opts: WebOpts): Client | null {
   return matches.sort((a, b) => b.w * b.h - a.w * a.h)[0];
 }
 
-export async function locateWeb(opts: WebOpts, deps: Deps): Promise<LocateResult> {
-  const deadline = deps.now() + opts.timeoutMs;
+export type WebPlacement = { ok: true; nudgePx: number; placedRect: Box | null };
+
+/** The browser's find, then its edge scroll. The caller reads the glass after this returns. */
+export async function placeWeb(
+  opts: WebOpts,
+  deps: Deps,
+  deadline = deps.now() + opts.timeoutMs,
+): Promise<WebPlacement | LocateErr> {
   if (!opts.noOpen) {
     if (!opts.uri) return fail("uri_required", "Pass --uri, or --no-open to measure a window that is already up.");
     try {
@@ -150,15 +156,8 @@ export async function locateWeb(opts: WebOpts, deps: Deps): Promise<LocateResult
     await deps.sleep(WINDOW_SETTLE_MS);
   }
 
-  let state: SeekState = { nudgePx: 0 };
-  let lastFp: string | null = null;
+  let nudgePx = 0;
   const started = deps.now();
-  let geomRetries = 0;
-  let viewer: "pending" | "placed" = "pending";
-  let endUsed = 0;
-  let retried = false;
-  let placedRect: Box | null = null;
-  const passage = /\s+\.\.\.\s+/.test(opts.query);
   const opening = openingPhrase(opts.query);
 
   const atScrollEnd = async (address: string, dy: number): Promise<boolean> => {
@@ -172,7 +171,7 @@ export async function locateWeb(opts: WebOpts, deps: Deps): Promise<LocateResult
   // edge is moved from that rectangle, and only while the scroller has room.
   const edgeScroll = async (win: Client, measured: Box): Promise<"scrolled" | "held" | "focus"> => {
     if (measured.w < 8 || measured.h < 8) return "held";
-    if (state.nudgePx >= NUDGE_PX * END_NUDGE_MAX) return "held";
+    if (nudgePx >= NUDGE_PX * END_NUDGE_MAX) return "held";
     const band = bandOf(measured, win.h, opts.pad);
     const dy = band === "low" ? NUDGE_PX : band === "high" ? -NUDGE_PX : 0;
     if (dy === 0) return "held";
@@ -183,10 +182,82 @@ export async function locateWeb(opts: WebOpts, deps: Deps): Promise<LocateResult
     const moved = await ownedNudge(deps, win.address, dy);
     if (moved === "focus") return "focus";
     if (moved === "held") return "held";
-    state = { nudgePx: state.nudgePx + NUDGE_PX };
+    nudgePx += NUDGE_PX;
     // The find rectangle stays as measured. A shifted y reads as the center band.
     deps.log(`locate: scroll ${dy}`);
     return "scrolled";
+  };
+
+  while (deps.now() < deadline) {
+    const clients = await deps.clients();
+    const win = chooseWindow(clients, opts);
+    if (!win) {
+      deps.log("locate: waiting for a browser window");
+      await deps.sleep(WINDOW_SETTLE_MS);
+      continue;
+    }
+    if (!deps.findInPage) {
+      return fail("quote_not_found", "The browser's find is not available, so the page was left where it was.");
+    }
+    const hit = await deps.findInPage(opening);
+    if (!hit) {
+      if (deps.now() - started < PAINT_WAIT_MS) {
+        deps.log("locate: browser find is not answering yet");
+        await deps.sleep(WINDOW_SETTLE_MS);
+        continue;
+      }
+      return fail("quote_not_found", "The browser's find is not available, so the page was left where it was.");
+    }
+    if (!hit.found) {
+      // A document that is still loading answers false. An open page does not get that wait.
+      if (!opts.noOpen && deps.now() - started < PAINT_WAIT_MS) {
+        deps.log("locate: browser find did not see the phrase yet");
+        await deps.sleep(WINDOW_SETTLE_MS);
+        continue;
+      }
+      return fail("quote_not_found", "The browser's find did not see that phrase.");
+    }
+    let placedRect: Box | null = null;
+    if (hit.rect && hit.rect.w >= 8 && hit.rect.h >= 8) {
+      placedRect = { x: hit.rect.x, y: hit.rect.y, w: hit.rect.w, h: hit.rect.h };
+      const band = bandOf(placedRect, win.h, opts.pad);
+      deps.log(
+        `locate: viewer find ${band} ${Math.round(hit.rect.w)}x${Math.round(hit.rect.h)} at ${Math.round(hit.rect.x)},${Math.round(hit.rect.y)}`,
+      );
+      const step = await edgeScroll(win, placedRect);
+      if (step === "focus") {
+        return fail("focus_failed", "Could not focus the browser, so the page was not scrolled.");
+      }
+    } else {
+      deps.log("locate: viewer find");
+    }
+    await deps.sleep(WINDOW_SETTLE_MS);
+    return { ok: true, nudgePx, placedRect };
+  }
+
+  return fail("timeout", `No settled box within ${Math.round(opts.timeoutMs / 1000)}s.`);
+}
+
+export async function locateWeb(opts: WebOpts, deps: Deps): Promise<LocateResult> {
+  const deadline = deps.now() + opts.timeoutMs;
+  const placed = await placeWeb(opts, deps, deadline);
+  if (!placed.ok) return placed;
+
+  let state: SeekState = { nudgePx: placed.nudgePx };
+  let lastFp: string | null = null;
+  const started = deps.now();
+  let geomRetries = 0;
+  let endUsed = 0;
+  let retried = false;
+  const placedRect: Box | null = placed.placedRect;
+  const passage = /\s+\.\.\.\s+/.test(opts.query);
+  const opening = openingPhrase(opts.query);
+
+  const atScrollEnd = async (address: string, dy: number): Promise<boolean> => {
+    if (!deps.scrollEnds || dy === 0) return false;
+    const ends = await deps.scrollEnds(address);
+    if (!ends) return false;
+    return dy > 0 ? ends.atBottom : ends.atTop;
   };
 
   // One settle, and no scroll. The passage chase owns the next step of a passage.
@@ -212,47 +283,6 @@ export async function locateWeb(opts: WebOpts, deps: Deps): Promise<LocateResult
     const others = clients
       .filter((client) => client.address !== win.address && client.workspace === win.workspace && occludes(win, client))
       .map((client) => ({ x: client.x, y: client.y, w: client.w, h: client.h }));
-
-    if (viewer === "pending") {
-      if (!deps.findInPage) {
-        return fail("quote_not_found", "The browser's find is not available, so the page was left where it was.");
-      }
-      const hit = await deps.findInPage(opening);
-      if (!hit) {
-        if (deps.now() - started < PAINT_WAIT_MS) {
-          deps.log("locate: browser find is not answering yet");
-          await deps.sleep(WINDOW_SETTLE_MS);
-          continue;
-        }
-        return fail("quote_not_found", "The browser's find is not available, so the page was left where it was.");
-      }
-      if (!hit.found) {
-        // A document that is still loading answers false. An open page does not get that wait.
-        if (!opts.noOpen && deps.now() - started < PAINT_WAIT_MS) {
-          deps.log("locate: browser find did not see the phrase yet");
-          await deps.sleep(WINDOW_SETTLE_MS);
-          continue;
-        }
-        return fail("quote_not_found", "The browser's find did not see that phrase.");
-      }
-      viewer = "placed";
-      if (hit.rect && hit.rect.w >= 8 && hit.rect.h >= 8) {
-        placedRect = { x: hit.rect.x, y: hit.rect.y, w: hit.rect.w, h: hit.rect.h };
-        const band = bandOf(placedRect, win.h, opts.pad);
-        deps.log(
-          `locate: viewer find ${band} ${Math.round(hit.rect.w)}x${Math.round(hit.rect.h)} at ${Math.round(hit.rect.x)},${Math.round(hit.rect.y)}`,
-        );
-        const step = await edgeScroll(win, placedRect);
-        if (step === "focus") {
-          return fail("focus_failed", "Could not focus the browser, so the page was not scrolled.");
-        }
-      } else {
-        placedRect = null;
-        deps.log("locate: viewer find");
-      }
-      await deps.sleep(WINDOW_SETTLE_MS);
-      continue;
-    }
 
     let words: Word[];
     try {

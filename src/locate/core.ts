@@ -189,12 +189,19 @@ function levenshtein(a: string, b: string): number {
   return row[b.length];
 }
 
-function near(ocr: string, query: string): boolean {
-  if (ocr === query) return true;
+/**
+ * Edit distance, or null when the tokens are too far apart.
+ * Any word may slip by one letter. A word of four letters or more may slip
+ * by two. A short word has no exact-match floor.
+ */
+function tokenCost(ocr: string, query: string): number | null {
+  if (!ocr.length || !query.length) return null;
+  if (ocr === query) return 0;
   const longer = Math.max(ocr.length, query.length);
-  if (longer < 4) return false;
-  const limit = longer >= 6 ? 2 : 1;
-  return levenshtein(ocr, query) <= limit;
+  const dist = levenshtein(ocr, query);
+  const limit = longer >= 4 ? 2 : 1;
+  if (dist > limit) return null;
+  return dist;
 }
 
 type Seq = { line: number; tok: string };
@@ -207,27 +214,34 @@ function sequence(lines: Line[]): Seq[] {
   return seq;
 }
 
+type Hit = { start: number; end: number; cost: number };
+
 /** Match `phrase` as an ordered run. Returns the seq index of the last token. */
-function matchPhrase(seq: Seq[], from: number, phrase: string[]): { start: number; end: number } | null {
-  if (!phrase.length || from >= seq.length || !near(seq[from].tok, phrase[0])) return null;
+function matchPhrase(seq: Seq[], from: number, phrase: string[]): Hit | null {
+  if (!phrase.length || from >= seq.length) return null;
+  const first = tokenCost(seq[from].tok, phrase[0]);
+  if (first === null) return null;
+  let cost = first;
   let qi = 1;
   let skipped = 0;
   let end = from;
-  if (phrase.length === 1) return { start: from, end: from };
+  if (phrase.length === 1) return { start: from, end: from, cost };
   for (let i = from + 1; i < seq.length && qi < phrase.length; i++) {
-    if (near(seq[i].tok, phrase[qi])) {
+    const step = tokenCost(seq[i].tok, phrase[qi]);
+    if (step !== null) {
       qi++;
       skipped = 0;
       end = i;
+      cost += step;
     } else if (++skipped > PHRASE_SKIP) {
       return null;
     }
   }
-  return qi === phrase.length ? { start: from, end } : null;
+  return qi === phrase.length ? { start: from, end, cost } : null;
 }
 
-function allPhrases(seq: Seq[], phrase: string[]): Array<{ start: number; end: number }> {
-  const hits: Array<{ start: number; end: number }> = [];
+function allPhrases(seq: Seq[], phrase: string[]): Hit[] {
+  const hits: Hit[] = [];
   for (let i = 0; i < seq.length; i++) {
     const hit = matchPhrase(seq, i, phrase);
     if (!hit) continue;
@@ -235,6 +249,16 @@ function allPhrases(seq: Seq[], phrase: string[]): Array<{ start: number; end: n
     i = hit.end;
   }
   return hits;
+}
+
+/** The closest alignment. Two alignments at that same distance stay ambiguous. */
+function pickRun(seq: Seq[], hits: Hit[]): Run | "ambiguous" | null {
+  if (!hits.length) return null;
+  let best = hits[0].cost;
+  for (const hit of hits) if (hit.cost < best) best = hit.cost;
+  const winners = hits.filter((hit) => hit.cost === best);
+  if (winners.length > 1) return "ambiguous";
+  return { start: seq[winners[0].start].line, end: seq[winners[0].end].line };
 }
 
 /** The words the viewer's find is asked for. A passage uses the opening phrase. */
@@ -286,6 +310,7 @@ export function openingKnown(measured: Box | null, readOnGlass: boolean): boolea
 /**
  * A query is a phrase, or `start ... end` for a passage. The passage unions
  * every line from the first anchor through the second, and nothing past it.
+ * Several alignments keep the closest. Two at that same distance stay ambiguous.
  */
 export function findRun(lines: Line[], query: string): Run | "ambiguous" | null {
   const parts = query
@@ -294,22 +319,15 @@ export function findRun(lines: Line[], query: string): Run | "ambiguous" | null 
     .filter((part) => part.length > 0);
   if (!parts.length || parts.length > 2) return null;
   const seq = sequence(lines);
-  if (parts.length === 1) {
-    const hits = allPhrases(seq, parts[0]);
-    if (hits.length === 0) return null;
-    if (hits.length > 1) return "ambiguous";
-    return { start: seq[hits[0].start].line, end: seq[hits[0].end].line };
-  }
+  if (parts.length === 1) return pickRun(seq, allPhrases(seq, parts[0]));
   const lefts = allPhrases(seq, parts[0]);
   const rights = allPhrases(seq, parts[1]);
-  const pairs: Run[] = [];
+  const pairs: Hit[] = [];
   for (const left of lefts) {
     const right = rights.find((hit) => hit.start > left.end && seq[hit.end].line - seq[left.start].line < PASSAGE_LINES);
-    if (right) pairs.push({ start: seq[left.start].line, end: seq[right.end].line });
+    if (right) pairs.push({ start: left.start, end: right.end, cost: left.cost + right.cost });
   }
-  if (pairs.length === 0) return null;
-  if (pairs.length > 1) return "ambiguous";
-  return pairs[0];
+  return pickRun(seq, pairs);
 }
 
 function cluster(lines: Line[], start: number, end: number): Word[] {
@@ -576,6 +594,71 @@ export function linesFromColumns(text: string[], x: number[], y: number[], w: nu
     words.push({ x: x[i], y: y[i], w: w[i], h: h[i], text: text[i], conf: 1 });
   }
   return groupLines(words);
+}
+
+/** How long the tour waits for one desktop frame captured after the page stopped moving. The daemon offers a message for this long. */
+export const GLASS_READ_MS = 8000;
+
+/**
+ * True when this copy started after the settle.
+ * The message was posted `ageMs` ago, and the copy plus the read took `workedMs`,
+ * so the capture began `ageMs + workedMs` before `nowMs`.
+ */
+export function capturedAfterSettle(nowMs: number, settleMs: number, ageMs: number, workedMs: number): boolean {
+  if (![nowMs, settleMs, ageMs, workedMs].every((value) => Number.isFinite(value))) return false;
+  if (ageMs < 0 || workedMs < 0) return false;
+  return nowMs - ageMs - workedMs > settleMs;
+}
+
+export type GlassFrame = {
+  fresh?: boolean;
+  seq?: number;
+  ageMs?: number | null;
+  workedMs?: number | null;
+  width?: number;
+  height?: number;
+  text?: string[];
+  x?: number[];
+  y?: number[];
+  w?: number[];
+  h?: number[];
+};
+
+/** The first posted message whose capture started after the settle. A frame from before it is left unused. */
+export async function frameAfterSettle(
+  settleMs: number,
+  query: () => Promise<GlassFrame>,
+  now: () => number,
+  sleep: (ms: number) => Promise<void>,
+  waitMs = GLASS_READ_MS,
+  pollMs = 100,
+): Promise<GlassFrame | null> {
+  const deadline = settleMs + waitMs;
+  for (;;) {
+    const frame = await query();
+    const age = typeof frame.ageMs === "number" ? frame.ageMs : null;
+    const worked = typeof frame.workedMs === "number" ? frame.workedMs : null;
+    if (frame.fresh === true && age !== null && worked !== null && capturedAfterSettle(now(), settleMs, age, worked)) {
+      return frame;
+    }
+    if (now() >= deadline) return null;
+    await sleep(pollMs);
+  }
+}
+
+/** The current phrase on one desktop reading. A miss, including an ambiguous line, is absent. */
+export function glassPhraseBox(phraseId: string, opening: string, frame: GlassFrame): Uv | null {
+  const width = frame.width ?? 0;
+  const height = frame.height ?? 0;
+  if (!(width > 0) || !(height > 0)) return null;
+  const marks = glassMarks(
+    [{ phraseId, opening, hand: "skip", current: true }],
+    linesFromColumns(frame.text ?? [], frame.x ?? [], frame.y ?? [], frame.w ?? [], frame.h ?? []),
+    { w: width, h: height },
+  );
+  const hit = marks.find((mark) => mark.phraseId === phraseId);
+  if (!hit) return null;
+  return { u: hit.u, v: hit.v, w: hit.w, h: hit.h };
 }
 
 /**

@@ -9,10 +9,10 @@ import { cueReport, LOCATE_RETRY_MS, spawnCueFollow, type CueJob } from "./cues.
 import { IDE_CLASS, TERMINAL_CLASS, chooseSurface, escapeRegExp } from "./choose.js";
 import { BOX_PAD, pageContaining, parseTsv, type Box, type Word } from "./core.js";
 import { cueGroups, resolveCues, speechHoldSeconds, splitSentences, type CueIn } from "./sentences.js";
-import { WINDOW_PATH, locatePdf } from "./pdf.js";
+import { WINDOW_PATH, locatePdf, placePdf } from "./pdf.js";
 import { locateStill, type StillDeps } from "./surface.js";
 import { noteOwnedScroll } from "./scrollHold.js";
-import { locateWeb, type Client, type LocateErr, type LocateOk, type LocateResult, type WebOpts } from "./web.js";
+import { locateWeb, placeWeb, type Client, type LocateErr, type LocateOk, type LocateResult, type WebOpts } from "./web.js";
 
 const MAX_SECONDS = 360;
 const MARK_DEFAULT_SECONDS = 90;
@@ -621,6 +621,78 @@ function openDocument(path: string): Promise<void> {
       resolve();
     });
   });
+}
+
+export type PlaceFlags = {
+  source: string;
+  query: string;
+  uri?: string;
+  pad: number;
+  timeoutS: number;
+  noOpen: boolean;
+  page?: number;
+};
+
+/** Bring a tour phrase onto the glass. The box is a later desktop reading, so this does not photograph. */
+export async function placeForTour(flags: PlaceFlags): Promise<{ ok: true } | LocateErr> {
+  if (!flags.query.trim()) return { ok: false, source: flags.source, error: "bad_args", hint: "Pass --query." };
+  const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+  const refuseShot = async (): Promise<Word[]> => {
+    throw new Error("the tour does not photograph the window");
+  };
+  if (flags.source === "web") {
+    const placed = await placeWeb(
+      {
+        query: flags.query,
+        uri: flags.uri,
+        pad: flags.pad,
+        timeoutMs: flags.timeoutS * 1000,
+        noOpen: flags.noOpen,
+        verify: false,
+      },
+      {
+        clients: async () => asClients(await hyprJson(["clients", "-j"])),
+        screen: screenSize,
+        ocr: refuseShot,
+        scrollBy,
+        open: openBrowser,
+        findInPage,
+        scrollEnds: () => scrollEnds(),
+        sleep,
+        now: () => Date.now(),
+        log,
+      },
+    );
+    if (!placed.ok) return placed;
+    return { ok: true };
+  }
+  if (flags.source === "pdf") {
+    const placed = await placePdf(
+      {
+        query: flags.query,
+        uri: flags.uri,
+        pad: flags.pad,
+        timeoutMs: flags.timeoutS * 1000,
+        noOpen: flags.noOpen,
+        verify: false,
+        page: flags.page,
+      },
+      {
+        ...stillDeps(),
+        ocr: refuseShot,
+        open: openEvince,
+        busForPid,
+        actionEnabled,
+        activate,
+        fitWidth,
+        readPage: readEvincePage,
+        findPage: findPdfPage,
+      },
+    );
+    if (!placed.ok) return placed;
+    return { ok: true };
+  }
+  return { ok: false, source: flags.source, error: "bad_args", hint: "The tour places a web page or a PDF." };
 }
 
 export async function locateRegion(flags: Flags): Promise<LocateResult | LocateErr> {

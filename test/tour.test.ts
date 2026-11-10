@@ -89,7 +89,7 @@ test("a scrolled item is a miss until a move is permitted", async () => {
   await runTour("tk-1", deps);
   assert.equal(calls.locate, 0);
   assert.equal(calls.highlight, 0);
-  assert.deepEqual(calls.resolve, ["notFound"]);
+  assert.deepEqual(calls.resolve, ["notYetFound"]);
 });
 
 test("a mark already up stays located when the find misses", async () => {
@@ -127,7 +127,7 @@ test("a permitted find is located once, and a miss is not nudged", async () => {
   missed.deps.requestMove = async () => ({ permitted: "miss" });
   await runTour("tk-1", missed.deps);
   assert.equal(missed.calls.locate, 0);
-  assert.deepEqual(missed.calls.resolve, ["notFound"]);
+  assert.deepEqual(missed.calls.resolve, ["notYetFound"]);
 
   const failed = scripted(items, true, false);
   failed.deps.requestMove = async () => ({ permitted: "webFind" });
@@ -137,7 +137,7 @@ test("a permitted find is located once, and a miss is not nudged", async () => {
   };
   await runTour("tk-1", failed.deps);
   assert.equal(failed.calls.locate, 1);
-  assert.deepEqual(failed.calls.resolve, ["notFound"]);
+  assert.deepEqual(failed.calls.resolve, ["notYetFound"]);
 });
 
 test("locate does not read a project store or a doc map", () => {
