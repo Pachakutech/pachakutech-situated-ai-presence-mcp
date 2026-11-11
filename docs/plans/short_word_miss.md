@@ -59,3 +59,4 @@ The locus, the quote, and the narration stayed on the project. Nothing was tinte
 - `src/locate/driveTourLive.ts`, `locate`, the read after the find settles
 - `docs/plans/one_glass_read.md`
 - Project `pj-be98b39d6a32fa45`
+- `docs/plans/green_no_second.md`, the next run of these two sentences, after the short-word slip was in the driver
