@@ -41,6 +41,7 @@ function harness(over: Partial<DriveIo> = {}): DriveIo {
         },
         spawn() {},
         async navigate() {},
+        publishPort() {},
       });
     },
     async queryTask() {
@@ -60,6 +61,7 @@ function opening(deps: Partial<OpenDeps>): DriveIo["launch"] {
       },
       spawn() {},
       async navigate() {},
+      publishPort() {},
       ...deps,
     });
 }
