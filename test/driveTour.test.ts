@@ -7,6 +7,7 @@ import {
   POLL_MS,
   driveOnce,
   driveTour,
+  driveUntilStop,
   permittedMove,
   tourDriveCommand,
   type DriveIo,
@@ -370,6 +371,36 @@ test("the permitted move follows the current item", () => {
   assert.equal(permittedMove(view()), "webFind");
   assert.equal(permittedMove(view(null)), "webFind");
   assert.equal(permittedMove(view(4)), "pdfPage");
+});
+
+test("stopping the driver conceals, and a conceal failure still returns", async () => {
+  let concealed = 0;
+  await driveUntilStop("pj-1", {
+    ...harness(),
+    stopped: () => true,
+    async conceal() {
+      concealed += 1;
+    },
+  });
+  assert.equal(concealed, 1);
+
+  await driveUntilStop("pj-1", {
+    ...harness(),
+    stopped: () => true,
+    async conceal() {
+      throw new Error("socket gone");
+    },
+  });
+});
+
+test("the live driver conceals on the way out and keeps the 360 second hold", () => {
+  const live = readFileSync(join(root, "src/locate/driveTourLive.ts"), "utf8");
+  assert.equal(live.includes("driveUntilStop"), true);
+  assert.equal(live.includes("viewerStillMapped"), true);
+  assert.equal(live.includes("untilConceal: true"), true);
+  assert.equal(live.includes("durationSeconds: 360"), true);
+  assert.equal(live.includes("pkill"), false);
+  assert.equal(live.includes("browser.close"), false);
 });
 
 test("the driver does not start a project or read a user profile", async () => {

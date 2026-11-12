@@ -36,6 +36,8 @@ pub struct Registry {
     avatar_owner: Option<String>,
     /// One screen box per presence. The mark fades; the box stays until retire.
     interests: InterestBook,
+    /// Connection that last painted each until-conceal mark. Its close retires those marks.
+    held_owner: HashMap<String, u64>,
     /// Glass-session phrase log. Retiring a presence does not clear it.
     ledger: Ledger,
     /// Task queue for this run. Retire dismisses that presence's tasks.
@@ -61,6 +63,7 @@ impl Registry {
             avatar_available: false,
             avatar_owner: None,
             interests: InterestBook::new(),
+            held_owner: HashMap::new(),
             ledger: Ledger::new(),
             tasks: TaskBook::new(),
             docmap: DocMap::new(crate::docmap::docmap_root_from_env()),
@@ -345,6 +348,38 @@ impl Registry {
 
     pub fn hold_interest_until_conceal(&mut self, id: &str) {
         self.interests.hold_until_conceal(id);
+    }
+
+    /// This connection now owns the held mark. A later paint by someone else takes the ownership.
+    pub fn claim_held(&mut self, conn: u64, key: &str) {
+        let key = key.trim();
+        if key.is_empty() {
+            return;
+        }
+        self.held_owner.insert(key.to_string(), conn);
+    }
+
+    /// The mark is no longer held for a connection. Closing that connection leaves it on its lease.
+    pub fn forget_held(&mut self, key: &str) {
+        self.held_owner.remove(key.trim());
+    }
+
+    /// The connection that painted these held marks is gone. Another connection's marks stay.
+    pub fn release_connection(&mut self, conn: u64) {
+        let keys: Vec<String> = self
+            .held_owner
+            .iter()
+            .filter(|(_, owner)| **owner == conn)
+            .map(|(key, _)| key.clone())
+            .collect();
+        if keys.is_empty() {
+            return;
+        }
+        eprintln!("[highlight] connection {conn} closed; retiring {}", keys.join(" "));
+        for key in &keys {
+            self.held_owner.remove(key);
+            self.interests.retire(key);
+        }
     }
 
     pub fn retire_interest(&mut self, id: &str) {
@@ -956,5 +991,55 @@ mod tests {
         assert_eq!(hand_rows(&events), saved);
         assert_eq!(fresh.latest_hand(&locus), Some(LedgerKind::Skip));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_closed_connection_retires_only_the_held_marks_it_owns() {
+        use std::time::{Duration, Instant};
+        let mut reg = Registry::new();
+        reg.spawn_presence("p-a", "tour", None, None);
+        let now = Instant::now();
+        let raw = crate::highlight::UvBox { u: 0.1, v: 0.2, w: 0.3, h: 0.1 };
+        reg.declare_interest("p-a", Some("ph-1"), "a", raw, 360, now).unwrap();
+        reg.hold_interest_until_conceal("ph-1");
+        reg.claim_held(1, "ph-1");
+        reg.declare_interest("p-a", Some("ph-2"), "b", raw, 360, now).unwrap();
+        reg.hold_interest_until_conceal("ph-2");
+        reg.claim_held(2, "ph-2");
+        reg.declare_interest("p-a", Some("ph-3"), "c", raw, 360, now).unwrap();
+
+        let ids = |reg: &Registry, at: Instant| -> Vec<String> {
+            reg.visible_interests(at).into_iter().map(|(id, _)| id).collect()
+        };
+        reg.release_connection(9);
+        let staying = ids(&reg, now + Duration::from_secs(10_000));
+        assert!(staying.contains(&"ph-1".into()), "{staying:?}");
+        assert!(staying.contains(&"ph-2".into()), "{staying:?}");
+        assert!(!staying.contains(&"ph-3".into()), "{staying:?}");
+        assert!(ids(&reg, now + Duration::from_secs(10)).contains(&"ph-3".into()));
+
+        reg.release_connection(1);
+        let after = ids(&reg, now + Duration::from_secs(10_000));
+        assert!(!after.contains(&"ph-1".into()), "{after:?}");
+        assert!(after.contains(&"ph-2".into()), "{after:?}");
+        assert_eq!(reg.interest("ph-3").unwrap().u, 0.1);
+
+        reg.declare_interest("p-a", Some("ph-1"), "a", raw, 360, now).unwrap();
+        reg.hold_interest_until_conceal("ph-1");
+        reg.claim_held(2, "ph-1");
+        reg.release_connection(1);
+        assert!(ids(&reg, now + Duration::from_secs(10_000)).contains(&"ph-1".into()));
+
+        reg.declare_interest("p-a", Some("ph-2"), "b", raw, 360, now).unwrap();
+        reg.forget_held("ph-2");
+        reg.release_connection(2);
+        let left = ids(&reg, now + Duration::from_secs(10));
+        assert!(!left.contains(&"ph-1".into()), "{left:?}");
+        assert!(left.contains(&"ph-2".into()), "{left:?}");
+        assert!(left.contains(&"ph-3".into()), "{left:?}");
+        let later = ids(&reg, now + Duration::from_secs(10_000));
+        assert!(!later.contains(&"ph-2".into()), "{later:?}");
+        assert_eq!(reg.interest("ph-3").unwrap().u, 0.1);
+        assert_eq!(reg.interest("ph-1"), None);
     }
 }

@@ -1,14 +1,15 @@
 // Socket half of the tour driver. Loaded once a project id is present.
-// The viewer this starts is left up.
+// Ending the tour takes the bars down. The window stays up.
 
 import { DaemonClient } from "../daemonClient.js";
 import { launchListed, locatePortOpen, navigateLocate, spawnListed } from "./openSource.js";
 import { centerWithMark, followScroll, glassMarks, keepHeld, linesFromColumns, type GlassLocus, type HandName, type Uv } from "./glass.js";
 import { noteOwnedScroll, releaseScroll as clearScrollHold, scrollDrifted } from "./scrollHold.js";
-import { nudgePage, outputSize, readPageGeneration, readScrollTop } from "./run.js";
+import { listHyprClients, nudgePage, outputSize, readPageGeneration, readScrollTop } from "./run.js";
 import { runTour, type GlassHit, type TourItem, type TourView } from "./tour.js";
-import { driveTour, type DriveIo, type OpenRequest } from "./driveTour.js";
+import { driveUntilStop, type DriveIo, type OpenRequest } from "./driveTour.js";
 import { NUDGE_PX, frameAfterSettle, glassPhraseBox, type GlassFrame } from "./core.js";
+import { viewerStillMapped, type ViewerKind } from "./viewer.js";
 
 function asTourView(detail: Record<string, unknown>, taskId: string): TourView {
   const items = Array.isArray(detail.items) ? (detail.items as TourItem[]) : [];
@@ -47,7 +48,7 @@ function handName(value: string | undefined): HandName {
   return "skip";
 }
 
-function liveIo(client: DaemonClient, presenceId: string | undefined): DriveIo {
+function liveIo(client: DaemonClient, presenceId: string | undefined, stopping: () => boolean): DriveIo {
   let reference: string | undefined;
   let taskSeen: string | undefined;
   let holding: string[] = [];
@@ -55,6 +56,9 @@ function liveIo(client: DaemonClient, presenceId: string | undefined): DriveIo {
   let paintedTop: number | null = null;
   let generation: number | null = null;
   let glassSeq = -1;
+  let viewerKind: ViewerKind | null = null;
+  let viewerAddress: string | null = null;
+  let ended = false;
 
   async function paint(phraseId: string, box: Uv, description: string): Promise<void> {
     if (!presenceId) return;
@@ -87,6 +91,36 @@ function liveIo(client: DaemonClient, presenceId: string | undefined): DriveIo {
     for (const id of ids) {
       if (presenceId) await client.call("concealHighlight", { presenceId, phraseId: id });
     }
+  }
+
+  async function concealMarks(): Promise<void> {
+    await dropAll();
+    if (presenceId) await client.call("concealHighlight", { presenceId });
+  }
+
+  /** The latched viewer left the client list. The bars come down and the tour ends. The window is already gone. */
+  async function viewerClosed(): Promise<boolean> {
+    if (ended) return true;
+    if (!viewerKind) return false;
+    let clients;
+    try {
+      clients = await listHyprClients();
+    } catch {
+      return false;
+    }
+    const seen = viewerStillMapped(viewerAddress, viewerKind, clients);
+    if (seen.up) {
+      viewerAddress = seen.address;
+      return false;
+    }
+    ended = true;
+    console.error("tour: the viewer window closed");
+    try {
+      await concealMarks();
+    } catch {
+      // The daemon retires the marks if this connection is already gone.
+    }
+    return true;
   }
 
   async function screenH(): Promise<number> {
@@ -123,6 +157,7 @@ function liveIo(client: DaemonClient, presenceId: string | undefined): DriveIo {
   }
 
   async function watchGlass(view: TourView): Promise<void> {
+    if (await viewerClosed()) return;
     const origin = await readPageGeneration();
     if (generation != null && origin != null && origin !== generation) {
       generation = origin;
@@ -190,6 +225,8 @@ function liveIo(client: DaemonClient, presenceId: string | undefined): DriveIo {
       return { taskId: typeof detail.taskId === "string" ? detail.taskId : undefined };
     },
     launch(spec) {
+      viewerKind = spec.kind;
+      viewerAddress = null;
       return launchListed(spec, {
         portOpen: () => locatePortOpen(),
         spawn: (bin, args) => spawnListed(bin, args),
@@ -205,6 +242,7 @@ function liveIo(client: DaemonClient, presenceId: string | undefined): DriveIo {
     },
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     async locate(item) {
+      if (!viewerKind) viewerKind = item.page != null ? "pdf" : "web";
       const source = item.page != null ? "pdf" : "web";
       const beforeTop = await readScrollTop();
       const beforeGen = generation;
@@ -236,6 +274,7 @@ function liveIo(client: DaemonClient, presenceId: string | undefined): DriveIo {
       return { ok: true, ...box };
     },
     async highlight(hit, item) {
+      if (!viewerKind) viewerKind = item.page != null ? "pdf" : "web";
       if (!presenceId || hit.u === undefined || hit.v === undefined || hit.w === undefined || hit.h === undefined) return;
       const box = { u: hit.u, v: hit.v, w: hit.w, h: hit.h };
       paintedTop = await readScrollTop();
@@ -251,8 +290,7 @@ function liveIo(client: DaemonClient, presenceId: string | undefined): DriveIo {
       await paint(item.phraseId, box, item.query ?? "passage");
     },
     async conceal() {
-      await dropAll();
-      if (presenceId) await client.call("concealHighlight", { presenceId });
+      await concealMarks();
     },
     async pointerHold() {
       return false;
@@ -285,11 +323,13 @@ function liveIo(client: DaemonClient, presenceId: string | undefined): DriveIo {
       const appearBy = Date.now() + 8_000;
       let saw = false;
       while (Date.now() < giveUp) {
+        if (stopping() || ended) return "lost";
         if (taskSeen) {
           const view = asTourView(await client.call("queryTask", { taskId: taskSeen }), taskSeen);
           if (view.say && view.saySeq) return "handoff";
           if (view.state !== "active" || view.index !== index) return "left";
           await watchGlass(view);
+          if (stopping() || ended) return "lost";
         }
         const snap = await client.call("querySpeech", {});
         if (snap.phase && snap.phase !== "idle") saw = true;
@@ -309,10 +349,12 @@ function liveIo(client: DaemonClient, presenceId: string | undefined): DriveIo {
       const saySeq = started.saySeq ?? 0;
       const giveUp = Date.now() + 30 * 60_000;
       while (Date.now() < giveUp) {
+        if (stopping() || ended) return;
         const view = asTourView(await client.call("queryTask", { taskId: taskSeen }), taskSeen);
         if (view.state !== "active" || view.index !== index) return;
         if ((view.saySeq ?? 0) !== saySeq) return;
         await watchGlass(view);
+        if (stopping() || ended) return;
         await new Promise((resolve) => setTimeout(resolve, 120));
       }
     },
@@ -333,20 +375,21 @@ function liveIo(client: DaemonClient, presenceId: string | undefined): DriveIo {
       if (!presenceId) return;
       await client.call("stopPresence", { presenceId });
     },
+    halted: () => ended || stopping(),
     now: () => Date.now(),
   };
 }
 
 export async function startTourDrive(projectId: string, presenceId: string | undefined): Promise<number> {
   const client = new DaemonClient();
-  const io = liveIo(client, presenceId);
   let stop = false;
+  const io = liveIo(client, presenceId, () => stop);
   process.once("SIGINT", () => {
     stop = true;
   });
   process.once("SIGTERM", () => {
     stop = true;
   });
-  await driveTour(projectId, { ...io, stopped: () => stop });
+  await driveUntilStop(projectId, { ...io, stopped: () => stop || (io.halted?.() ?? false) });
   return 0;
 }

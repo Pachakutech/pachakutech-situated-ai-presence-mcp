@@ -175,6 +175,10 @@ function asClients(raw: unknown): Client[] {
   return out;
 }
 
+export async function listHyprClients(): Promise<Client[]> {
+  return asClients(await hyprJson(["clients", "-j"]));
+}
+
 async function focused(): Promise<{ address?: string; workspace: number }> {
   const [active, workspace] = await Promise.all([
     hyprJson(["activewindow", "-j"]).catch(() => ({})),
