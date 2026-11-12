@@ -24,8 +24,8 @@ pub const GRACE_MS: u64 = 1500;
 pub const DOUBLE_CLICK_MS: u64 = 250;
 /// Hold at least this long, measured on the daemon clock, and the release is a long tap.
 pub const LONG_TAP_MS: u64 = 500;
-/// After a tint hand, the page stays this long. `tick` leaves. The gesture path does not sleep.
-pub const NAV_AFTER_TAP_MS: u64 = 450;
+/// After a tint hand, the color stays this long. `tick` leaves. The gesture path does not sleep.
+pub const NAV_AFTER_TAP_MS: u64 = 1000;
 /// evdev `BTN_LEFT`.
 pub const BTN_LEFT: u32 = 0x110;
 pub const MOVE_WAIT_MS: u64 = 1500;
@@ -3743,6 +3743,46 @@ mod tests {
         assert_eq!(book_query(&book, &id)["index"], 0);
         assert_eq!(book_query(&book, &id)["state"], "active");
         assert_eq!(hand_condition(&ledger, "lc-a"), "accept");
+    }
+
+    #[test]
+    fn a_second_on_the_color_before_the_page_leaves() {
+        assert_eq!(NAV_AFTER_TAP_MS, 1_000);
+        assert_eq!(LONG_TAP_MS, 500);
+        let (mut book, mut ledger, id) = show_tour(crate::protocol::TaskPace::Wait, &["lc-a", "lc-b"]);
+        gesture(&mut book, &mut ledger, 3_000, 3_200, BTN_LEFT, Some(1));
+        assert_eq!(tint_of(&book), Some(crate::highlight::MarkColor::Green));
+        book.tick(&mut ledger, 3_200 + 900);
+        assert_eq!(book_query(&book, &id)["index"], 0);
+        book.tick(&mut ledger, 3_200 + 1_000);
+        assert_eq!(book_query(&book, &id)["index"], 1);
+
+        let (mut book, mut ledger, id) = show_tour(crate::protocol::TaskPace::Wait, &["lc-a", "lc-b"]);
+        gesture(&mut book, &mut ledger, 3_000, 3_200, BTN_LEFT, Some(1));
+        book.apply_tint_samples(
+            &mut ledger,
+            vec![TintSample {
+                down: true,
+                button: BTN_LEFT,
+                ts_ms: 3_200 + 1_000,
+                mark: Some(TintMark { id: "driver".into(), generation: 1 }),
+            }],
+        );
+        book.tick(&mut ledger, 3_200 + 1_000);
+        assert_eq!(book_query(&book, &id)["index"], 0);
+        assert_eq!(tint_of(&book), Some(crate::highlight::MarkColor::Green));
+
+        let (mut book, mut ledger, id) = show_tour(crate::protocol::TaskPace::Wait, &["lc-a", "lc-b"]);
+        gesture(&mut book, &mut ledger, 3_000, 3_200, BTN_LEFT, Some(1));
+        gesture(&mut book, &mut ledger, 3_400, 3_900, BTN_LEFT, Some(1));
+        assert_eq!(tint_of(&book), Some(crate::highlight::MarkColor::Red));
+        assert_eq!(hand_condition(&ledger, "lc-a"), "deny");
+        book.tick(&mut ledger, 3_200 + 1_000);
+        assert_eq!(book_query(&book, &id)["index"], 0);
+        book.tick(&mut ledger, 3_900 + 1_000 - 1);
+        assert_eq!(book_query(&book, &id)["index"], 0);
+        book.tick(&mut ledger, 3_900 + 1_000);
+        assert_eq!(book_query(&book, &id)["index"], 1);
     }
 
     fn gesture_on(book: &mut TaskBook, ledger: &mut Ledger, mark: &str, down_ms: u64, up_ms: u64) -> Vec<String> {

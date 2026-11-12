@@ -2,6 +2,8 @@
 
 Written 12 November 2026. A small change to the hop after a hand. Project `pj-4cefa476cf86cc7e`, presence `p-6hqo7p`. Allyl stored deny and the tour left 463 ms later. Inductive stored accept and the tour left 458 ms later. Both waits are `NAV_AFTER_TAP_MS`, 450. That wait is taking.
 
+Landed 12 November 2026. `NAV_AFTER_TAP_MS` is 1000. The color stays on the bar for that second, measured from the release. At 900 ms the page has not moved. At 1000 ms `tick` may leave, and `locate` conceals the phrase just answered before `placeForTour`. That call returns before `findInPage`. The driver logs `tour: conceal` for that phrase, and the find logs `locate: viewer find` after it. A finger still down at 1000 ms holds the page. A second tap before the leave rewrites the color and arms the second from that release. `LONG_TAP_MS` stays 500. `WINDOW_SETTLE_MS` stays 500. The new bar and the cue still arrive together, after the desktop frame. `trackTravel` may still drop on a generation change. The sampler and the scroll chase are unchanged.
+
 ## What happens after the click
 
 The color changes on the release, in `apply_tint_sample`, before any leave. `arm_leave` sets the leave to that release plus 450. `tick` is what notices. The gesture path does not sleep. While the finger is down, `hand_due` is false. A second tap stores a new color and a new leave from the new release.

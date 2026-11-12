@@ -393,6 +393,21 @@ test("stopping the driver conceals, and a conceal failure still returns", async 
   });
 });
 
+test("the phrase just answered is concealed before the next find", () => {
+  const live = readFileSync(join(root, "src/locate/driveTourLive.ts"), "utf8");
+  const locate = live.slice(live.indexOf("async locate(item)"), live.indexOf("async highlight(hit"));
+  const left = live.slice(live.indexOf("async function concealLeft"), live.indexOf("async function dropAll"));
+  const drop = live.slice(live.indexOf("async function drop("), live.indexOf("async function concealLeft"));
+  assert.ok(locate.indexOf("await concealLeft(item.phraseId)") < locate.indexOf("placeForTour"));
+  assert.equal(left.includes("tour: conceal"), true);
+  assert.equal(left.includes("await drop"), true);
+  assert.equal(drop.includes("concealHighlight"), true);
+  const web = readFileSync(join(root, "src/locate/web.ts"), "utf8");
+  assert.equal(web.includes("const WINDOW_SETTLE_MS = 500;"), true);
+  const placeWeb = web.slice(web.indexOf("export async function placeWeb"), web.indexOf("export async function locateWeb"));
+  assert.ok(placeWeb.indexOf("findInPage") < placeWeb.lastIndexOf("locate: viewer find"));
+});
+
 test("a fresh reading of a marked phrase settles before it is declared", () => {
   const live = readFileSync(join(root, "src/locate/driveTourLive.ts"), "utf8");
   const watch = live.slice(live.indexOf("async function watchGlass"), live.indexOf("async function readGlass"));
