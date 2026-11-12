@@ -550,6 +550,60 @@ export function glassMarks(loci: GlassLocus[], lines: Line[], screen: { w: numbe
 
 export type HeldMark = { phraseId: string; box: Uv };
 
+/** A measured edge inside this fraction of the shown edge is the same line, jitter included. */
+const BAR_TRACK = 0.1;
+/** A union larger than this multiple of the shown area is a different reading. Declare that reading. */
+const BAR_JUMP = 1.8;
+/** Room for a UV product. A tenth of a pixel on this panel is much larger. */
+const BAR_EPS = 1e-9;
+
+function boxArea(box: Uv): number {
+  return box.w * box.h;
+}
+
+function copyBox(box: Uv): Uv {
+  return { u: box.u, v: box.v, w: box.w, h: box.h };
+}
+
+function withinTrack(delta: number, span: number): boolean {
+  return Math.abs(delta) <= span * BAR_TRACK + BAR_EPS;
+}
+
+function unionUv(a: Uv, b: Uv): Uv {
+  const u = Math.min(a.u, b.u);
+  const v = Math.min(a.v, b.v);
+  const right = Math.max(a.u + a.w, b.u + b.w);
+  const bottom = Math.max(a.v + a.h, b.v + b.h);
+  return { u, v, w: right - u, h: bottom - v };
+}
+
+/**
+ * The rectangle to declare when a phrase already has a box.
+ * A measured box within a tenth on every edge replaces the shown box, so jitter tracks.
+ * A union larger than 1.8 times the shown area is a different reading, and that reading is declared.
+ * Anything between those stays the union, so a short line inside a tall bar does not pull the top down.
+ * A union that is already the shown rectangle keeps that rectangle's numbers.
+ */
+export function settleBox(shown: Uv, measured: Uv): Uv {
+  const tracks =
+    withinTrack(measured.u - shown.u, shown.w) &&
+    withinTrack(measured.v - shown.v, shown.h) &&
+    withinTrack(measured.w - shown.w, shown.w) &&
+    withinTrack(measured.h - shown.h, shown.h);
+  if (tracks) return copyBox(measured);
+  const union = unionUv(shown, measured);
+  if (boxArea(union) > boxArea(shown) * BAR_JUMP + BAR_EPS) return copyBox(measured);
+  if (
+    Math.abs(union.u - shown.u) <= BAR_EPS &&
+    Math.abs(union.v - shown.v) <= BAR_EPS &&
+    Math.abs(union.w - shown.w) <= BAR_EPS &&
+    Math.abs(union.h - shown.h) <= BAR_EPS
+  ) {
+    return copyBox(shown);
+  }
+  return union;
+}
+
 /** A reading that sees the phrase moves its mark. A miss leaves the placed box. */
 export function keepHeld(held: HeldMark[], seen: (Uv & { phraseId: string })[]): HeldMark[] {
   const next = held.map((mark) => {

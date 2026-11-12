@@ -8,6 +8,8 @@ The sentence on the page is the first line under the section heading "Inductive 
 
 The heading sits above that sentence. The margin between them is empty.
 
+Landed 12 November 2026. `settleBox`, beside `keepHeld`, is the rectangle `watchGlass` declares when the phrase already has a box. The scroll shift has already moved that box. A measured box within a tenth on the left, the top, the width, and the height replaces it, so jitter tracks. A union whose area is greater than 1.8 times the shown area is declared as the new reading. Otherwise the union is declared, so a short line inside the tall bar leaves the top where it is. The first paint has no shown box and stays the measured rectangle. `unionBox`, the sampler, `followScroll`, and `sync_marks` are unchanged.
+
 ## What the glass did
 
 The screen is 1920×1080. Every rectangle for this phrase has the same left edge, 982, and the same width, 900 (`u` 0.511, `w` 0.469). The height and the top edge are the part that moved.

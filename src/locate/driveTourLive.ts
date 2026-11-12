@@ -3,7 +3,7 @@
 
 import { DaemonClient } from "../daemonClient.js";
 import { launchListed, locatePortOpen, navigateLocate, spawnListed } from "./openSource.js";
-import { centerWithMark, followScroll, glassMarks, keepHeld, linesFromColumns, type GlassLocus, type HandName, type Uv } from "./glass.js";
+import { centerWithMark, followScroll, glassMarks, keepHeld, linesFromColumns, settleBox, type GlassLocus, type HandName, type Uv } from "./glass.js";
 import { noteOwnedScroll, releaseScroll as clearScrollHold, scrollDrifted } from "./scrollHold.js";
 import { listHyprClients, nudgePage, outputSize, readPageGeneration, readScrollTop } from "./run.js";
 import { runTour, type GlassHit, type TourItem, type TourView } from "./tour.js";
@@ -177,7 +177,13 @@ function liveIo(client: DaemonClient, presenceId: string | undefined, stopping: 
     glassSeq = seq;
     const marks = await readGlass(view);
     const held = [...boxes.entries()].map(([phraseId, box]) => ({ phraseId, box }));
-    const next = keepHeld(held, marks);
+    // The scroll shift has already moved these boxes. A fresh reading settles against that rectangle.
+    const settled = marks.map((mark) => {
+      const shown = boxes.get(mark.phraseId);
+      if (!shown) return mark;
+      return { ...mark, ...settleBox(shown, mark) };
+    });
+    const next = keepHeld(held, settled);
     for (const mark of next) {
       const prev = boxes.get(mark.phraseId);
       const same =
