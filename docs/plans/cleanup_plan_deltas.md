@@ -26,7 +26,9 @@ Status: cleaned 3 November 2026. The 31 October record described code through C7
 | `notFound` under a mark | `found_when_shown.md` clears that flag when the find box is tinted, when the highlight is up, and when a tap lands on it. | When that ticket is implemented. |
 | One glass reading | `one_glass_read.md` keeps find and the PDF page turn, and takes the box from the desktop sampler after that motion settles. The locator's window Tesseract and the crop leave the tour. | When that ticket is implemented. |
 | Short word, no highlight | `short_word_miss.md` records the miss. The matcher now allows one slip on a short word. The 10 November run painted the allyl line. | Landed in the driver before `green_no_second.md`. |
-| Green, no second highlight | `green_no_second.md`. The allyl bar went green. The inductive page opened at once, the find did not wait for it, and no second box was painted. | When a ticket picks the repair. |
+| Green, no second highlight | `green_no_second.md`. The allyl bar went green. The inductive page opened at once, the find did not wait for it, and no second box was painted. | Landed as `tap_then_read.md`. The page stays 450 ms after the tap. A find on a window the tour just navigated waits out the paint. A blank sheet after the scroll is not the reading. |
+| Breathing bar drops the long press | `long_press_dropped.md`. Twelve sizes of one allyl id each destroyed the surface, so a hold never stored red. | Landed as `overlap_keeps_the_mark.md`. An overlapping box for that phrase keeps the surface and the press. `LONG_TAP_MS` stays 500. |
+| Next locus unmarked | `next_locus_unmarked.md`. The inductive sentence stayed low. The nudge was withheld, and no second bar was painted. | The surface half landed with the row above. The withheld nudge on the new document is still open. |
 | Terminal watch of the register | The file moves. The command is still unnamed. | The ticket that writes the command. |
 | `GLB lacks viseme_aa` | One failing daemon test, left in place. | Not this list. |
 | Section 4a | Recorded, not adopted. The default judge keeps every shortlisted span. | A ticket that adopts 4a. |

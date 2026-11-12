@@ -233,6 +233,9 @@ function liveIo(client: DaemonClient, presenceId: string | undefined): DriveIo {
         async () => asGlassFrame(await client.call("queryScreenText", {})),
         () => Date.now(),
         (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+        undefined,
+        undefined,
+        (candidate) => glassPhraseBox(item.phraseId, item.query ?? "", candidate) != null,
       );
       if (!frame) return { ok: false };
       const box = glassPhraseBox(item.phraseId, item.query ?? "", frame);

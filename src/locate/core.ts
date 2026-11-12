@@ -599,6 +599,9 @@ export function linesFromColumns(text: string[], x: number[], y: number[], w: nu
 /** How long the tour waits for one desktop frame captured after the page stopped moving. The daemon offers a message for this long. */
 export const GLASS_READ_MS = 8000;
 
+/** Painted samples of the sampler already running. A blank sheet does not count. */
+const PAINTED_BEAT = 2;
+
 /**
  * True when this copy started after the settle.
  * The message was posted `ageMs` ago, and the copy plus the read took `workedMs`,
@@ -624,7 +627,22 @@ export type GlassFrame = {
   h?: number[];
 };
 
-/** The first posted message whose capture started after the settle. A frame from before it is left unused. */
+/** A flat field has no words. The page is still painting. */
+export function sheetUnpainted(frame: GlassFrame): boolean {
+  const text = frame.text ?? [];
+  for (const word of text) {
+    if (word && word.trim()) return false;
+  }
+  return true;
+}
+
+/**
+ * A desktop frame whose capture started after the settle.
+ * A frame from before the settle is left unused. A blank sheet is left unused.
+ * When `holds` is set, a frame that already contains the sentence is the box.
+ * A painted frame that does not waits for the next sample of this same sampler.
+ * The wait stays inside `waitMs`.
+ */
 export async function frameAfterSettle(
   settleMs: number,
   query: () => Promise<GlassFrame>,
@@ -632,16 +650,30 @@ export async function frameAfterSettle(
   sleep: (ms: number) => Promise<void>,
   waitMs = GLASS_READ_MS,
   pollMs = 100,
+  holds?: (frame: GlassFrame) => boolean,
 ): Promise<GlassFrame | null> {
   const deadline = settleMs + waitMs;
+  const seen = new Set<number>();
+  let misses = 0;
+  let lastMiss: GlassFrame | null = null;
   for (;;) {
     const frame = await query();
     const age = typeof frame.ageMs === "number" ? frame.ageMs : null;
     const worked = typeof frame.workedMs === "number" ? frame.workedMs : null;
-    if (frame.fresh === true && age !== null && worked !== null && capturedAfterSettle(now(), settleMs, age, worked)) {
-      return frame;
+    const after =
+      frame.fresh === true && age !== null && worked !== null && capturedAfterSettle(now(), settleMs, age, worked);
+    if (after && holds?.(frame)) return frame;
+    if (after && !sheetUnpainted(frame)) {
+      if (!holds) return frame;
+      const seq = frame.seq;
+      if (typeof seq === "number" && !seen.has(seq)) {
+        seen.add(seq);
+        misses += 1;
+        lastMiss = frame;
+        if (misses >= PAINTED_BEAT) return frame;
+      }
     }
-    if (now() >= deadline) return null;
+    if (now() >= deadline) return holds ? lastMiss : null;
     await sleep(pollMs);
   }
 }

@@ -94,4 +94,4 @@ The locus, the quote, and the narration of the inductive sentence stayed on the 
 - Project `pj-093c536f2492060a`
 - `docs/plans/short_word_miss.md`, the previous miss on the same two sentences
 
-No repair is chosen.
+The fix is `tap_then_read.md`. The page stays 450 milliseconds after the tap. The next locus is then read from a desktop frame taken after that page has settled.

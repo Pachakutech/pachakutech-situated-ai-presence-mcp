@@ -24,6 +24,8 @@ pub const GRACE_MS: u64 = 1500;
 pub const DOUBLE_CLICK_MS: u64 = 250;
 /// Hold at least this long, measured on the daemon clock, and the release is a long tap.
 pub const LONG_TAP_MS: u64 = 500;
+/// After a tint hand, the page stays this long. `tick` leaves. The gesture path does not sleep.
+pub const NAV_AFTER_TAP_MS: u64 = 450;
 /// evdev `BTN_LEFT`.
 pub const BTN_LEFT: u32 = 0x110;
 pub const MOVE_WAIT_MS: u64 = 1500;
@@ -212,6 +214,20 @@ struct Task {
     /// The locus a re-entry tap left. A second tap inside the grace rewrites the hand.
     left_phrase: Option<String>,
     left_until_ms: u64,
+    /// When a tint hand may change the page. Check squares do not use this clock.
+    leave: Leave,
+}
+
+/// A tint hand on the current phrase. The release stores the color at once.
+/// The page stays until `tick` sees [`NAV_AFTER_TAP_MS`] pass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Leave {
+    /// No tint is holding the page.
+    Idle,
+    /// Leave once `tick` is at this instant, if the hand is still accept or deny.
+    At(u64),
+    /// The person took the page during the wait. A later tap may arm it again.
+    Cancelled,
 }
 
 /// The only moves a tour may ask the locator to perform. This enum is not
@@ -369,6 +385,7 @@ impl TaskBook {
             say_open: false,
             left_phrase: None,
             left_until_ms: 0,
+            leave: Leave::Idle,
         });
         Ok(id)
     }
@@ -626,7 +643,20 @@ impl TaskBook {
         }
         self.tints.insert(press.mark_id, color);
         self.locate_shown(&press.phrase_id);
-        self.consider(ledger, sample.ts_ms);
+        // The color is stored on this release. The page stays until tick.
+        self.arm_leave(&press.phrase_id, sample.ts_ms);
+    }
+
+    /// The page stays until this release plus [`NAV_AFTER_TAP_MS`].
+    fn arm_leave(&mut self, phrase_id: &str, release_ms: u64) {
+        let Some(task) = self.tasks.iter_mut().find(|task| task.state == TaskState::Active) else {
+            return;
+        };
+        let current = task.items.get(task.index).is_some_and(|item| item.phrase_id == phrase_id);
+        if !current {
+            return;
+        }
+        task.leave = Leave::At(release_ms.saturating_add(NAV_AFTER_TAP_MS));
     }
 
     fn current_phrase(&self) -> Option<String> {
@@ -1084,13 +1114,36 @@ impl TaskBook {
         // A narrated citation stays until a hand. The item clock is for a list with no cue.
         let timed_out = !narrated && now_ms >= entered.saturating_add(window);
         let miss = hides_control(matched);
+        let hand_ready = !miss && item_answered(ledger, mode, &phrase);
+        let hand_due = self.hand_due(&phrase, now_ms, hand_ready);
         let advance = match pace {
-            TaskPace::Wait => timed_out || (!miss && item_answered(ledger, mode, &phrase)),
-            TaskPace::Flow if narrated => !miss && item_answered(ledger, mode, &phrase),
+            TaskPace::Wait => timed_out || hand_due,
+            TaskPace::Flow if narrated => hand_due,
             TaskPace::Flow => miss || (narration_done && self.dwell_floor_met(&phrase, entered, now_ms)),
         };
         if advance {
             self.advance_active(ledger, now_ms);
+        }
+    }
+
+    /// A tint hand leaves only after the wait, and not while the pointer is down.
+    /// A skip at the end of the wait stays. A checkbox has no tint clock.
+    fn hand_due(&mut self, phrase: &str, now_ms: u64, hand_ready: bool) -> bool {
+        if self.tint_press.as_ref().is_some_and(|press| press.phrase_id == phrase) {
+            return false;
+        }
+        let Some(task) = self.tasks.iter_mut().find(|task| task.state == TaskState::Active) else {
+            return false;
+        };
+        let leave = task.leave;
+        match leave {
+            Leave::Idle => hand_ready,
+            Leave::Cancelled => false,
+            Leave::At(at) if now_ms < at => false,
+            Leave::At(_) => {
+                task.leave = Leave::Idle;
+                hand_ready
+            }
         }
     }
 
@@ -1151,6 +1204,7 @@ impl TaskBook {
         self.tasks[pos].entered_ms = None;
         self.tasks[pos].narration_done = false;
         self.tasks[pos].pass_only = false;
+        self.tasks[pos].leave = Leave::Idle;
         self.clear_shown_for(task_id);
     }
 
@@ -1159,6 +1213,7 @@ impl TaskBook {
         self.tasks[pos].narration_done = false;
         self.tasks[pos].yield_scroll = false;
         self.tasks[pos].hold_nudge = false;
+        self.tasks[pos].leave = Leave::Idle;
         let task_id = self.tasks[pos].id.clone();
         let current = self.tasks[pos].items.get(self.tasks[pos].index).map(|item| (item.phrase_id.clone(), item.query.clone()));
         if let Some((phrase, query)) = current {
@@ -1220,7 +1275,12 @@ impl TaskBook {
         }
         match reason {
             Some(PreemptReason::Pointer) => task.hold_nudge = true,
-            Some(PreemptReason::Page) | None => task.yield_scroll = true,
+            Some(PreemptReason::Page) | None => {
+                task.yield_scroll = true;
+                if matches!(task.leave, Leave::At(_)) {
+                    task.leave = Leave::Cancelled;
+                }
+            }
         }
         Ok(())
     }
@@ -1691,6 +1751,7 @@ fn insert_task(
         say_open: false,
         left_phrase: None,
         left_until_ms: 0,
+        leave: Leave::Idle,
     });
     Ok(id)
 }
@@ -2524,8 +2585,15 @@ mod tests {
         let body = &src[start..];
         let end = body.find("\n    fn ").unwrap();
         let body = &body[..end];
-        assert_eq!(body.matches("region.add").count(), 1);
+        let input = src.find("fn set_mark_input(").unwrap();
+        let input_body = &src[input..];
+        let input_end = input_body.find("\nimpl ").unwrap_or_else(|| input_body.find("\nfn ").unwrap());
+        let input_body = &input_body[..input_end];
+        assert_eq!(input_body.matches("region.add").count(), 1);
         assert_eq!(src.matches("region.add").count(), 1);
+        assert_eq!(src.matches("set_mark_input(").count(), 3);
+        assert!(body.contains("set_mark_input("));
+        assert!(src.contains("fn place_mark(") && src[src.find("fn place_mark(").unwrap()..].contains("set_mark_input("));
         assert!(body.contains("KeyboardInteractivity::None"));
         assert!(body.contains("set_exclusive_zone(-1)"));
         assert!(!src.contains("get_keyboard"));
@@ -2659,6 +2727,10 @@ mod tests {
                 },
             ],
         );
+        assert_eq!(book_query(&flowing.book, &flowing.id)["index"], 0);
+        flowing.book.tick(&mut flowing.ledger, 5_300 + NAV_AFTER_TAP_MS - 1);
+        assert_eq!(book_query(&flowing.book, &flowing.id)["index"], 0);
+        flowing.book.tick(&mut flowing.ledger, 5_300 + NAV_AFTER_TAP_MS);
         assert_eq!(book_query(&flowing.book, &flowing.id)["index"], 1);
         assert_eq!(book_query(&flowing.book, &flowing.id)["state"], "active");
     }
@@ -2699,6 +2771,10 @@ mod tests {
                 },
             ],
         );
+        assert_eq!(book_query(&opened.book, &opened.id)["index"], 0);
+        opened.book.tick(&mut opened.ledger, 3_200 + NAV_AFTER_TAP_MS - 1);
+        assert_eq!(book_query(&opened.book, &opened.id)["index"], 0);
+        opened.book.tick(&mut opened.ledger, 3_200 + NAV_AFTER_TAP_MS);
         assert_eq!(book_query(&opened.book, &opened.id)["index"], 1);
         assert_eq!(book_query(&opened.book, &opened.id)["state"], "active");
 
@@ -3593,6 +3669,10 @@ mod tests {
         assert_eq!(book_query(&book, &id)["state"], "active");
         gesture(&mut book, &mut ledger, 4_100, 4_200, BTN_LEFT, Some(1));
         assert_eq!(hand_kinds(&ledger), vec![LedgerKind::Accept, LedgerKind::Skip, LedgerKind::Accept]);
+        assert_eq!(book_query(&book, &id)["index"], 0);
+        book.tick(&mut ledger, 4_200 + NAV_AFTER_TAP_MS - 1);
+        assert_eq!(book_query(&book, &id)["index"], 0);
+        book.tick(&mut ledger, 4_200 + NAV_AFTER_TAP_MS);
         assert_eq!(book_query(&book, &id)["index"], 1);
         assert_eq!(book_query(&book, &id)["state"], "active");
     }
@@ -3605,8 +3685,64 @@ mod tests {
         gesture(&mut book, &mut ledger, 3_000, 3_500, BTN_LEFT, Some(1));
         assert_eq!(hand_kinds(&ledger), vec![LedgerKind::Deny]);
         assert_eq!(tint_of(&book), Some(crate::highlight::MarkColor::Red));
+        assert_eq!(book_query(&book, &id)["index"], 0);
+        book.tick(&mut ledger, 3_500 + NAV_AFTER_TAP_MS);
         assert_eq!(book_query(&book, &id)["index"], 1);
         assert_eq!(book_query(&book, &id)["state"], "active");
+    }
+
+    #[test]
+    fn a_tap_stays_for_the_color_and_a_page_taken_cancels_it() {
+        let (mut book, mut ledger, id) = show_tour(crate::protocol::TaskPace::Wait, &["lc-a", "lc-b"]);
+        gesture(&mut book, &mut ledger, 3_000, 3_200, BTN_LEFT, Some(1));
+        assert_eq!(tint_of(&book), Some(crate::highlight::MarkColor::Green));
+        assert_eq!(book_query(&book, &id)["index"], 0);
+        book.tick(&mut ledger, 3_200 + NAV_AFTER_TAP_MS - 1);
+        assert_eq!(book_query(&book, &id)["index"], 0);
+        book.tick(&mut ledger, 3_200 + NAV_AFTER_TAP_MS);
+        assert_eq!(book_query(&book, &id)["index"], 1);
+
+        let (mut book, mut ledger, id) = show_tour(crate::protocol::TaskPace::Wait, &["lc-a", "lc-b"]);
+        gesture(&mut book, &mut ledger, 3_000, 3_200, BTN_LEFT, Some(1));
+        gesture(&mut book, &mut ledger, 3_300, 3_400, BTN_LEFT, Some(1));
+        assert_eq!(tint_of(&book), Some(crate::highlight::MarkColor::Yellow));
+        book.tick(&mut ledger, 3_400 + NAV_AFTER_TAP_MS);
+        assert_eq!(book_query(&book, &id)["index"], 0);
+        assert_eq!(hand_condition(&ledger, "lc-a"), "skip");
+
+        let (mut book, mut ledger, id) = show_tour(crate::protocol::TaskPace::Wait, &["lc-a", "lc-b"]);
+        gesture(&mut book, &mut ledger, 3_000, 3_200, BTN_LEFT, Some(1));
+        book.apply_tint_samples(
+            &mut ledger,
+            vec![TintSample {
+                down: true,
+                button: BTN_LEFT,
+                ts_ms: 3_200 + NAV_AFTER_TAP_MS - 50,
+                mark: Some(TintMark { id: "driver".into(), generation: 1 }),
+            }],
+        );
+        book.tick(&mut ledger, 3_200 + NAV_AFTER_TAP_MS + 100);
+        assert_eq!(book_query(&book, &id)["index"], 0);
+        book.apply_tint_samples(
+            &mut ledger,
+            vec![TintSample {
+                down: false,
+                button: BTN_LEFT,
+                ts_ms: 3_200 + NAV_AFTER_TAP_MS + 200,
+                mark: None,
+            }],
+        );
+        assert_eq!(book_query(&book, &id)["index"], 0);
+        book.tick(&mut ledger, 3_200 + NAV_AFTER_TAP_MS + 200);
+        assert_eq!(book_query(&book, &id)["index"], 1);
+
+        let (mut book, mut ledger, id) = show_tour(crate::protocol::TaskPace::Wait, &["lc-a", "lc-b"]);
+        gesture(&mut book, &mut ledger, 3_000, 3_200, BTN_LEFT, Some(1));
+        preempt(&mut book, &mut ledger, &id, "page");
+        book.tick(&mut ledger, 3_200 + NAV_AFTER_TAP_MS + 1_000);
+        assert_eq!(book_query(&book, &id)["index"], 0);
+        assert_eq!(book_query(&book, &id)["state"], "active");
+        assert_eq!(hand_condition(&ledger, "lc-a"), "accept");
     }
 
     fn gesture_on(book: &mut TaskBook, ledger: &mut Ledger, mark: &str, down_ms: u64, up_ms: u64) -> Vec<String> {

@@ -20,7 +20,7 @@ The tour then waits. The ways out of the wait are a hand, or the person taking t
 - A long tap on the yellow turns it red, deny, and the tour leaves for the next phrase.
 - The person starts scrolling or navigating themselves. Our nudges stop. The narration already started keeps going until the clip ends, or until a stop we already have. The mark stays with the phrase until the phrase scrolls off or the page is replaced. Their scroll does not start the next cue.
 
-On a green or a red, the next phrase is immediate. Find brings it onto the glass, the highlight goes up, and that phrase's cue starts as soon as the mark is up. No pause inserted between the mark and the voice. Then the same wait.
+On a green or a red, the tour leaves after the wait in `tap_then_read.md`. The page stays 450 milliseconds so the new color can be seen and a second tap can rewrite the hand. Find then brings the next sentence onto the glass, the highlight goes up, and that phrase's cue starts as soon as the mark is up. No pause inserted between the mark and the voice. Then the same wait.
 
 The last phrase waits the same way. Nothing in this ticket hops the remaining skips after the list. That choice stays with the client, as `scroll_highlight.md` already has it.
 
@@ -54,3 +54,4 @@ Skip, accept, deny. Yellow, green, red. No keep. The phrase id of a shown locus 
 - `docs/plans/scroll_highlight.md`, the scroll-off and the hand switch
 - `docs/plans/hand_and_phrase.md`
 - `docs/plans/found_when_shown.md`, the `notFound` flag under a mark that is up or tapped
+- `docs/plans/tap_then_read.md`, the 450 milliseconds before the page changes, and the reading of the next page

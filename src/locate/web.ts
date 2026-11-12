@@ -81,6 +81,8 @@ export type WebOpts = {
   pad: number;
   timeoutMs: number;
   noOpen: boolean;
+  /** The open window was just navigated. A find that misses is the page still loading. */
+  navigated?: boolean;
   windowClass?: RegExp;
   windowTitle?: RegExp;
   verify: boolean;
@@ -209,8 +211,11 @@ export async function placeWeb(
       return fail("quote_not_found", "The browser's find is not available, so the page was left where it was.");
     }
     if (!hit.found) {
-      // A document that is still loading answers false. An open page does not get that wait.
-      if (!opts.noOpen && deps.now() - started < PAINT_WAIT_MS) {
+      // A document that is still loading answers false. Opening the browser is
+      // that wait. Navigating a window that is already open is the same wait.
+      // noOpen still does not launch a browser.
+      const loading = !opts.noOpen || opts.navigated === true;
+      if (loading && deps.now() - started < PAINT_WAIT_MS) {
         deps.log("locate: browser find did not see the phrase yet");
         await deps.sleep(WINDOW_SETTLE_MS);
         continue;

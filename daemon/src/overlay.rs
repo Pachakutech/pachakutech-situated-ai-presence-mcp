@@ -22,7 +22,7 @@
 //! (no `zwp_linux_dmabuf_v1`, no GBM, etc.) never causes a black screen.
 
 use crate::actors::ingress::screen_dmabuf::DmabufScreenSource;
-use crate::highlight::{paint_mark, to_pixels, MarkColor, UvBox};
+use crate::highlight::{paint_mark, rects_share_a_pixel, to_pixels, MarkColor, UvBox};
 use crate::task::{TintMark, TintSample};
 use crate::actors::ingress::screen_wlr::WlrScreenSource;
 use crate::actors::ingress::webcam_dmabuf::{self, WebcamMsg, WEBCAM_YIELD_ACK};
@@ -192,6 +192,23 @@ impl Drop for ShmMap {
             libc::munmap(self.ptr, self.len);
         }
     }
+}
+
+/// The mark's hit target is its rectangle. The disc stays an empty region.
+fn set_mark_input(
+    compositor: &wl_compositor::WlCompositor,
+    qh: &QueueHandle<OverlayState>,
+    surface: &wl_surface::WlSurface,
+    w: i32,
+    h: i32,
+) {
+    let region = compositor.create_region(qh, ());
+    region.add(0, 0, w.max(1), h.max(1));
+    surface.set_input_region(Some(&region));
+    let opaque = compositor.create_region(qh, ());
+    surface.set_opaque_region(Some(&opaque));
+    region.destroy();
+    opaque.destroy();
 }
 
 impl Overlay {
@@ -555,29 +572,31 @@ impl Overlay {
             })
             .collect();
 
+        // Same phrase and a shared pixel: this surface. A new width used to
+        // destroy it, and the press died with the generation.
+        let mut used = vec![false; desired.len()];
         let mut kill = Vec::new();
-        let mut move_to = Vec::new();
+        let mut place = Vec::new();
         for (i, mark) in self.state.marks.iter().enumerate() {
             if mark.dying {
                 continue;
             }
-            match desired.iter().find(|(id, _, _, w, h)| *id == mark.id && *w == mark.w && *h == mark.h) {
-                Some((_, x, y, _, _)) => {
-                    if *x != mark.x || *y != mark.y {
-                        move_to.push((i, *x, *y));
-                    }
+            let hit = desired.iter().enumerate().find(|(di, (id, x, y, w, h))| {
+                !used[*di]
+                    && id == &mark.id
+                    && rects_share_a_pixel(mark.x, mark.y, mark.w, mark.h, *x, *y, *w, *h)
+            });
+            match hit {
+                Some((di, _)) => {
+                    used[di] = true;
+                    place.push((i, di));
                 }
                 None => kill.push(i),
             }
         }
-        for (i, x, y) in move_to {
-            let mark = &mut self.state.marks[i];
-            mark.x = x;
-            mark.y = y;
-            if let (Some(layer), Some(surface)) = (&mark.layer, &mark.surface) {
-                layer.set_margin(y, 0, 0, x);
-                surface.commit();
-            }
+        for (i, di) in place {
+            let (_, x, y, w, h) = &desired[di];
+            self.place_mark(i, *x, *y, *w, *h);
         }
         for i in kill {
             let generation = self.state.marks[i].generation;
@@ -594,13 +613,8 @@ impl Overlay {
                 surface.destroy();
             }
         }
-        for (id, x, y, w, h) in &desired {
-            let exists = self
-                .state
-                .marks
-                .iter()
-                .any(|m| m.id == *id && !m.dying && m.w == *w && m.h == *h);
-            if exists {
+        for (di, (id, x, y, w, h)) in desired.iter().enumerate() {
+            if used[di] {
                 continue;
             }
             if let Err(e) = self.spawn_mark(id, *x, *y, *w, *h) {
@@ -641,6 +655,46 @@ impl Overlay {
         rects
     }
 
+    /// Move or resize the surface already up. The generation stays, and so does a press.
+    fn place_mark(&mut self, i: usize, x: i32, y: i32, w: i32, h: i32) {
+        let (moved, resized, layer, surface) = {
+            let mark = &mut self.state.marks[i];
+            let moved = x != mark.x || y != mark.y;
+            let resized = w != mark.w || h != mark.h;
+            if !moved && !resized {
+                return;
+            }
+            mark.x = x;
+            mark.y = y;
+            mark.w = w;
+            mark.h = h;
+            if resized {
+                mark.configured = false;
+                mark.last_paint = None;
+            }
+            (moved, resized, mark.layer.clone(), mark.surface.clone())
+        };
+        if resized {
+            if let (Some(compositor), Some(surface)) = (self.state.compositor.clone(), surface.clone()) {
+                let qh = self.event_queue.handle();
+                set_mark_input(&compositor, &qh, &surface, w, h);
+            }
+        }
+        if let Some(layer) = layer.as_ref() {
+            if resized {
+                layer.set_size(w.max(1) as u32, h.max(1) as u32);
+            }
+            if moved || resized {
+                layer.set_margin(y, 0, 0, x);
+            }
+        }
+        if moved || resized {
+            if let Some(surface) = surface.as_ref() {
+                surface.commit();
+            }
+        }
+    }
+
     fn spawn_mark(&mut self, id: &str, x: i32, y: i32, w: i32, h: i32) -> Result<(), String> {
         let compositor = self.state.compositor.clone().ok_or("highlight: no wl_compositor")?;
         let shell = self.state.layer_shell.clone().ok_or("highlight: no layer shell")?;
@@ -649,13 +703,7 @@ impl Overlay {
         self.mark_seq = self.mark_seq.wrapping_add(1);
         let key = format!("{id}:{}", self.mark_seq);
         let surface = compositor.create_surface(&qh, ());
-        let region = compositor.create_region(&qh, ());
-        region.add(0, 0, w.max(1), h.max(1));
-        surface.set_input_region(Some(&region));
-        let opaque = compositor.create_region(&qh, ());
-        surface.set_opaque_region(Some(&opaque));
-        region.destroy();
-        opaque.destroy();
+        set_mark_input(&compositor, &qh, &surface, w, h);
         let layer = shell.get_layer_surface(
             &surface,
             output.as_ref(),
