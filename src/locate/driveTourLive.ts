@@ -83,6 +83,15 @@ function liveIo(client: DaemonClient, presenceId: string | undefined, stopping: 
     await client.call("concealHighlight", { presenceId, phraseId });
   }
 
+  /** The phrase just answered leaves before the next page is found. The phrase being placed is not in this set. */
+  async function concealLeft(nextPhraseId: string): Promise<void> {
+    const leaving = [...boxes.keys()].filter((id) => id !== nextPhraseId);
+    for (const id of leaving) {
+      console.error(`tour: conceal ${id}`);
+      await drop(id);
+    }
+  }
+
   async function dropAll(): Promise<void> {
     const ids = [...boxes.keys()];
     boxes.clear();
@@ -250,6 +259,7 @@ function liveIo(client: DaemonClient, presenceId: string | undefined, stopping: 
     async locate(item) {
       if (!viewerKind) viewerKind = item.page != null ? "pdf" : "web";
       const source = item.page != null ? "pdf" : "web";
+      await concealLeft(item.phraseId);
       const beforeTop = await readScrollTop();
       const beforeGen = generation;
       const { placeForTour } = await import("./run.js");
