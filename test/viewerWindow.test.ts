@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { viewerStillMapped, type ViewerKind } from "../dist/locate/viewer.js";
+import { latchedWindowClosed, viewerStillMapped, type ViewerKind } from "../dist/locate/viewer.js";
 import type { Client } from "../dist/locate/web.js";
 
 function client(partial: Partial<Client> & Pick<Client, "address" | "className">): Client {
@@ -35,6 +35,13 @@ test("the first chromium is the web window, and that address leaving ends it", (
   assert.equal(latched.address, "0xwiki");
   assert.deepEqual(mapped("web", [other], latched.address), { up: false, address: "0xwiki" });
   assert.deepEqual(mapped("web", [{ ...wiki, workspace: 4 }], latched.address), { up: true, address: "0xwiki" });
+});
+
+test("a window that was never latched is not the person's close", () => {
+  assert.equal(latchedWindowClosed(null, false), false);
+  assert.equal(latchedWindowClosed("", false), false);
+  assert.equal(latchedWindowClosed("0xwiki", true), false);
+  assert.equal(latchedWindowClosed("0xwiki", false), true);
 });
 
 test("the evince window is the pdf tour, and a chromium window is not", () => {

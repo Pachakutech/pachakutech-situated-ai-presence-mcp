@@ -64,6 +64,8 @@ export type DriveIo = {
   markShown?(phraseId: string): Promise<boolean>;
   /** The viewer window closed, or this driver was asked to stop. */
   halted?(): boolean;
+  /** The list is finished and the driver is still up. The latched window and a dismissal still end it. */
+  keepWatch?(): Promise<void>;
 };
 
 export function permittedMove(task: TourView): "webFind" | "pdfPage" | "miss" {
@@ -180,7 +182,11 @@ export async function driveTour(projectId: string, io: DriveIo & { stopped(): bo
     try {
       const step = await driveOnce(projectId, io, walked);
       if (step.taskId) walked = step.taskId;
-      if (step.kind === "idle") await io.sleep(POLL_MS);
+      if (step.kind === "idle") {
+        if (io.keepWatch) await io.keepWatch();
+        if (io.stopped()) break;
+        await io.sleep(POLL_MS);
+      }
     } catch (error) {
       const line = error instanceof Error ? error.message : "tour drive failed";
       console.error(line);

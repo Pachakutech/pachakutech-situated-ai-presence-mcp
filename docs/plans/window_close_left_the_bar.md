@@ -4,6 +4,8 @@ Written 12 November 2026. Rewritten the same day. Project `pj-4cefa476cf86cc7e`,
 
 The scroll chase held. The window close did not take the bar with it.
 
+Landed 12 November 2026. After the task is done the driver stays up and keeps the bars. The idle poll still runs `watchGlass`, so a scroll still moves them. A latched viewer that leaves the Hyprland client list is concealed, the driver logs `tour: the viewer window closed`, and the tour ends. A window that was never latched is the next source still opening, and that does not end the tour. `launch` clears the latch before it opens that source, then latches the new window once it is on the list. Dismissing the task conceals every bar and ends the tour. The window may stay. A hand on a phrase does not end it. The citations sentence says the frontier may end the tour whenever it no longer wants updates, without waiting for a hand on every phrase.
+
 ## What the run stored
 
 Allyl, `lc-59085c972eea8d3d`, was shown, dwelled, and stored deny, T0. The tour left 463 ms later and opened the inductive sentence. Inductive, `lc-9adf729650b8faf1`, was shown, dwelled, and stored accept, T0. The tour row for that hand is 458 ms later. `tk-2` then reads `state: done`, `again: false`, one item.
