@@ -2,7 +2,7 @@
 
 Written 11 November 2026. Landed 11 November 2026. A desktop reading that moves the box by a few pixels is still the locus already on screen. The surface stays, and so does a press.
 
-`sync_marks` keeps the surface when the phrase id is the same and the pixel rectangles share a pixel. That surface is moved with `set_margin` and resized with `set_size`. The generation stays, and a press on it stays. The hit target is updated with the same input region `spawn_mark` uses. A box that shares no pixel, or a box for another phrase id, still replaces the surface. `LONG_TAP_MS` stays 500. The withheld nudge on the next document is still the open half of `next_locus_unmarked.md`.
+`sync_marks` keeps the surface when the phrase id is the same and the pixel rectangles share a pixel. That surface is moved with `set_margin` and resized with `set_size`. The generation stays, and a press on it stays. The hit target is updated with the same input region `spawn_mark` uses. A box that shares no pixel, or a box for another phrase id, still replaces the surface. `LONG_TAP_MS` stays 500. The next document's lift landed with `next_locus_unmarked.md`. Opening that document drops the previous page's scroll, and a low sentence still moves eighty pixels. A scroll on the page does not lock that nudge.
 
 ## A locus
 

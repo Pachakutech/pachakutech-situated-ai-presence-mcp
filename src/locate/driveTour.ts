@@ -144,6 +144,8 @@ export async function driveOnce(projectId: string, io: DriveIo, walked?: string)
     }
     const report = await io.reportSourceOpen({ projectId, sourceId: req.sourceId, ok: true });
     if (!report.taskId) return { kind: "opened" };
+    // This document's offset is not the page the tour just left.
+    io.releaseScroll?.();
     await io.runTour(report.taskId, tourDeps(io, report.taskId));
     return { kind: "toured", taskId: report.taskId };
   }

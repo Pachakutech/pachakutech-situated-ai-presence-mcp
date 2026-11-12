@@ -1,7 +1,6 @@
 // Web adapter. The viewer's find moves the page. placeWeb stops once that
 // scroll has settled. locateWeb then photographs the line.
 
-import { nudgeHeld, scrollTaken } from "./scrollHold.js";
 import {
   bandOf,
   coveredBy,
@@ -117,9 +116,8 @@ function fail(error: string, hint: string): LocateErr {
   return { ok: false, source: "web", error, hint };
 }
 
-/** Their scroll, or a pointer hold, withholds the nudge. Focus failure stays a failure. */
+/** The tour keeps the nudge. Focus failure stays a failure. */
 async function ownedNudge(deps: Deps, address: string, dy: number): Promise<"moved" | "held" | "focus"> {
-  if (scrollTaken() || nudgeHeld()) return "held";
   const moved = await deps.scrollBy(address, dy);
   return moved ? "moved" : "focus";
 }
