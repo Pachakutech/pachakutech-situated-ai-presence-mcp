@@ -9,7 +9,7 @@ import { listHyprClients, nudgePage, outputSize, readPageGeneration, readScrollT
 import { runTour, type GlassHit, type TourItem, type TourView } from "./tour.js";
 import { driveUntilStop, type DriveIo, type OpenRequest } from "./driveTour.js";
 import { NUDGE_PX, frameAfterSettle, glassPhraseBox, type GlassFrame } from "./core.js";
-import { viewerStillMapped, type ViewerKind } from "./viewer.js";
+import { latchedWindowClosed, viewerStillMapped, type ViewerKind } from "./viewer.js";
 
 function asTourView(detail: Record<string, unknown>, taskId: string): TourView {
   const items = Array.isArray(detail.items) ? (detail.items as TourItem[]) : [];
@@ -122,6 +122,8 @@ function liveIo(client: DaemonClient, presenceId: string | undefined, stopping: 
       viewerAddress = seen.address;
       return false;
     }
+    // The next source has not been latched yet. Its window arriving is not a close.
+    if (!latchedWindowClosed(viewerAddress, false)) return false;
     ended = true;
     console.error("tour: the viewer window closed");
     try {
@@ -130,6 +132,51 @@ function liveIo(client: DaemonClient, presenceId: string | undefined, stopping: 
       // The daemon retires the marks if this connection is already gone.
     }
     return true;
+  }
+
+  /** The window we are about to use, once it is on the client list. A miss leaves the latch empty. */
+  async function rememberViewer(): Promise<void> {
+    if (!viewerKind || viewerAddress) return;
+    let clients;
+    try {
+      clients = await listHyprClients();
+    } catch {
+      return;
+    }
+    const seen = viewerStillMapped(null, viewerKind, clients);
+    if (seen.up && seen.address) viewerAddress = seen.address;
+  }
+
+  /** The client dismissed the task. Every bar comes down. The window may stay. */
+  async function noteDismissed(): Promise<void> {
+    if (ended) return;
+    ended = true;
+    console.error("tour: the tour was dismissed");
+    try {
+      await concealMarks();
+    } catch {
+      // The daemon retires the marks if this connection is already gone.
+    }
+  }
+
+  /** The list is finished. The bars stay, and the latched window is still the tour. */
+  async function keepWatch(): Promise<void> {
+    if (ended) return;
+    if (!taskSeen) {
+      await viewerClosed();
+      return;
+    }
+    let view: TourView;
+    try {
+      view = asTourView(await client.call("queryTask", { taskId: taskSeen }), taskSeen);
+    } catch {
+      return;
+    }
+    if (view.state === "dismissed") {
+      await noteDismissed();
+      return;
+    }
+    await watchGlass(view);
   }
 
   async function screenH(): Promise<number> {
@@ -239,14 +286,17 @@ function liveIo(client: DaemonClient, presenceId: string | undefined, stopping: 
       const detail = await client.call("reportSourceOpen", fields);
       return { taskId: typeof detail.taskId === "string" ? detail.taskId : undefined };
     },
-    launch(spec) {
+    async launch(spec) {
+      // The next source gets a new latch. The window this one replaces is not the person's close.
       viewerKind = spec.kind;
       viewerAddress = null;
-      return launchListed(spec, {
+      const opened = await launchListed(spec, {
         portOpen: () => locatePortOpen(),
         spawn: (bin, args) => spawnListed(bin, args),
         navigate: (url) => navigateLocate(url),
       });
+      await rememberViewer();
+      return opened;
     },
     async queryTask(taskId) {
       return asTourView(await client.call("queryTask", { taskId }), taskId);
@@ -274,6 +324,7 @@ function liveIo(client: DaemonClient, presenceId: string | undefined, stopping: 
       });
       await trackTravel(beforeTop, beforeGen);
       if (!placed.ok) return { ok: false };
+      await rememberViewer();
       const settle = Date.now();
       const frame = await frameAfterSettle(
         settle,
@@ -304,6 +355,7 @@ function liveIo(client: DaemonClient, presenceId: string | undefined, stopping: 
         holding = next;
       }
       await paint(item.phraseId, box, item.query ?? "passage");
+      await rememberViewer();
     },
     async conceal() {
       await concealMarks();
@@ -343,6 +395,10 @@ function liveIo(client: DaemonClient, presenceId: string | undefined, stopping: 
         if (taskSeen) {
           const view = asTourView(await client.call("queryTask", { taskId: taskSeen }), taskSeen);
           if (view.say && view.saySeq) return "handoff";
+          if (view.state === "dismissed") {
+            await noteDismissed();
+            return "lost";
+          }
           if (view.state !== "active" || view.index !== index) return "left";
           await watchGlass(view);
           if (stopping() || ended) return "lost";
@@ -367,6 +423,10 @@ function liveIo(client: DaemonClient, presenceId: string | undefined, stopping: 
       while (Date.now() < giveUp) {
         if (stopping() || ended) return;
         const view = asTourView(await client.call("queryTask", { taskId: taskSeen }), taskSeen);
+        if (view.state === "dismissed") {
+          await noteDismissed();
+          return;
+        }
         if (view.state !== "active" || view.index !== index) return;
         if ((view.saySeq ?? 0) !== saySeq) return;
         await watchGlass(view);
@@ -392,6 +452,7 @@ function liveIo(client: DaemonClient, presenceId: string | undefined, stopping: 
       await client.call("stopPresence", { presenceId });
     },
     halted: () => ended || stopping(),
+    keepWatch,
     now: () => Date.now(),
   };
 }

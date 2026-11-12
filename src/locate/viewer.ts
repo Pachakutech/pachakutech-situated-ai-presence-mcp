@@ -20,8 +20,16 @@ export function pickViewer(kind: ViewerKind, clients: Client[]): Client | null {
 }
 
 /**
+ * The person's close is an address the tour had already latched.
+ * No address yet is the next source still opening, and that is not a close.
+ */
+export function latchedWindowClosed(address: string | null, up: boolean): boolean {
+  return !!address && !up;
+}
+
+/**
  * A latched address is the window the tour is using.
- * The first call latches the locate match. A missing list entry is that window closed.
+ * The first call latches the locate match. A missing list entry for that address is that window closed.
  */
 export function viewerStillMapped(
   address: string | null,

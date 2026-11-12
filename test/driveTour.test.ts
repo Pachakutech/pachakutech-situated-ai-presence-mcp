@@ -323,6 +323,26 @@ test("a later chunk is walked once", async () => {
   assert.deepEqual(ran, ["tk-2"]);
 });
 
+test("an idle watch ends the tour when the window is gone", async () => {
+  let watches = 0;
+  let ended = false;
+  const sleeps: number[] = [];
+  await driveTour("pj-1", {
+    ...harness({
+      async sleep(ms) {
+        sleeps.push(ms);
+      },
+    }),
+    async keepWatch() {
+      watches += 1;
+      ended = true;
+    },
+    stopped: () => ended,
+  });
+  assert.equal(watches, 1);
+  assert.deepEqual(sleeps, []);
+});
+
 test("an idle poll waits, and a query error does not stop the loop", async () => {
   const sleeps: number[] = [];
   let polls = 0;
@@ -414,6 +434,27 @@ test("a fresh reading of a marked phrase settles before it is declared", () => {
   assert.equal(watch.includes("settleBox"), true);
   assert.ok(watch.indexOf("if (!shown) return mark") < watch.indexOf("settleBox"));
   assert.ok(watch.indexOf("settleBox") < watch.indexOf("keepHeld"));
+});
+
+test("a finished list keeps the bars until the latched window closes", () => {
+  const tour = readFileSync(join(root, "src/locate/driveTour.ts"), "utf8");
+  const loop = tour.slice(tour.indexOf("export async function driveTour"), tour.indexOf("export async function tourDriveCommand"));
+  const idle = loop.slice(loop.indexOf('step.kind === "idle"'));
+  assert.ok(idle.indexOf("keepWatch") < idle.indexOf("sleep"));
+  const live = readFileSync(join(root, "src/locate/driveTourLive.ts"), "utf8");
+  const closed = live.slice(live.indexOf("async function viewerClosed"), live.indexOf("async function rememberViewer"));
+  assert.ok(closed.indexOf("latchedWindowClosed") < closed.indexOf("the viewer window closed"));
+  assert.ok(closed.indexOf("concealMarks") > closed.indexOf("the viewer window closed"));
+  const keep = live.slice(live.indexOf("async function keepWatch"), live.indexOf("async function screenH"));
+  assert.equal(keep.includes("watchGlass"), true);
+  assert.equal(keep.includes('view.state === "dismissed"'), true);
+  assert.equal(keep.includes('"done"'), false);
+  const launch = live.slice(live.indexOf("async launch(spec)"), live.indexOf("async queryTask"));
+  assert.ok(launch.indexOf("viewerAddress = null") < launch.indexOf("launchListed"));
+  assert.ok(launch.indexOf("launchListed") < launch.indexOf("rememberViewer"));
+  const hold = live.slice(live.indexOf("async holdPhrase"), live.indexOf("async resolveItem"));
+  assert.equal(hold.includes('view.state === "dismissed"'), true);
+  assert.ok(hold.indexOf("noteDismissed") < hold.indexOf('view.state !== "active"'));
 });
 
 test("the live driver conceals on the way out and keeps the 360 second hold", () => {
