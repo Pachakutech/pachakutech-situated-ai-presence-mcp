@@ -4,6 +4,8 @@ Implementation ticket. Written 11 November 2026, from the run stopped at 22:59:4
 
 Shortening the 360 second lease does not take that bar down. The tour paints with `untilConceal: true`. `hold_until_conceal` sets `held`. `InterestBook::visible` keeps a held mark whether or not `shown_until` has passed. Speech ending does not retire it either. The 360 second figure stays the lease for a mark that is not held. This ticket leaves that number alone.
 
+Landed 11 November 2026. `driveUntilStop` calls `conceal` when the driver returns, including after `SIGINT` or `SIGTERM`. The window stays open. A held mark is owned by the socket connection that painted it. That connection closing retires those marks. Another connection's close leaves them up. A mark painted without `untilConceal` still uses the 360 second lease. While the driver is in the hold, the viewer window leaving the client list calls `conceal` and ends the tour. The web window is the Chromium `chooseWindow` already picks, and the PDF window is Evince. The first match is latched. That address leaving the list ends the tour. Another browser that is still open does not keep it.
+
 ## Keep
 
 The chase stays. A sentence still on the viewer window stays marked, and the locus id stays the one the project chose. Overlap-keep stays. `LONG_TAP_MS` stays 500. A live tour still holds its bars past a minute, because the person may still be deciding.

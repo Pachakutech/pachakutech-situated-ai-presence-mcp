@@ -19,6 +19,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 struct Client {
+    /// Owns the until-conceal marks this connection paints.
+    id: u64,
     stream: UnixStream,
     buf: Vec<u8>,
     tier: Tier,
@@ -51,6 +53,7 @@ impl Drop for Endpoint {
 pub struct SocketServer {
     listeners: Vec<Endpoint>,
     clients: Vec<Client>,
+    next_client: u64,
     registry: Mutex<Registry>,
     avatar_commands: Vec<AvatarCommand>,
     text: Arc<TextMemory>,
@@ -119,6 +122,7 @@ impl SocketServer {
         Ok(Self {
             listeners,
             clients: Vec::new(),
+            next_client: 1,
             registry: Mutex::new(Registry::new()),
             avatar_commands: Vec::new(),
             text,
@@ -212,7 +216,10 @@ impl SocketServer {
                 };
                 let Some(stream) = accepted else { break };
                 stream.set_nonblocking(true)?;
+                let id = self.next_client;
+                self.next_client = self.next_client.saturating_add(1);
                 self.clients.push(Client {
+                    id,
                     stream,
                     buf: Vec::new(),
                     tier,
@@ -227,9 +234,11 @@ impl SocketServer {
             match read_client(&mut self.clients[i], pipeline, &self.registry, &mut self.avatar_commands, &self.text, &self.speech) {
                 Ok(ClientRead::Keep) => i += 1,
                 Ok(ClientRead::Closed) | Err(_) => {
+                    retire_client(&self.registry, &self.clients[i]);
                     self.clients.remove(i);
                 }
                 Ok(ClientRead::Shutdown) => {
+                    retire_client(&self.registry, &self.clients[i]);
                     self.clients.remove(i);
                     return Ok(true);
                 }
@@ -308,7 +317,7 @@ fn read_client(
                     Ok(()) if matches!(proposal, Proposal::ObservePhrase(_)) && !observe_slot_open(client) => {
                         (ProposalResult::err(proposal.proposal_id(), "rate: observePhrase"), false)
                     }
-                    Ok(()) => dispatch(proposal, pipeline, registry, avatar_commands, text, speech, client.tier),
+                    Ok(()) => dispatch(proposal, pipeline, registry, avatar_commands, text, speech, client.tier, client.id),
                 }
             }
             Err(e) => {
@@ -441,11 +450,17 @@ fn flush_subscribers(clients: &mut Vec<Client>, registry: &Mutex<Registry>) {
             }
         };
         if drop_client {
+            retire_client(registry, &clients[i]);
             clients.remove(i);
         } else {
             i += 1;
         }
     }
+}
+
+/// A closed connection drops the held marks it still owns. A timed mark stays on its lease.
+fn retire_client(registry: &Mutex<Registry>, client: &Client) {
+    registry.lock().expect("registry mutex poisoned").release_connection(client.id);
 }
 
 fn dispatch(
@@ -456,6 +471,7 @@ fn dispatch(
     text: &TextMemory,
     speech: &SpeechBoard,
     tier: Tier,
+    conn: u64,
 ) -> (ProposalResult, bool) {
     let proposal_id = proposal.proposal_id().to_string();
     if matches!(proposal, Proposal::Shutdown { .. }) {
@@ -540,6 +556,7 @@ fn dispatch(
         Proposal::ConcealHighlight { presence_id, phrase_id, .. } => {
             if let Some(phrase) = phrase_id.as_deref().map(str::trim).filter(|id| !id.is_empty()) {
                 reg.retire_interest(phrase);
+                reg.forget_held(phrase);
                 ProposalResult::ok(&proposal_id, Some(json!({ "concealed": true })))
             } else {
                 let concealed = reg.conceal_for_jump(&presence_id, Instant::now());
@@ -560,8 +577,12 @@ fn dispatch(
                     let key = phrase_id.as_deref().map(str::trim).filter(|id| !id.is_empty()).unwrap_or(presence_id.as_str());
                     if until_conceal {
                         reg.hold_interest_until_conceal(key);
-                    } else if until_speech {
-                        reg.hold_interest_for_speech(key);
+                        reg.claim_held(conn, key);
+                    } else {
+                        reg.forget_held(key);
+                        if until_speech {
+                            reg.hold_interest_for_speech(key);
+                        }
                     }
                     reg.note_task_highlight(&presence_id, phrase_id.as_deref(), now_ms());
                     ProposalResult::ok(

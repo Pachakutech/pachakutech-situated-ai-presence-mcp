@@ -74,8 +74,10 @@ export type TourDeps = {
   center?(hit: LocateHit): Promise<LocateHit | null>;
   /** Their scroll is over and the next hop is ours. */
   releaseScroll?(): void;
-  /** Blocks on the phrase just shown. Returns when the daemon leaves it. */
+  /** Blocks on the phrase just shown. Returns when the daemon leaves it, or the viewer window does. */
   holdPhrase?(): Promise<void>;
+  /** The driver is stopping, or the viewer window has gone. The next phrase is not taken. */
+  halted?(): boolean;
   /** True when this phrase already has a mark. A miss then stays located. */
   markShown?(phraseId: string): Promise<boolean>;
   /** False until a move is permitted. A scrolled item is then a miss unless it is already on the glass. */
@@ -116,6 +118,7 @@ export async function runTour(taskId: string, deps: TourDeps): Promise<void> {
   let said = 0;
   let placed: string | null = null;
   for (let step = 0; step < STEP_CAP; step++) {
+    if (deps.halted?.()) return;
     if (!yielded && (await deps.preempted())) {
       yielded = true;
       await deps.tourSignal({ taskId, signal: "preempt", reason: "page" });

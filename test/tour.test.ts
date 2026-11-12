@@ -140,6 +140,90 @@ test("a permitted find is located once, and a miss is not nudged", async () => {
   assert.deepEqual(failed.calls.resolve, ["notYetFound"]);
 });
 
+test("the hold ending the tour does not take the next phrase", async () => {
+  const items: TourItem[] = [
+    { phraseId: "ph-1", query: "first line", narration: "First.", scroll: false },
+    { phraseId: "ph-2", query: "second line", narration: "Second.", scroll: false },
+  ];
+  const highlighted: string[] = [];
+  let halted = false;
+  let holds = 0;
+  const deps: TourDeps = {
+    movesEnabled: true,
+    async queryTask(taskId) {
+      return { taskId, state: "active", index: 0, items };
+    },
+    async locate() {
+      return { ok: true, u: 0.1, v: 0.2, w: 0.3, h: 0.05 };
+    },
+    async highlight(_hit, item) {
+      highlighted.push(item.phraseId);
+    },
+    async speak() {},
+    async waitSpeech() {
+      return "done";
+    },
+    async resolveItem() {},
+    async tourSignal() {},
+    async stopSpeech() {},
+    async preempted() {
+      return false;
+    },
+    now: () => 0,
+    async sleep() {},
+    async holdPhrase() {
+      holds += 1;
+      halted = true;
+    },
+    halted: () => halted,
+  };
+  await runTour("tk-1", deps);
+  assert.deepEqual(highlighted, ["ph-1"]);
+  assert.equal(holds, 1);
+});
+
+test("a hand during the hold takes the next phrase", async () => {
+  const items: TourItem[] = [
+    { phraseId: "ph-1", query: "first line", narration: "First.", scroll: false },
+    { phraseId: "ph-2", query: "second line", narration: "Second.", scroll: false },
+  ];
+  let index = 0;
+  const highlighted: string[] = [];
+  let holds = 0;
+  const deps: TourDeps = {
+    movesEnabled: true,
+    async queryTask(taskId) {
+      if (index >= items.length) return { taskId, state: "done", index: items.length - 1, items };
+      return { taskId, state: "active", index, items };
+    },
+    async locate() {
+      return { ok: true, u: 0.1, v: 0.2, w: 0.3, h: 0.05 };
+    },
+    async highlight(_hit, item) {
+      highlighted.push(item.phraseId);
+    },
+    async speak() {},
+    async waitSpeech() {
+      return "done";
+    },
+    async resolveItem() {},
+    async tourSignal() {},
+    async stopSpeech() {},
+    async preempted() {
+      return false;
+    },
+    now: () => 0,
+    async sleep() {},
+    async holdPhrase() {
+      holds += 1;
+      index += 1;
+    },
+  };
+  await runTour("tk-1", deps);
+  assert.deepEqual(highlighted, ["ph-1", "ph-2"]);
+  assert.equal(holds, 2);
+});
+
 test("locate does not read a project store or a doc map", () => {
   const root = new URL("../src/locate/", import.meta.url);
   const names = readdirSync(root).filter((name) => name.endsWith(".ts"));

@@ -1,6 +1,6 @@
 // Polls queryProject and opens the parked source. This process is the one
 // allowed to start the locate window. It does not press Start and it does
-// not create a project. The viewer stays up.
+// not create a project. Ending the tour takes the bars down. The window stays up.
 
 import type { GlassHit, LocateHit, TourDeps, TourItem, TourView } from "./tour.js";
 
@@ -62,6 +62,8 @@ export type DriveIo = {
   releaseScroll?(): void;
   holdPhrase?(): Promise<void>;
   markShown?(phraseId: string): Promise<boolean>;
+  /** The viewer window closed, or this driver was asked to stop. */
+  halted?(): boolean;
 };
 
 export function permittedMove(task: TourView): "webFind" | "pdfPage" | "miss" {
@@ -114,6 +116,7 @@ function tourDeps(io: DriveIo, taskId: string): TourDeps {
     releaseScroll: io.releaseScroll,
     holdPhrase: io.holdPhrase,
     markShown: io.markShown,
+    halted: io.halted,
     async stopSpeech() {
       if (io.stopSpeech) await io.stopSpeech();
     },
@@ -154,6 +157,21 @@ export async function driveOnce(projectId: string, io: DriveIo, walked?: string)
     return { kind: "toured", taskId: view.tourTaskId };
   }
   return { kind: "idle" };
+}
+
+/** Runs until `stopped`. Conceal runs on the way out. The window is left up. */
+export async function driveUntilStop(projectId: string, io: DriveIo & { stopped(): boolean }): Promise<void> {
+  try {
+    await driveTour(projectId, io);
+  } finally {
+    if (io.conceal) {
+      try {
+        await io.conceal();
+      } catch {
+        // The socket may already be gone. The daemon retires held marks when that connection closes.
+      }
+    }
+  }
 }
 
 export async function driveTour(projectId: string, io: DriveIo & { stopped(): boolean }): Promise<void> {
