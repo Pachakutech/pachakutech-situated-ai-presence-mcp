@@ -364,6 +364,45 @@ test("placeWeb scrolls from the find and does not photograph", async () => {
   assert.deepEqual(scrolls, [-80]);
 });
 
+test("a low find still scrolls when the page was taken", async () => {
+  const { placeWeb } = await import("../dist/locate/web.js");
+  const { resetScrollHold, takeScroll } = await import("../dist/locate/scrollHold.js");
+  resetScrollHold();
+  takeScroll();
+  const scrolls: number[] = [];
+  const placed = await placeWeb(
+    { query: "the inductive effect", pad: 0, timeoutMs: 10_000, noOpen: true, verify: true },
+    {
+      async clients() {
+        return [browser];
+      },
+      async screen() {
+        return { w: 1920, h: 1080 };
+      },
+      async ocr() {
+        return [];
+      },
+      async scrollBy(_address: string, dy: number) {
+        scrolls.push(dy);
+        return true;
+      },
+      async open() {},
+      async findInPage() {
+        return { found: true, rect: { x: 24, y: 891, w: 992, h: 44 } };
+      },
+      async scrollEnds() {
+        return { atTop: false, atBottom: false };
+      },
+      async sleep() {},
+      now: () => 1_000,
+      log() {},
+    },
+  );
+  assert.equal(placed.ok, true);
+  assert.deepEqual(scrolls, [80]);
+  resetScrollHold();
+});
+
 test("a find that misses is not yet found and is not photographed", async () => {
   const { placeWeb } = await import("../dist/locate/web.js");
   let shots = 0;

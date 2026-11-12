@@ -4,8 +4,8 @@
 import { DaemonClient } from "../daemonClient.js";
 import { launchListed, locatePortOpen, navigateLocate, spawnListed } from "./openSource.js";
 import { centerWithMark, followScroll, glassMarks, keepHeld, linesFromColumns, type GlassLocus, type HandName, type Uv } from "./glass.js";
-import { holdNudge, releaseScroll as clearScrollHold, scrollDrifted, scrollTaken, takeScroll } from "./scrollHold.js";
-import { nudgePage, outputSize, pointerOverChromium, readPageGeneration, readScrollTop } from "./run.js";
+import { noteOwnedScroll, releaseScroll as clearScrollHold, scrollDrifted } from "./scrollHold.js";
+import { nudgePage, outputSize, readPageGeneration, readScrollTop } from "./run.js";
 import { runTour, type GlassHit, type TourItem, type TourView } from "./tour.js";
 import { driveTour, type DriveIo, type OpenRequest } from "./driveTour.js";
 import { NUDGE_PX, frameAfterSettle, glassPhraseBox, type GlassFrame } from "./core.js";
@@ -55,7 +55,6 @@ function liveIo(client: DaemonClient, presenceId: string | undefined): DriveIo {
   let paintedTop: number | null = null;
   let generation: number | null = null;
   let glassSeq = -1;
-  let toldScroll = false;
 
   async function paint(phraseId: string, box: Uv, description: string): Promise<void> {
     if (!presenceId) return;
@@ -133,15 +132,9 @@ function liveIo(client: DaemonClient, presenceId: string | undefined): DriveIo {
     if (origin != null) generation = origin;
     const top = await readScrollTop();
     if (top != null && scrollDrifted(top)) {
-      takeScroll();
-      if (!toldScroll && taskSeen) {
-        toldScroll = true;
-        await client.call("tourSignal", { taskId: taskSeen, signal: "preempt", reason: "page" });
-      }
-      if (paintedTop != null && top !== paintedTop) {
-        await shiftAll(top - paintedTop);
-        paintedTop = top;
-      }
+      noteOwnedScroll(top);
+      if (paintedTop != null && top !== paintedTop) await shiftAll(top - paintedTop);
+      paintedTop = top;
     }
     const text = await client.call("queryScreenText", {});
     const seq = typeof text.seq === "number" ? text.seq : -1;
@@ -262,22 +255,16 @@ function liveIo(client: DaemonClient, presenceId: string | undefined): DriveIo {
       if (presenceId) await client.call("concealHighlight", { presenceId });
     },
     async pointerHold() {
-      if (!(await pointerOverChromium())) return false;
-      holdNudge();
-      return true;
+      return false;
     },
     async preempted() {
-      if (scrollTaken()) return true;
-      const top = await readScrollTop();
-      if (top == null || !scrollDrifted(top)) return false;
-      takeScroll();
-      return true;
+      return false;
     },
     releaseScroll() {
       clearScrollHold();
     },
     async center(hit) {
-      if (scrollTaken() || boxes.size > 0 || hit.u === undefined || hit.v === undefined || hit.w === undefined || hit.h === undefined) {
+      if (boxes.size > 0 || hit.u === undefined || hit.v === undefined || hit.w === undefined || hit.h === undefined) {
         return null;
       }
       const step = centerWithMark({ u: hit.u, v: hit.v, w: hit.w, h: hit.h }, await screenH(), NUDGE_PX);

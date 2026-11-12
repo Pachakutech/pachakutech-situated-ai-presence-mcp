@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { centerWithMark, followScroll, glassMarks, keepHeld, linesFromColumns, type GlassLocus } from "../src/locate/core.ts";
-import { holdNudge, nudgeHeld, resetScrollHold, scrollDrifted, scrollTaken, takeScroll } from "../src/locate/scrollHold.ts";
+import { holdNudge, nudgeHeld, releaseScroll, resetScrollHold, scrollDrifted, scrollTaken, takeScroll } from "../src/locate/scrollHold.ts";
 import type { Line } from "../src/locate/core.ts";
 
 function line(y: number, text: string): Line {
@@ -91,5 +91,19 @@ test("their scroll stays taken and a pointer holds one nudge", () => {
   holdNudge();
   assert.equal(nudgeHeld(), true);
   assert.equal(nudgeHeld(), false);
+  resetScrollHold();
+});
+
+test("the next document's offset is not the page that was left", () => {
+  resetScrollHold();
+  assert.equal(scrollDrifted(400), false);
+  takeScroll();
+  holdNudge();
+  releaseScroll();
+  assert.equal(scrollTaken(), false);
+  assert.equal(nudgeHeld(), false);
+  assert.equal(scrollDrifted(12), false);
+  assert.equal(scrollDrifted(14), false);
+  assert.equal(scrollDrifted(40), true);
   resetScrollHold();
 });

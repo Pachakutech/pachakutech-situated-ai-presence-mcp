@@ -224,6 +224,71 @@ test("an ok report with no task leaves the window and skips the tour", async () 
   assert.deepEqual(step, { kind: "opened" });
 });
 
+test("opening the next document drops the previous page's scroll before the tour", async () => {
+  const order: string[] = [];
+  const step = await driveOnce(
+    "pj-1",
+    harness({
+      async queryProject() {
+        return { openRequest: parked("web", "https://example.com/inductive") };
+      },
+      launch: opening({
+        async navigate(url) {
+          order.push(`nav ${url}`);
+        },
+      }),
+      async reportSourceOpen() {
+        order.push("report");
+        return { taskId: "tk-2" };
+      },
+      releaseScroll() {
+        order.push("release");
+      },
+      async runTour(taskId) {
+        order.push(`run ${taskId}`);
+      },
+    }),
+  );
+  assert.deepEqual(step, { kind: "toured", taskId: "tk-2" });
+  assert.deepEqual(order, ["nav https://example.com/inductive", "report", "release", "run tk-2"]);
+});
+
+test("a failed open does not drop the scroll, and a chunk already up does not either", async () => {
+  let released = 0;
+  const failed = await driveOnce(
+    "pj-1",
+    harness({
+      async queryProject() {
+        return { openRequest: parked("web", "https://example.com/a") };
+      },
+      launch: opening({
+        async navigate() {
+          throw new Error("timed out");
+        },
+      }),
+      releaseScroll() {
+        released += 1;
+      },
+    }),
+  );
+  assert.deepEqual(failed, { kind: "failed" });
+  const walked = await driveOnce(
+    "pj-1",
+    harness({
+      async queryProject() {
+        return { tourTaskId: "tk-2" };
+      },
+      releaseScroll() {
+        released += 1;
+      },
+      async runTour() {},
+    }),
+    "tk-1",
+  );
+  assert.deepEqual(walked, { kind: "toured", taskId: "tk-2" });
+  assert.equal(released, 0);
+});
+
 test("a later chunk is walked once", async () => {
   const ran: string[] = [];
   const first = await driveOnce(

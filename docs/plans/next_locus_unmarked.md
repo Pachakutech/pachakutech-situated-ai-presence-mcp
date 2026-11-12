@@ -2,7 +2,9 @@
 
 Written 11 November 2026. The allyl bar went green. It changed size twelve times while it was up. A red tap did not stick. The inductive article opened, the sentence stayed low in the window, and no second bar was painted.
 
-The twelve surfaces landed 11 November 2026 as `overlap_keeps_the_mark.md`. An overlapping reading of this phrase keeps the surface, so a hold is no longer cleared by a new width. `LONG_TAP_MS` stays 500. The inductive sentence is still unmarked. `preempted` reads the new document's scroll offset as a taken page, because `releaseScroll` does not run when the hand arrives after the cue. The eighty pixel lift is withheld, and the desktop reading did not contain the quote. That half is still open. This pass does not release that scroll.
+The twelve surfaces landed 11 November 2026 as `overlap_keeps_the_mark.md`. An overlapping reading of this phrase keeps the surface, so a hold is no longer cleared by a new width. `LONG_TAP_MS` stays 500.
+
+The withheld lift landed 11 November 2026. Opening the next source drops the previous page's offset. The same day the scroll lock was released. A scroll on the page they are on moves the mark with the phrase. It does not withhold the nudge, and it does not start the next cue. Their hand continues the tour. A low sentence still gets the eighty pixel lift (`NUDGE_PX`), and the desktop reading is the page after that lift. A pointer on the window does not withhold that lift.
 
 ## The run
 
@@ -58,6 +60,8 @@ A short tap can land between two of those rebuilds. A half-second hold has to su
 
 ## Why the next sentence was not scrolled up and not highlighted
 
+This is the run. The repair is the release on open, above.
+
 The inductive article did open. The browser's find reported the sentence already inside the window, in the low band. The seat is the middle of the window, from 62 percent to 82 percent of its height, with one line of slack (`bandOf`). A box whose center is below that is `low`. Low asks for an eighty pixel scroll that moves the line up (`edgeScroll`, `NUDGE_PX`).
 
 That scroll is skipped, with no log line, when `ownedNudge` returns held. Held means the tour has recorded the scroll as taken, or a pointer hold has withheld one nudge. The taken flag is set in `preempted` before the find runs. `preempted` compares the document's scroll offset with the offset remembered from the page before. A difference of more than two pixels records the page as taken (`scrollDrifted`, then `takeScroll`). The allyl page left that memory in place. The accept ends `tk-1` through `holdPhrase`, and that return does not call `releaseScroll`. `releaseScroll` runs when the cue's speech wait returns because the hand changed during the cue. This cue finished, and the tap came after it. The inductive document then has its own scroll offset. The check before the find treats that difference as the person taking the page. The eighty pixel lift is withheld. The find's own placement is what remains: the sentence low in the window.
@@ -74,7 +78,8 @@ This is past the miss in `green_no_second.md`. That run's second find never happ
 - `docs/plans/tap_then_read.md`, the 450 millisecond wait this run measured at 455 milliseconds.
 - `src/locate/web.ts`, `placeWeb` and `edgeScroll`. A low line logs `locate: scroll` only when the nudge runs.
 - `src/locate/scrollHold.ts`, `takeScroll` and `nudgeHeld`.
-- `src/locate/driveTourLive.ts`, `preempted` before `locate`, and `releaseScroll` only on a hand that arrives during the cue.
+- `src/locate/driveTour.ts`, `driveOnce`. Opening the next source releases the page before.
+- `src/locate/driveTourLive.ts`. A scroll follows the mark. It does not take the page, and it does not withhold the nudge.
 - `src/locate/core.ts`, `bandOf`, `frameAfterSettle`, `PAINTED_BEAT`.
 - `daemon/src/task.rs`, `classify_tap`, `LONG_TAP_MS`, `hand_due`.
 - `daemon/src/overlay.rs`, `sync_marks`. An overlapping box for the same phrase keeps the surface. A box that shares no pixel still replaces it, and that press is cleared.

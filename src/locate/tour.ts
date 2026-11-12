@@ -108,7 +108,7 @@ async function reportMiss(deps: TourDeps, taskId: string, item: TourItem, placed
 /**
  * Begin the task, then locate, mark, and speak each item the daemon still
  * calls current. The find finishes before the mark. A narrated phrase stays
- * until a hand. Their scroll does not start the next cue.
+ * until a hand. Their scroll moves the mark and does not lock the nudge. It does not start the next cue.
  */
 export async function runTour(taskId: string, deps: TourDeps): Promise<void> {
   await deps.tourSignal({ taskId, signal: "begin" });

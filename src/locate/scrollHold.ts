@@ -1,4 +1,4 @@
-/** Their scroll, and one withheld nudge. The locator reads these. It does not open a listener. */
+/** An offset remembered for one document. The tour does not lock a nudge on it. */
 
 let taken = false;
 let nudge = false;

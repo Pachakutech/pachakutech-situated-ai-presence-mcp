@@ -2,7 +2,7 @@
 
 Written 11 November 2026. On the allyl bar, a short tap stored green. A long tap never stored red.
 
-This is a report. The repair landed 11 November 2026 as `overlap_keeps_the_mark.md`. An overlapping box for this phrase keeps the surface and the generation, so the hold is not cleared by a new width. The three-way switch stays. `LONG_TAP_MS` stays 500. The paragraphs below are the run.
+This is a report. The repair landed 11 November 2026 as `overlap_keeps_the_mark.md`. An overlapping box for this phrase keeps the surface and the generation, so the hold is not cleared by a new width. The three-way switch stays. `LONG_TAP_MS` stays 500. The next document's withheld lift landed with `next_locus_unmarked.md`: opening that document drops the previous page's scroll, and a scroll on the page does not lock the nudge. The paragraphs below are the run.
 
 ## The run
 
