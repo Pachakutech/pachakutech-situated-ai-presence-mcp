@@ -7,6 +7,7 @@ export {
   handColor,
   glassMarks,
   keepHeld,
+  settleBox,
   followScroll,
   inOuterBand,
   centerWithMark,

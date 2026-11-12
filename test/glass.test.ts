@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { centerWithMark, followScroll, glassMarks, keepHeld, linesFromColumns, type GlassLocus } from "../src/locate/core.ts";
+import { centerWithMark, followScroll, glassMarks, keepHeld, linesFromColumns, settleBox, type GlassLocus } from "../src/locate/core.ts";
 import { holdNudge, nudgeHeld, releaseScroll, resetScrollHold, scrollDrifted, scrollTaken, takeScroll } from "../src/locate/scrollHold.ts";
 import type { Line } from "../src/locate/core.ts";
 
@@ -49,6 +49,42 @@ test("a held locus that has left the message is absent", () => {
     screen,
   );
   assert.deepEqual(marks, []);
+});
+
+test("the heading jump settles on the taller bar", () => {
+  const tall = { u: 0.511, v: 0.685, w: 0.469, h: 0.105 };
+  const short = { u: 0.511, v: 0.756, w: 0.469, h: 0.033 };
+  const shortLine = { u: 0.511, v: 0.756, w: 0.469, h: 0.034 };
+  assert.deepEqual(settleBox(short, tall), tall);
+  assert.deepEqual(settleBox(tall, short), tall);
+  assert.deepEqual(settleBox(shortLine, tall), tall);
+  assert.deepEqual(settleBox(tall, shortLine), tall);
+  const shown = { u: 0.5, v: 0.8, w: 0.4, h: 0.03 };
+  const measured = { u: 0.5, v: 0.7, w: 0.4, h: 0.09 };
+  assert.deepEqual(settleBox(shown, measured), measured);
+});
+
+test("a move inside a tenth tracks, and a modest disagreement keeps the union", () => {
+  const shown = { u: 0.2, v: 0.4, w: 0.4, h: 0.2 };
+  const measured = {
+    u: shown.u + shown.w * 0.1,
+    v: shown.v + shown.h * 0.1,
+    w: shown.w - shown.w * 0.1,
+    h: shown.h - shown.h * 0.1,
+  };
+  assert.deepEqual(settleBox(shown, measured), measured);
+  const low = { u: 0.5, v: 0.5, w: 0.2, h: 0.1 };
+  const shifted = { u: 0.5, v: 0.52, w: 0.2, h: 0.1 };
+  const union = settleBox(low, shifted);
+  assert.equal(union.v, 0.5);
+  assert.ok(Math.abs(union.h - 0.12) < 1e-12);
+  const base = { u: 0, v: 0, w: 0.5, h: 0.25 };
+  const atJump = { u: 0, v: 0.2, w: 0.5, h: 0.25 };
+  const held = settleBox(base, atJump);
+  assert.equal(held.v, 0);
+  assert.ok(Math.abs(held.h - 0.45) < 1e-12);
+  const jumped = { u: 0, v: 0.1, w: 0.5, h: 0.4 };
+  assert.deepEqual(settleBox(base, jumped), jumped);
 });
 
 test("a miss leaves a placed mark and a hit moves it", () => {

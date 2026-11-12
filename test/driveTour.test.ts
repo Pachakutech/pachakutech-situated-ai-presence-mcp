@@ -393,6 +393,14 @@ test("stopping the driver conceals, and a conceal failure still returns", async 
   });
 });
 
+test("a fresh reading of a marked phrase settles before it is declared", () => {
+  const live = readFileSync(join(root, "src/locate/driveTourLive.ts"), "utf8");
+  const watch = live.slice(live.indexOf("async function watchGlass"), live.indexOf("async function readGlass"));
+  assert.equal(watch.includes("settleBox"), true);
+  assert.ok(watch.indexOf("if (!shown) return mark") < watch.indexOf("settleBox"));
+  assert.ok(watch.indexOf("settleBox") < watch.indexOf("keepHeld"));
+});
+
 test("the live driver conceals on the way out and keeps the 360 second hold", () => {
   const live = readFileSync(join(root, "src/locate/driveTourLive.ts"), "utf8");
   assert.equal(live.includes("driveUntilStop"), true);
