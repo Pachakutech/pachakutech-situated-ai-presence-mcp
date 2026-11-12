@@ -1,9 +1,11 @@
 // Opens a source the project tour already named. The profile and port are the
 // locate Chromium. A port that is already up is reused, so a second browser
-// is not started on that profile.
+// is not started on that profile. A web open writes the port file.
 
 import { spawn as spawnChild } from "node:child_process";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { createConnection } from "node:net";
+import { dirname } from "node:path";
 
 export const LOCATE_PORT = 9222;
 export const PDF_BIN = "evince";
@@ -19,6 +21,34 @@ type CdpSocket = {
 export function locateProfile(env: NodeJS.ProcessEnv = process.env): string {
   const runtime = env.XDG_RUNTIME_DIR || "/tmp";
   return `${runtime}/pachakutech/locate-chromium`;
+}
+
+/** The file is a copy of LOCATE_PORT. It is not the listener. */
+export function locatePortPath(env: NodeJS.ProcessEnv = process.env): string {
+  return `${locateProfile(env)}.port`;
+}
+
+export function publishLocatePort(env: NodeJS.ProcessEnv = process.env, port = LOCATE_PORT): void {
+  const path = locatePortPath(env);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, String(port));
+}
+
+/**
+ * The file wins when it holds a port. A missing or unreadable copy uses
+ * LOCATE_PORT when that port is listening.
+ */
+export async function resolveLocatePort(
+  readCopy: () => string | null,
+  portOpen: (port?: number) => Promise<boolean> = locatePortOpen,
+): Promise<number | null> {
+  const text = readCopy();
+  if (text != null) {
+    const n = Number(text.trim());
+    if (Number.isInteger(n) && n > 0) return n;
+  }
+  if (await portOpen(LOCATE_PORT)) return LOCATE_PORT;
+  return null;
 }
 
 export function webArgs(url: string, env: NodeJS.ProcessEnv = process.env): string[] {
@@ -42,6 +72,8 @@ export type OpenDeps = {
   portOpen(): Promise<boolean>;
   spawn(bin: string, args: string[]): void | SpawnHandle | Promise<void | SpawnHandle>;
   navigate(url: string): Promise<void>;
+  /** Records the locate port. The default writes locate-chromium.port. */
+  publishPort?(env: NodeJS.ProcessEnv): void;
 };
 
 export function locatePortOpen(port = LOCATE_PORT, host = "127.0.0.1"): Promise<boolean> {
@@ -119,16 +151,26 @@ export async function navigateLocate(url: string, port = LOCATE_PORT): Promise<v
   });
 }
 
+function notePort(deps: OpenDeps, env: NodeJS.ProcessEnv): void {
+  try {
+    (deps.publishPort ?? publishLocatePort)(env);
+  } catch {
+    // A missing runtime directory leaves the constant as the address.
+  }
+}
+
 export async function openWeb(
   url: string,
   deps: OpenDeps,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<"reused" | "spawned"> {
   if (await deps.portOpen()) {
+    notePort(deps, env);
     await deps.navigate(url);
     return "reused";
   }
   await Promise.resolve(deps.spawn(env.PRESENCE_BROWSER || "chromium", webArgs(url, env)));
+  notePort(deps, env);
   return "spawned";
 }
 

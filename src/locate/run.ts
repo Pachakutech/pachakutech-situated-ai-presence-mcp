@@ -1,7 +1,7 @@
 // `presence locate`. Stdout is one JSON object. Everything else goes to stderr.
 
 import { spawn } from "node:child_process";
-import { existsSync, mkdtemp, readFileSync, rm, writeFileSync } from "node:fs";
+import { existsSync, mkdtemp, readFileSync, rm } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { sendProposal } from "../daemonControl.js";
@@ -11,6 +11,7 @@ import { BOX_PAD, pageContaining, parseTsv, type Box, type Word } from "./core.j
 import { cueGroups, resolveCues, speechHoldSeconds, splitSentences, type CueIn } from "./sentences.js";
 import { WINDOW_PATH, locatePdf, placePdf } from "./pdf.js";
 import { locateStill, type StillDeps } from "./surface.js";
+import { LOCATE_PORT, locatePortPath, publishLocatePort, resolveLocatePort, webArgs } from "./openSource.js";
 import { noteOwnedScroll } from "./scrollHold.js";
 import { locateWeb, placeWeb, type Client, type LocateErr, type LocateOk, type LocateResult, type WebOpts } from "./web.js";
 
@@ -281,11 +282,6 @@ function browserBin(): string {
   return process.env.PRESENCE_BROWSER || "chromium";
 }
 
-function profileDir(): string {
-  const runtime = process.env.XDG_RUNTIME_DIR || "/tmp";
-  return join(runtime, "pachakutech", "locate-chromium");
-}
-
 type CdpSocket = {
   addEventListener(type: "open" | "message" | "error", cb: (event: { data?: unknown }) => void): void;
   send(data: string): void;
@@ -372,19 +368,22 @@ async function press(key: string, times: number): Promise<void> {
   if (result.code !== 0) throw new Error(result.stderr.trim() || "wtype failed");
 }
 
-function ensureCdpPort(): void {
+/** The port file is a copy. A missing copy still uses LOCATE_PORT when that port is listening. */
+async function ensureCdpPort(): Promise<void> {
   if (cdpPort) return;
-  try {
-    const n = Number(readFileSync(join(profileDir() + ".port"), "utf8").trim());
-    if (Number.isInteger(n) && n > 0) cdpPort = n;
-  } catch {
-    // No browser has published a port yet. Scrolling falls back to the focused window.
-  }
+  const n = await resolveLocatePort(() => {
+    try {
+      return readFileSync(locatePortPath(), "utf8");
+    } catch {
+      return null;
+    }
+  });
+  if (n) cdpPort = n;
 }
 
 /** Chromium's find. The selection is read, then cleared, before this returns. */
 async function findInPage(phrase: string): Promise<{ found: boolean; rect: Box | null } | null> {
-  ensureCdpPort();
+  await ensureCdpPort();
   if (!cdpPort || !phrase) return null;
   const expression = `(() => {
     const found = window.find(${JSON.stringify(phrase)}, false, false, true, false, false, false);
@@ -405,7 +404,7 @@ async function findInPage(phrase: string): Promise<{ found: boolean; rect: Box |
 
 /** True when the document cannot move further that way. Null when the debugger is down. */
 async function scrollEnds(): Promise<{ atTop: boolean; atBottom: boolean } | null> {
-  ensureCdpPort();
+  await ensureCdpPort();
   if (!cdpPort) return null;
   const reply = await cdpCall(`(() => {
     const el = document.scrollingElement || document.documentElement;
@@ -430,14 +429,14 @@ async function findPdfPage(path: string, query: string): Promise<number | null> 
 
 /** Document creation time. A new number is a refresh or a navigation. */
 export async function readPageGeneration(): Promise<number | null> {
-  ensureCdpPort();
+  await ensureCdpPort();
   if (!cdpPort) return null;
   const reply = await cdpCall(`performance.timeOrigin`);
   return reply.ok && typeof reply.value === "number" ? reply.value : null;
 }
 
 export async function readScrollTop(): Promise<number | null> {
-  ensureCdpPort();
+  await ensureCdpPort();
   if (!cdpPort) return null;
   const reply = await cdpCall(`(() => {
     const el = document.scrollingElement || document.documentElement;
@@ -475,7 +474,7 @@ export async function pointerOverChromium(): Promise<boolean> {
 
 async function scrollBy(address: string, dy: number): Promise<boolean> {
   if (dy === 0) return true;
-  ensureCdpPort();
+  await ensureCdpPort();
   if (cdpPort && (await cdpEval(`window.scrollBy(0, ${Math.round(dy)}); document.scrollingElement && document.scrollingElement.scrollTop`))) {
     const top = await readScrollTop();
     if (top != null) noteOwnedScroll(top);
@@ -489,31 +488,17 @@ async function scrollBy(address: string, dy: number): Promise<boolean> {
 }
 
 async function openBrowser(uri: string): Promise<void> {
-  cdpPort = 9222;
-  const child = spawn(
-    browserBin(),
-    [
-      "--ozone-platform=wayland",
-      `--user-data-dir=${profileDir()}`,
-      `--remote-debugging-port=${cdpPort}`,
-      "--remote-debugging-address=127.0.0.1",
-      "--no-first-run",
-      "--no-default-browser-check",
-      "--new-window",
-      uri,
-    ],
-    { detached: true, stdio: "ignore", env: process.env },
-  );
+  cdpPort = LOCATE_PORT;
+  const child = spawn(browserBin(), webArgs(uri), { detached: true, stdio: "ignore", env: process.env });
   await new Promise<void>((resolve, reject) => {
     child.once("error", reject);
     child.once("spawn", () => resolve());
   });
   child.unref();
-  const portPath = join(profileDir() + ".port");
   try {
-    writeFileSync(portPath, String(cdpPort));
+    publishLocatePort();
   } catch {
-    // The profile directory may not exist until Chromium creates it. The port is still 9222.
+    // The runtime directory may not exist yet. The port is still LOCATE_PORT.
   }
 }
 
