@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { capturedAfterSettle, frameAfterSettle, GLASS_READ_MS, glassPhraseBox } from "../src/locate/core.ts";
+import { capturedAfterSettle, frameAfterSettle, GLASS_READ_MS, glassPhraseBox, sheetUnpainted } from "../src/locate/core.ts";
 
 test("a capture that started before the settle is not the reading", () => {
   assert.equal(GLASS_READ_MS, 8000);
@@ -105,6 +105,125 @@ test("a two-edit slip on a short word still marks, and an unrelated line does no
     h: [18, 18],
   });
   assert.equal(miss, null);
+});
+
+function painted(seq: number, words: string[]) {
+  return {
+    fresh: true,
+    seq,
+    ageMs: 10,
+    workedMs: 20,
+    width: 200,
+    height: 200,
+    text: words,
+    x: words.map((_, i) => 10 + i * 12),
+    y: words.map(() => 40),
+    w: words.map(() => 10),
+    h: words.map(() => 14),
+  };
+}
+
+test("a blank sheet is unused, and the frame that holds the sentence is the box", async () => {
+  assert.equal(sheetUnpainted({ text: [] }), true);
+  assert.equal(sheetUnpainted({ text: ["", "  "] }), true);
+  assert.equal(sheetUnpainted({ text: ["allyl"] }), false);
+  let now = 2_000;
+  let step = 0;
+  const frame = await frameAfterSettle(
+    1_000,
+    async () => {
+      step += 1;
+      if (step === 1) return { ...painted(1, []), ageMs: 10, workedMs: 20 };
+      if (step === 2) return painted(2, ["other", "words", "from", "the", "page", "above"]);
+      return painted(3, ["allyl", "group", "on", "the", "page", "now"]);
+    },
+    () => now,
+    async (ms) => {
+      now += ms;
+    },
+    8_000,
+    100,
+    (candidate) => (candidate.text ?? []).includes("allyl"),
+  );
+  assert.equal(frame?.seq, 3);
+  assert.equal(step, 3);
+});
+
+test("a frame that already holds the sentence does not wait for another sample", async () => {
+  let calls = 0;
+  const frame = await frameAfterSettle(
+    1_000,
+    async () => {
+      calls += 1;
+      return painted(1, ["allyl"]);
+    },
+    () => 2_000,
+    async () => {
+      throw new Error("slept");
+    },
+    8_000,
+    100,
+    (candidate) => (candidate.text ?? []).includes("allyl"),
+  );
+  assert.equal(calls, 1);
+  assert.equal(frame?.seq, 1);
+});
+
+test("two painted readings that miss are the beat", async () => {
+  let step = 0;
+  const frame = await frameAfterSettle(
+    1_000,
+    async () => {
+      step += 1;
+      return painted(step, ["other", "words", "on", "the", "painted", "page"]);
+    },
+    () => 2_000,
+    async () => {},
+    8_000,
+    100,
+    () => false,
+  );
+  assert.equal(step, 2);
+  assert.equal(frame?.seq, 2);
+});
+
+test("the same posting is not a second beat", async () => {
+  let now = 1_100;
+  let calls = 0;
+  const frame = await frameAfterSettle(
+    1_000,
+    async () => {
+      calls += 1;
+      return painted(7, ["other", "words", "on", "the", "painted", "page"]);
+    },
+    () => now,
+    async (ms) => {
+      now += ms;
+    },
+    400,
+    100,
+    () => false,
+  );
+  assert.ok(calls > 2);
+  assert.equal(frame?.seq, 7);
+  assert.ok(now >= 1_400);
+});
+
+test("a blank sheet through the window is not a miss frame", async () => {
+  let now = 1_000;
+  const frame = await frameAfterSettle(
+    1_000,
+    async () => ({ fresh: true, seq: 1, ageMs: 10, workedMs: 20, width: 10, height: 10, text: [], x: [], y: [], w: [], h: [] }),
+    () => now,
+    async (ms) => {
+      now += ms;
+    },
+    300,
+    100,
+    () => false,
+  );
+  assert.equal(frame, null);
+  assert.ok(now >= 1_300);
 });
 
 test("a miss on that one frame is not another reading", async () => {
@@ -277,6 +396,94 @@ test("a find that misses is not yet found and is not photographed", async () => 
     },
   );
   assert.equal(placed.ok, false);
+  assert.equal(shots, 0);
+});
+
+test("a navigated window waits for the find and does not launch a browser", async () => {
+  const { placeWeb } = await import("../dist/locate/web.js");
+  let now = 1_000;
+  let finds = 0;
+  let opened = 0;
+  let shots = 0;
+  const placed = await placeWeb(
+    { query: "inductive effect", pad: 0, timeoutMs: 10_000, noOpen: true, navigated: true, verify: true },
+    {
+      async clients() {
+        return [browser];
+      },
+      async screen() {
+        return { w: 1920, h: 1080 };
+      },
+      async ocr() {
+        shots += 1;
+        return [];
+      },
+      async scrollBy() {
+        return true;
+      },
+      async open() {
+        opened += 1;
+      },
+      async findInPage() {
+        finds += 1;
+        if (finds < 3) return { found: false, rect: null };
+        return { found: true, rect: { x: 40, y: 400, w: 240, h: 18 } };
+      },
+      async scrollEnds() {
+        return { atTop: false, atBottom: false };
+      },
+      async sleep(ms: number) {
+        now += ms;
+      },
+      now: () => now,
+      log() {},
+    },
+  );
+  assert.equal(placed.ok, true);
+  assert.equal(finds, 3);
+  assert.equal(opened, 0);
+  assert.equal(shots, 0);
+});
+
+test("a navigated find that stays absent waits out the paint and does not photograph", async () => {
+  const { placeWeb } = await import("../dist/locate/web.js");
+  let now = 1_000;
+  let finds = 0;
+  let shots = 0;
+  const placed = await placeWeb(
+    { query: "inductive effect", pad: 0, timeoutMs: 10_000, noOpen: true, navigated: true, verify: true },
+    {
+      async clients() {
+        return [browser];
+      },
+      async screen() {
+        return { w: 1920, h: 1080 };
+      },
+      async ocr() {
+        shots += 1;
+        return [];
+      },
+      async scrollBy() {
+        return true;
+      },
+      async open() {},
+      async findInPage() {
+        finds += 1;
+        return { found: false, rect: null };
+      },
+      async scrollEnds() {
+        return { atTop: false, atBottom: false };
+      },
+      async sleep(ms: number) {
+        now += ms;
+      },
+      now: () => now,
+      log() {},
+    },
+  );
+  assert.equal(placed.ok, false);
+  assert.ok(finds > 1);
+  assert.ok(now - 1_000 >= 4_000);
   assert.equal(shots, 0);
 });
 

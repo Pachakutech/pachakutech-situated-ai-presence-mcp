@@ -151,6 +151,19 @@ pub fn to_pixels(box_: UvBox, screen_w: u32, screen_h: u32) -> (i32, i32, i32, i
     (x, y, w.max(1), h.max(1))
 }
 
+/// True when the two pixel rectangles share a pixel.
+/// An edge that only touches does not. An empty side does not.
+pub fn rects_share_a_pixel(ax: i32, ay: i32, aw: i32, ah: i32, bx: i32, by: i32, bw: i32, bh: i32) -> bool {
+    if aw <= 0 || ah <= 0 || bw <= 0 || bh <= 0 {
+        return false;
+    }
+    let ax2 = ax.saturating_add(aw);
+    let ay2 = ay.saturating_add(ah);
+    let bx2 = bx.saturating_add(bw);
+    let by2 = by.saturating_add(bh);
+    ax < bx2 && bx < ax2 && ay < by2 && by < ay2
+}
+
 /// The three conditions of the highlight. Yellow is the tint that already ships.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MarkColor {
@@ -307,5 +320,18 @@ mod tests {
         assert_eq!(buf[3], 0, "corner of the square stays pass-through");
         let mid = (20 * stride + 20 * 4) as usize;
         assert!(buf[mid + 3] > 0, "the middle of the box is tinted");
+    }
+
+    #[test]
+    fn an_overlapping_box_shares_a_pixel_and_a_touching_edge_does_not() {
+        // The allyl readings. 833×14 sits inside 838×17. 768×30 shares the line.
+        assert!(rects_share_a_pixel(983, 661, 838, 17, 988, 664, 833, 14));
+        assert!(rects_share_a_pixel(983, 661, 838, 17, 1048, 655, 768, 30));
+        assert!(rects_share_a_pixel(988, 664, 833, 14, 1048, 655, 768, 30));
+        // The right edge of 983+838 meets the next pixel and does not share one.
+        assert!(!rects_share_a_pixel(983, 661, 838, 17, 1821, 661, 10, 17));
+        assert!(!rects_share_a_pixel(983, 661, 838, 17, 100, 100, 40, 12));
+        assert!(!rects_share_a_pixel(983, 661, 0, 17, 983, 661, 10, 17));
+        assert!(!rects_share_a_pixel(10, 10, 4, 4, 14, 10, 4, 4));
     }
 }

@@ -648,6 +648,7 @@ export async function placeForTour(flags: PlaceFlags): Promise<{ ok: true } | Lo
         pad: flags.pad,
         timeoutMs: flags.timeoutS * 1000,
         noOpen: flags.noOpen,
+        navigated: flags.noOpen,
         verify: false,
       },
       {
