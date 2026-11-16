@@ -13,6 +13,7 @@ import {
   meanConfidence,
   neighborTexts,
   NUDGE_PX,
+  nudgeLine,
   openingKnown,
   openingPhrase,
   passageSpan,
@@ -105,6 +106,8 @@ export type Deps = {
   sleep(ms: number): Promise<void>;
   now(): number;
   log(line: string): void;
+  /** Document scroll offset, read before and after a nudge. Absent logs unknown ends. */
+  scrollTop?(): Promise<number | null>;
 };
 
 const PAINT_WAIT_MS = 4000;
@@ -118,8 +121,12 @@ function fail(error: string, hint: string): LocateErr {
 
 /** The tour keeps the nudge. Focus failure stays a failure. */
 async function ownedNudge(deps: Deps, address: string, dy: number): Promise<"moved" | "held" | "focus"> {
+  const before = deps.scrollTop ? await deps.scrollTop() : null;
   const moved = await deps.scrollBy(address, dy);
-  return moved ? "moved" : "focus";
+  if (!moved) return "focus";
+  const after = deps.scrollTop ? await deps.scrollTop() : null;
+  deps.log(nudgeLine(dy, before, after, false));
+  return "moved";
 }
 
 function sameWindow(a: Client, b: Client): boolean {

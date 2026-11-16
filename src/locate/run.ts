@@ -651,6 +651,7 @@ export async function placeForTour(flags: PlaceFlags): Promise<{ ok: true } | Lo
         sleep,
         now: () => Date.now(),
         log,
+        scrollTop: readScrollTop,
       },
     );
     if (!placed.ok) return placed;
@@ -742,6 +743,7 @@ export async function locateRegion(flags: Flags): Promise<LocateResult | LocateE
         sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
         now: () => Date.now(),
         log,
+        scrollTop: readScrollTop,
       });
     } else if (flags.source === "pdf") {
       result = await locatePdf(

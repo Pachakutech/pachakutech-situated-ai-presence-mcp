@@ -1,6 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { centerWithMark, followScroll, glassMarks, keepHeld, linesFromColumns, settleBox, type GlassLocus } from "../src/locate/core.ts";
+import {
+  centerWithMark,
+  followScroll,
+  glassDeclareLine,
+  glassMarks,
+  keepHeld,
+  linesFromColumns,
+  nudgeLine,
+  settleBox,
+  settleLine,
+  settleRule,
+  uvPixels,
+  type GlassLocus,
+} from "../src/locate/core.ts";
 import { holdNudge, nudgeHeld, releaseScroll, resetScrollHold, scrollDrifted, scrollTaken, takeScroll } from "../src/locate/scrollHold.ts";
 import type { Line } from "../src/locate/core.ts";
 
@@ -115,6 +128,66 @@ test("screen-text columns become lines", () => {
   const lines = linesFromColumns(["alpha", "one"], [20, 70], [200, 200], [40, 40], [18, 18]);
   assert.equal(lines.length, 1);
   assert.equal(lines[0].words.map((word) => word.text).join(" "), "alpha one");
+});
+
+test("a declared glass box logs the query and the union", () => {
+  const lines = [line(200, "alpha one stays")];
+  const seen: string[] = [];
+  const prior = console.error;
+  console.error = ((line?: unknown) => {
+    seen.push(String(line));
+  }) as typeof console.error;
+  try {
+    glassMarks([{ phraseId: "lc-a", opening: "alpha one", hand: "skip", current: true }], lines, screen);
+  } finally {
+    console.error = prior;
+  }
+  assert.deepEqual(seen, [
+    '[glass] lc-a "alpha one" lines "alpha one stays" .. "alpha one stays" union 140x18 at 20,200',
+  ]);
+  assert.equal(
+    glassDeclareLine("lc-1", 'known as "the effect"', "Inductive effect", "known as the inductive effect.", {
+      x: 982,
+      y: 740,
+      w: 900,
+      h: 113,
+    }),
+    '[glass] lc-1 "known as \'the effect\'" lines "Inductive effect" .. "known as the inductive effect." union 900x113 at 982,740',
+  );
+});
+
+test("the settle log names track, jump, or union in pixels", () => {
+  const tall = { u: 0.511, v: 0.685, w: 0.469, h: 0.105 };
+  const short = { u: 0.511, v: 0.756, w: 0.469, h: 0.033 };
+  assert.equal(settleRule(short, tall).name, "jump");
+  assert.deepEqual(settleRule(short, tall).box, tall);
+  assert.equal(settleRule(tall, short).name, "union");
+  assert.deepEqual(settleRule(tall, short).box, settleBox(tall, short));
+  const shown = { u: 0.2, v: 0.4, w: 0.4, h: 0.2 };
+  const measured = {
+    u: shown.u + shown.w * 0.1,
+    v: shown.v + shown.h * 0.1,
+    w: shown.w - shown.w * 0.1,
+    h: shown.h - shown.h * 0.1,
+  };
+  assert.equal(settleRule(shown, measured).name, "track");
+  const low = { u: 0.5, v: 0.5, w: 0.2, h: 0.1 };
+  const shifted = { u: 0.5, v: 0.52, w: 0.2, h: 0.1 };
+  assert.equal(settleRule(low, shifted).name, "union");
+  const base = { u: 0, v: 0, w: 0.5, h: 0.25 };
+  const jumped = { u: 0, v: 0.1, w: 0.5, h: 0.4 };
+  assert.equal(settleRule(base, jumped).name, "jump");
+  const screenPx = { w: 1920, h: 1080 };
+  assert.equal(
+    settleLine("union", uvPixels(tall, screenPx.w, screenPx.h), uvPixels(short, screenPx.w, screenPx.h)),
+    "[glass] settle union shown 900x113 at 981,740 measured 900x36 at 981,816",
+  );
+});
+
+test("a nudge log shows the scroll before and after", () => {
+  assert.equal(nudgeLine(80, 100, 180, false), "[glass] nudge dy=80 scroll 100->180 center=no");
+  assert.equal(nudgeLine(-80, null, 20, true), "[glass] nudge dy=-80 scroll ?->20 center=yes");
+  assert.equal(nudgeLine(80, 10.2, 90.6, false), "[glass] nudge dy=80 scroll 10->91 center=no");
 });
 
 test("their scroll stays taken and a pointer holds one nudge", () => {

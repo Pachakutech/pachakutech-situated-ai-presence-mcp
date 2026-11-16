@@ -3,12 +3,12 @@
 
 import { DaemonClient } from "../daemonClient.js";
 import { launchListed, locatePortOpen, navigateLocate, spawnListed } from "./openSource.js";
-import { centerWithMark, followScroll, glassMarks, keepHeld, linesFromColumns, settleBox, type GlassLocus, type HandName, type Uv } from "./glass.js";
+import { centerWithMark, followScroll, glassMarks, keepHeld, linesFromColumns, type GlassLocus, type HandName, type Uv } from "./glass.js";
 import { noteOwnedScroll, releaseScroll as clearScrollHold, scrollDrifted } from "./scrollHold.js";
 import { listHyprClients, nudgePage, outputSize, readPageGeneration, readScrollTop } from "./run.js";
 import { runTour, type GlassHit, type TourItem, type TourView } from "./tour.js";
 import { driveUntilStop, type DriveIo, type OpenRequest } from "./driveTour.js";
-import { NUDGE_PX, frameAfterSettle, glassPhraseBox, type GlassFrame } from "./core.js";
+import { NUDGE_PX, frameAfterSettle, glassPhraseBox, nudgeLine, settleLine, settleRule, uvPixels, type GlassFrame } from "./core.js";
 import { latchedWindowClosed, viewerStillMapped, type ViewerKind } from "./viewer.js";
 
 function asTourView(detail: Record<string, unknown>, taskId: string): TourView {
@@ -234,10 +234,24 @@ function liveIo(client: DaemonClient, presenceId: string | undefined, stopping: 
     const marks = await readGlass(view);
     const held = [...boxes.entries()].map(([phraseId, box]) => ({ phraseId, box }));
     // The scroll shift has already moved these boxes. A fresh reading settles against that rectangle.
+    let width = typeof text.width === "number" ? text.width : 0;
+    let height = typeof text.height === "number" ? text.height : 0;
+    if (!(width > 0) || !(height > 0)) {
+      try {
+        const size = await outputSize();
+        if (!(width > 0)) width = size.w;
+        if (!(height > 0)) height = size.h;
+      } catch {
+        if (!(width > 0)) width = 1920;
+        if (!(height > 0)) height = 1080;
+      }
+    }
     const settled = marks.map((mark) => {
       const shown = boxes.get(mark.phraseId);
       if (!shown) return mark;
-      return { ...mark, ...settleBox(shown, mark) };
+      const ruled = settleRule(shown, mark);
+      console.error(settleLine(ruled.name, uvPixels(shown, width, height), uvPixels(mark, width, height)));
+      return { ...mark, ...ruled.box };
     });
     const next = keepHeld(held, settled);
     for (const mark of next) {
@@ -375,7 +389,10 @@ function liveIo(client: DaemonClient, presenceId: string | undefined, stopping: 
       }
       const step = centerWithMark({ u: hit.u, v: hit.v, w: hit.w, h: hit.h }, await screenH(), NUDGE_PX);
       if (!step) return null;
+      const before = await readScrollTop();
       if (!(await nudgePage(step.dy))) return null;
+      const after = await readScrollTop();
+      console.error(nudgeLine(step.dy, before, after, true));
       return { ...hit, ...step.mark };
     },
     glass: readGlass,

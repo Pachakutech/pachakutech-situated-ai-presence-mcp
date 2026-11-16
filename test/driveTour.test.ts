@@ -431,9 +431,19 @@ test("the phrase just answered is concealed before the next find", () => {
 test("a fresh reading of a marked phrase settles before it is declared", () => {
   const live = readFileSync(join(root, "src/locate/driveTourLive.ts"), "utf8");
   const watch = live.slice(live.indexOf("async function watchGlass"), live.indexOf("async function readGlass"));
-  assert.equal(watch.includes("settleBox"), true);
-  assert.ok(watch.indexOf("if (!shown) return mark") < watch.indexOf("settleBox"));
-  assert.ok(watch.indexOf("settleBox") < watch.indexOf("keepHeld"));
+  assert.equal(watch.includes("settleRule"), true);
+  assert.ok(watch.indexOf("if (!shown) return mark") < watch.indexOf("settleRule"));
+  assert.ok(watch.indexOf("settleLine") < watch.indexOf("keepHeld"));
+});
+
+test("a nudge logs the scroll it asked for and the scroll that happened", () => {
+  const live = readFileSync(join(root, "src/locate/driveTourLive.ts"), "utf8");
+  const center = live.slice(live.indexOf("async center(hit)"), live.indexOf("glass: readGlass"));
+  assert.equal(center.includes("nudgeLine(step.dy, before, after, true)"), true);
+  const web = readFileSync(join(root, "src/locate/web.ts"), "utf8");
+  const nudge = web.slice(web.indexOf("async function ownedNudge"), web.indexOf("function sameWindow"));
+  assert.equal(nudge.includes("nudgeLine(dy, before, after, false)"), true);
+  assert.ok(nudge.indexOf("scrollTop") < nudge.indexOf("scrollBy"));
 });
 
 test("a finished list keeps the bars until the latched window closes", () => {

@@ -512,6 +512,15 @@ export function handColor(hand: HandName): GlassMark["color"] {
   return "yellow";
 }
 
+function glassField(text: string): string {
+  return text.replace(/[\r\n]+/g, " ").replace(/"/g, "'");
+}
+
+/** The measured union, before the paint pad. The quote is the query this pass used. */
+export function glassDeclareLine(phraseId: string, quote: string, firstLine: string, lastLine: string, box: Box): string {
+  return `[glass] ${phraseId} "${glassField(quote)}" lines "${glassField(firstLine)}" .. "${glassField(lastLine)}" union ${box.w}x${box.h} at ${box.x},${box.y}`;
+}
+
 function placeGlass(hits: GlassMark[], locus: GlassLocus, lines: Line[], screen: { w: number; h: number }): void {
   if (hits.length >= MARK_CAP) return;
   if (!locus.opening.trim()) return;
@@ -520,6 +529,9 @@ function placeGlass(hits: GlassMark[], locus: GlassLocus, lines: Line[], screen:
   if (!run || run === "ambiguous") return;
   const box = unionBox(lines, run, 0, screen);
   if (!box || screen.w <= 0 || screen.h <= 0) return;
+  const first = lineText({ words: pageWords(lines[run.start].words) });
+  const last = lineText({ words: pageWords(lines[run.end].words) });
+  console.error(glassDeclareLine(locus.phraseId, locus.opening, first, last, box));
   hits.push({
     phraseId: locus.phraseId,
     color: handColor(locus.hand),
@@ -577,31 +589,57 @@ function unionUv(a: Uv, b: Uv): Uv {
   return { u, v, w: right - u, h: bottom - v };
 }
 
+export type SettleName = "track" | "jump" | "union";
+
 /**
- * The rectangle to declare when a phrase already has a box.
+ * The rectangle to declare when a phrase already has a box, and which rule chose it.
  * A measured box within a tenth on every edge replaces the shown box, so jitter tracks.
  * A union larger than 1.8 times the shown area is a different reading, and that reading is declared.
  * Anything between those stays the union, so a short line inside a tall bar does not pull the top down.
- * A union that is already the shown rectangle keeps that rectangle's numbers.
+ * A union that is already the shown rectangle keeps that rectangle's numbers. That choice is still union.
  */
-export function settleBox(shown: Uv, measured: Uv): Uv {
+export function settleRule(shown: Uv, measured: Uv): { name: SettleName; box: Uv } {
   const tracks =
     withinTrack(measured.u - shown.u, shown.w) &&
     withinTrack(measured.v - shown.v, shown.h) &&
     withinTrack(measured.w - shown.w, shown.w) &&
     withinTrack(measured.h - shown.h, shown.h);
-  if (tracks) return copyBox(measured);
+  if (tracks) return { name: "track", box: copyBox(measured) };
   const union = unionUv(shown, measured);
-  if (boxArea(union) > boxArea(shown) * BAR_JUMP + BAR_EPS) return copyBox(measured);
+  if (boxArea(union) > boxArea(shown) * BAR_JUMP + BAR_EPS) return { name: "jump", box: copyBox(measured) };
   if (
     Math.abs(union.u - shown.u) <= BAR_EPS &&
     Math.abs(union.v - shown.v) <= BAR_EPS &&
     Math.abs(union.w - shown.w) <= BAR_EPS &&
     Math.abs(union.h - shown.h) <= BAR_EPS
   ) {
-    return copyBox(shown);
+    return { name: "union", box: copyBox(shown) };
   }
-  return union;
+  return { name: "union", box: union };
+}
+
+/** The box from `settleRule`. The logged name is track, jump, or union. */
+export function settleBox(shown: Uv, measured: Uv): Uv {
+  return settleRule(shown, measured).box;
+}
+
+export function settleLine(name: SettleName, shown: Box, measured: Box): string {
+  return `[glass] settle ${name} shown ${shown.w}x${shown.h} at ${shown.x},${shown.y} measured ${measured.w}x${measured.h} at ${measured.x},${measured.y}`;
+}
+
+export function nudgeLine(dy: number, before: number | null, after: number | null, center: boolean): string {
+  const end = (value: number | null) => (value == null || !Number.isFinite(value) ? "?" : String(Math.round(value)));
+  return `[glass] nudge dy=${dy} scroll ${end(before)}->${end(after)} center=${center ? "yes" : "no"}`;
+}
+
+/** Screen pixels for a UV box. The glass log prints these, not the fractions. */
+export function uvPixels(box: Uv, screenW: number, screenH: number): Box {
+  return {
+    x: Math.round(box.u * screenW),
+    y: Math.round(box.v * screenH),
+    w: Math.round(box.w * screenW),
+    h: Math.round(box.h * screenH),
+  };
 }
 
 /** A reading that sees the phrase moves its mark. A miss leaves the placed box. */
