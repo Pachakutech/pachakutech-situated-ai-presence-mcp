@@ -1,7 +1,9 @@
 # Highlight paint pad (edge/bevel outside measured content)
 
-Status: proposed
+Status: landed 15 November 2026
 Scope: small UI fix on the mark surface only
+
+Landed. `mark_corner_radius` is the curve `paint_mark` already used. `expand_paint_rect` grows the measured pixel box by `ceil(radius) + 2` on each free side and clamps that side to the output. `sync_marks` sizes the layer to the grown rect. The book, the registry UV, the gesture, and the heat mask stay on the measured box. The input region is the grown surface, so a hand still lands on the mark. The carve-out in `expand_to_paragraph_with_carveout.md` is a later ticket.
 Related: `daemon/src/highlight.rs`, `daemon/src/overlay.rs` (`sync_marks`)
 
 ## Problem

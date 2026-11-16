@@ -308,7 +308,8 @@ impl Registry {
     }
 
     /// The presence must already be in the daemon map. It does not need the body.
-    /// `secs` is clamped to 1..=360. The returned box is the one that will be drawn.
+    /// `secs` is clamped to 1..=360. The returned box is the measured rect the book keeps.
+    /// The mark surface pads around that rect. This value does not.
     pub fn declare_interest(
         &mut self,
         presence_id: &str,

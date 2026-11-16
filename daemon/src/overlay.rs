@@ -22,7 +22,7 @@
 //! (no `zwp_linux_dmabuf_v1`, no GBM, etc.) never causes a black screen.
 
 use crate::actors::ingress::screen_dmabuf::DmabufScreenSource;
-use crate::highlight::{paint_mark, rects_share_a_pixel, to_pixels, MarkColor, UvBox};
+use crate::highlight::{expand_paint_rect, paint_mark, rects_share_a_pixel, to_pixels, MarkColor, UvBox};
 use crate::task::{TintMark, TintSample};
 use crate::actors::ingress::screen_wlr::WlrScreenSource;
 use crate::actors::ingress::webcam_dmabuf::{self, WebcamMsg, WEBCAM_YIELD_ACK};
@@ -554,21 +554,29 @@ impl Overlay {
         Ok(())
     }
 
-    /// Show one Top-layer surface per visible box. An empty list removes them.
-    /// Returns the pixel rects (up to three) for the heat mask. Width of 0 is none.
-    /// `in_rect` ignores a width of 1 or less, so a 1px box is masked as 2.
     fn take_tint_samples(&mut self) -> Vec<TintSample> {
         std::mem::take(&mut self.state.tint_samples)
     }
 
+    /// One Top-layer surface per visible box. An empty list removes them.
+    /// The surface is the measured box plus the paint pad. The returned rects
+    /// are the measured pixels, for the heat mask. Width of 0 is none.
+    /// `in_rect` ignores a width of 1 or less, so a 1px box is masked as 2.
     fn sync_marks(&mut self, boxes: &[(String, UvBox)], colors: &[(String, MarkColor)]) -> [[f32; 4]; 3] {
         let (sw, sh) = (self.state.output_width, self.state.output_height);
-        let desired: Vec<(String, i32, i32, i32, i32)> = boxes
+        let measured: Vec<(String, i32, i32, i32, i32)> = boxes
             .iter()
             .take(3)
             .map(|(id, box_)| {
                 let (x, y, w, h) = to_pixels(*box_, sw, sh);
                 (id.clone(), x, y, w, h)
+            })
+            .collect();
+        let desired: Vec<(String, i32, i32, i32, i32)> = measured
+            .iter()
+            .map(|(id, x, y, w, h)| {
+                let (px, py, pw, ph) = expand_paint_rect(*x, *y, *w, *h, sw, sh);
+                (id.clone(), px, py, pw, ph)
             })
             .collect();
 
@@ -647,7 +655,7 @@ impl Overlay {
         self.sweep_marks();
 
         let mut rects = [[0.0f32; 4]; 3];
-        for (i, (_, x, y, w, h)) in desired.iter().enumerate() {
+        for (i, (_, x, y, w, h)) in measured.iter().enumerate() {
             let rw = if *w <= 1 { 2.0 } else { *w as f32 };
             let rh = if *h <= 1 { 2.0 } else { *h as f32 };
             rects[i] = [*x as f32, *y as f32, rw, rh];

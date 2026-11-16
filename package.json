@@ -4,7 +4,7 @@
   "description": "MCP Binding for Pachakutech's Situated Agentic Presence Layer",
   "type": "module",
   "bin": {
-    "presence": "./dist/cli.js"
+    "presence": "./bin/presence.mjs"
   },
   "engines": {
     "node": ">=18"
@@ -16,6 +16,7 @@
     "x64"
   ],
   "files": [
+    "bin",
     "dist",
     "native",
     "skills",
@@ -37,7 +38,7 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "cli": "node dist/cli.js",
+    "cli": "node bin/presence.mjs",
     "build:daemon": "cargo build --release --manifest-path daemon/Cargo.toml",
     "stage:daemon": "node scripts/stage-daemon.mjs",
     "prepare:package": "npm run build && npm run build:daemon && npm run stage:daemon",

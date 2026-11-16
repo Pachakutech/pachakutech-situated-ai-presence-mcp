@@ -124,6 +124,35 @@ fn sanitize(raw: UvBox) -> Result<UvBox, String> {
     Ok(UvBox { u, v, w, h })
 }
 
+/// Corner radius of the painted mark, in pixels. The paint pad uses the same curve.
+pub fn mark_corner_radius(w: i32, h: i32) -> f32 {
+    let w = w.max(1) as f32;
+    let h = h.max(1) as f32;
+    16.0_f32.min(w * 0.22).min(h * 0.22).max(3.0)
+}
+
+/// Grow a measured pixel box so the edge and bevel sit outside the content.
+/// A side that would leave the screen does not grow. The book keeps the measured box.
+pub fn expand_paint_rect(
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    screen_w: u32,
+    screen_h: u32,
+) -> (i32, i32, i32, i32) {
+    let pad = mark_corner_radius(w, h).ceil() as i32 + 2;
+    let sw = screen_w.max(1) as i32;
+    let sh = screen_h.max(1) as i32;
+    let x2 = (x - pad).max(0);
+    let y2 = (y - pad).max(0);
+    let right = x.saturating_add(w).saturating_add(pad).min(sw);
+    let bottom = y.saturating_add(h).saturating_add(pad).min(sh);
+    let w2 = (right - x2).max(1);
+    let h2 = (bottom - y2).max(1);
+    (x2, y2, w2, h2)
+}
+
 /// Full-screen UV to a pixel rectangle. `v` is down, matching the screen.
 pub fn to_pixels(box_: UvBox, screen_w: u32, screen_h: u32) -> (i32, i32, i32, i32) {
     let sw = screen_w.max(1) as f32;
@@ -191,7 +220,7 @@ pub fn paint_mark(buf: &mut [u8], width: i32, height: i32, stride: i32, phase: f
     let w = width.max(1);
     let h = height.max(1);
     let pulse = (phase * 1.7).sin() * 0.5 + 0.5;
-    let radius = 16.0_f32.min(w as f32 * 0.22).min(h as f32 * 0.22).max(3.0);
+    let radius = mark_corner_radius(w, h);
     for y in 0..h {
         for x in 0..w {
             let a = mark_alpha(x, y, w, h, radius, pulse, phase);
@@ -333,5 +362,75 @@ mod tests {
         assert!(!rects_share_a_pixel(983, 661, 838, 17, 100, 100, 40, 12));
         assert!(!rects_share_a_pixel(983, 661, 0, 17, 983, 661, 10, 17));
         assert!(!rects_share_a_pixel(10, 10, 4, 4, 14, 10, 4, 4));
+    }
+
+    fn paint_pad(w: i32, h: i32) -> i32 {
+        mark_corner_radius(w, h).ceil() as i32 + 2
+    }
+
+    #[test]
+    fn expand_paint_grows_an_interior_box_on_every_side() {
+        let (x, y, w, h) = (400, 300, 200, 80);
+        let pad = paint_pad(w, h);
+        let (x2, y2, w2, h2) = expand_paint_rect(x, y, w, h, 1920, 1080);
+        assert_eq!((x2, y2, w2, h2), (x - pad, y - pad, w + 2 * pad, h + 2 * pad));
+        assert!(x2 < x && y2 < y && x2 + w2 > x + w && y2 + h2 > y + h);
+    }
+
+    #[test]
+    fn expand_paint_holds_the_left_edge_on_the_screen() {
+        let (w, h) = (200, 80);
+        let pad = paint_pad(w, h);
+        let (x2, y2, w2, h2) = expand_paint_rect(0, 300, w, h, 1920, 1080);
+        assert_eq!(x2, 0);
+        assert_eq!(y2, 300 - pad);
+        assert_eq!(w2, w + pad);
+        assert_eq!(h2, h + 2 * pad);
+        assert!(x2 + w2 <= 1920 && y2 + h2 <= 1080);
+    }
+
+    #[test]
+    fn expand_paint_holds_the_top_left_corner_on_the_screen() {
+        let (w, h) = (200, 80);
+        let pad = paint_pad(w, h);
+        let (x2, y2, w2, h2) = expand_paint_rect(0, 0, w, h, 1920, 1080);
+        assert_eq!((x2, y2), (0, 0));
+        assert_eq!((w2, h2), (w + pad, h + pad));
+    }
+
+    #[test]
+    fn expand_paint_holds_a_flush_far_edge_on_the_screen() {
+        let (w, h) = (200, 80);
+        let pad = paint_pad(w, h);
+        let (x2, y2, w2, h2) = expand_paint_rect(1920 - w, 300, w, h, 1920, 1080);
+        assert_eq!(x2, 1920 - w - pad);
+        assert_eq!(y2, 300 - pad);
+        assert_eq!(x2 + w2, 1920);
+        assert_eq!(h2, h + 2 * pad);
+        let (x2, y2, w2, h2) = expand_paint_rect(400, 1080 - h, w, h, 1920, 1080);
+        assert_eq!(y2 + h2, 1080);
+        assert_eq!(x2, 400 - pad);
+        assert_eq!(w2, w + 2 * pad);
+        assert_eq!(y2, 1080 - h - pad);
+    }
+
+    #[test]
+    fn expand_paint_leaves_a_full_output_box_unchanged() {
+        let got = expand_paint_rect(0, 0, 1920, 1080, 1920, 1080);
+        assert_eq!(got, (0, 0, 1920, 1080));
+    }
+
+    #[test]
+    fn expand_paint_does_not_replace_the_box_the_book_stores() {
+        let mut book = InterestBook::new();
+        let t0 = Instant::now();
+        let raw = box_at(400.0 / 1920.0, 300.0 / 1080.0, 200.0 / 1920.0, 80.0 / 1080.0);
+        let stored = book.declare("p-a", raw, 5, t0).unwrap();
+        assert_eq!(stored, raw);
+        let (x, y, w, h) = to_pixels(book.get("p-a").unwrap(), 1920, 1080);
+        let (x2, y2, w2, h2) = expand_paint_rect(x, y, w, h, 1920, 1080);
+        assert!(w2 > w && h2 > h && x2 < x && y2 < y);
+        assert_eq!(book.get("p-a"), Some(raw));
+        assert_eq!(book.visible(t0)[0].1, raw);
     }
 }
