@@ -64,20 +64,31 @@ test("a held locus that has left the message is absent", () => {
   assert.deepEqual(marks, []);
 });
 
-test("the heading jump settles on the taller bar", () => {
+test("a shared bottom does not grow upward, and a repeated lower top replaces the bar", () => {
+  const panel = { w: 1920, h: 1080 };
   const tall = { u: 0.511, v: 0.685, w: 0.469, h: 0.105 };
   const short = { u: 0.511, v: 0.756, w: 0.469, h: 0.033 };
   const shortLine = { u: 0.511, v: 0.756, w: 0.469, h: 0.034 };
-  assert.deepEqual(settleBox(short, tall), tall);
-  assert.deepEqual(settleBox(tall, short), tall);
-  assert.deepEqual(settleBox(shortLine, tall), tall);
-  assert.deepEqual(settleBox(tall, shortLine), tall);
+  assert.equal(settleRule(short, tall, panel).name, "top");
+  assert.deepEqual(settleBox(short, tall, panel), short);
+  assert.equal(settleRule(shortLine, tall, panel).name, "top");
+  assert.deepEqual(settleBox(shortLine, tall, panel), shortLine);
+  assert.equal(settleRule(tall, short, panel).name, "top");
+  assert.deepEqual(settleBox(tall, short, panel), tall);
+  assert.equal(settleRule(tall, shortLine, panel).name, "top");
+  assert.deepEqual(settleBox(tall, shortLine, panel), tall);
+  assert.equal(settleRule(tall, short, panel, short).name, "line");
+  assert.deepEqual(settleBox(tall, short, panel, short), short);
+  const inside = { u: 0.55, v: 0.7, w: 0.2, h: 0.03 };
+  assert.equal(settleRule(tall, inside, panel).name, "end");
+  assert.deepEqual(settleBox(tall, inside, panel), tall);
   const shown = { u: 0.5, v: 0.8, w: 0.4, h: 0.03 };
   const measured = { u: 0.5, v: 0.7, w: 0.4, h: 0.09 };
-  assert.deepEqual(settleBox(shown, measured), measured);
+  assert.equal(settleRule(shown, measured, panel).name, "jump");
+  assert.deepEqual(settleBox(shown, measured, panel), measured);
 });
 
-test("a move inside a tenth tracks, and a modest disagreement keeps the union", () => {
+test("a move inside a tenth tracks, and a bottom past one line still unions", () => {
   const shown = { u: 0.2, v: 0.4, w: 0.4, h: 0.2 };
   const measured = {
     u: shown.u + shown.w * 0.1,
@@ -88,16 +99,42 @@ test("a move inside a tenth tracks, and a modest disagreement keeps the union", 
   assert.deepEqual(settleBox(shown, measured), measured);
   const low = { u: 0.5, v: 0.5, w: 0.2, h: 0.1 };
   const shifted = { u: 0.5, v: 0.52, w: 0.2, h: 0.1 };
-  const union = settleBox(low, shifted);
-  assert.equal(union.v, 0.5);
-  assert.ok(Math.abs(union.h - 0.12) < 1e-12);
+  assert.equal(settleRule(low, shifted).name, "top");
+  assert.deepEqual(settleBox(low, shifted), low);
+  assert.equal(settleRule(low, shifted, { w: 1920, h: 1080 }, shifted).name, "line");
+  assert.deepEqual(settleBox(low, shifted, { w: 1920, h: 1080 }, shifted), shifted);
   const base = { u: 0, v: 0, w: 0.5, h: 0.25 };
   const atJump = { u: 0, v: 0.2, w: 0.5, h: 0.25 };
   const held = settleBox(base, atJump);
   assert.equal(held.v, 0);
   assert.ok(Math.abs(held.h - 0.45) < 1e-12);
   const jumped = { u: 0, v: 0.1, w: 0.5, h: 0.4 };
+  assert.equal(settleRule(base, jumped).name, "jump");
   assert.deepEqual(settleBox(base, jumped), jumped);
+});
+
+function px(x: number, y: number, w: number, h: number, screen = { w: 1920, h: 1080 }) {
+  return { u: x / screen.w, v: y / screen.h, w: w / screen.w, h: h / screen.h };
+}
+
+test("the same lines do not grow wider, and a jump to the chat width keeps the column", () => {
+  const panel = { w: 1920, h: 1080 };
+  const column = px(982, 300, 900, 40, panel);
+  const wider = px(400, 300, 1400, 40, panel);
+  assert.equal(settleRule(column, wider, panel).name, "wide");
+  assert.deepEqual(settleBox(column, wider, panel), column);
+  assert.equal(settleRule(column, wider, panel, wider).name, "wide");
+  const slim = px(1082, 300, 500, 40, panel);
+  assert.equal(settleRule(column, slim, panel).name, "column");
+  assert.deepEqual(settleBox(column, slim, panel), column);
+  assert.equal(settleRule(column, slim, panel, slim).name, "narrow");
+  assert.deepEqual(settleBox(column, slim, panel, slim), slim);
+  const sentence = px(982, 319, 900, 38, panel);
+  const chat = px(46, 257, 1836, 100, panel);
+  assert.equal(settleRule(sentence, chat, panel).name, "wide");
+  assert.deepEqual(settleBox(sentence, chat, panel), sentence);
+  assert.equal(settleRule(sentence, chat, panel, chat).name, "wide");
+  assert.deepEqual(settleBox(sentence, chat, panel, chat), sentence);
 });
 
 test("a miss leaves a placed mark and a hit moves it", () => {
@@ -156,13 +193,13 @@ test("a declared glass box logs the query and the union", () => {
   );
 });
 
-test("the settle log names track, jump, or union in pixels", () => {
+test("the settle log names the rule and the scroll beside the widths", () => {
+  const panel = { w: 1920, h: 1080 };
   const tall = { u: 0.511, v: 0.685, w: 0.469, h: 0.105 };
   const short = { u: 0.511, v: 0.756, w: 0.469, h: 0.033 };
-  assert.equal(settleRule(short, tall).name, "jump");
-  assert.deepEqual(settleRule(short, tall).box, tall);
-  assert.equal(settleRule(tall, short).name, "union");
-  assert.deepEqual(settleRule(tall, short).box, settleBox(tall, short));
+  assert.equal(settleRule(short, tall, panel).name, "top");
+  assert.deepEqual(settleRule(tall, short, panel).box, tall);
+  assert.equal(settleRule(tall, short, panel, short).name, "line");
   const shown = { u: 0.2, v: 0.4, w: 0.4, h: 0.2 };
   const measured = {
     u: shown.u + shown.w * 0.1,
@@ -170,17 +207,17 @@ test("the settle log names track, jump, or union in pixels", () => {
     w: shown.w - shown.w * 0.1,
     h: shown.h - shown.h * 0.1,
   };
-  assert.equal(settleRule(shown, measured).name, "track");
-  const low = { u: 0.5, v: 0.5, w: 0.2, h: 0.1 };
-  const shifted = { u: 0.5, v: 0.52, w: 0.2, h: 0.1 };
-  assert.equal(settleRule(low, shifted).name, "union");
+  assert.equal(settleRule(shown, measured, panel).name, "track");
   const base = { u: 0, v: 0, w: 0.5, h: 0.25 };
   const jumped = { u: 0, v: 0.1, w: 0.5, h: 0.4 };
-  assert.equal(settleRule(base, jumped).name, "jump");
-  const screenPx = { w: 1920, h: 1080 };
+  assert.equal(settleRule(base, jumped, panel).name, "jump");
   assert.equal(
-    settleLine("union", uvPixels(tall, screenPx.w, screenPx.h), uvPixels(short, screenPx.w, screenPx.h)),
-    "[glass] settle union shown 900x113 at 981,740 measured 900x36 at 981,816",
+    settleLine("union", uvPixels(tall, panel.w, panel.h), uvPixels(short, panel.w, panel.h), 569),
+    "[glass] settle union shown 900x113 at 981,740 measured 900x36 at 981,816 scroll 569",
+  );
+  assert.equal(
+    settleLine("wide", uvPixels(tall, panel.w, panel.h), uvPixels(short, panel.w, panel.h), null),
+    "[glass] settle wide shown 900x113 at 981,740 measured 900x36 at 981,816 scroll ?",
   );
 });
 

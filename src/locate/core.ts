@@ -589,24 +589,110 @@ function unionUv(a: Uv, b: Uv): Uv {
   return { u, v, w: right - u, h: bottom - v };
 }
 
-export type SettleName = "track" | "jump" | "union";
+export type SettleName = "track" | "top" | "line" | "end" | "wide" | "column" | "narrow" | "jump" | "union";
+
+const PANEL_H = 1080;
+
+function pixelTop(box: Uv, screenH: number): number {
+  return box.v * screenH;
+}
+
+function pixelBottom(box: Uv, screenH: number): number {
+  return (box.v + box.h) * screenH;
+}
+
+function sameLine(a: number, b: number): boolean {
+  return Math.abs(a - b) <= LINE_PX;
+}
+
+function columnAgrees(shown: Uv, measured: Uv): boolean {
+  return withinTrack(measured.u - shown.u, shown.w) && withinTrack(measured.w - shown.w, shown.w);
+}
+
+/** The new top is above the shown top by more than the tenth. */
+function grewUp(shown: Uv, measured: Uv): boolean {
+  return measured.v < shown.v - shown.h * BAR_TRACK - BAR_EPS;
+}
+
+/** The new top is below the shown top by more than the tenth. */
+function droppedTop(shown: Uv, measured: Uv): boolean {
+  return measured.v > shown.v + shown.h * BAR_TRACK + BAR_EPS;
+}
+
+function topRepeated(prior: Uv | null, measured: Uv, shown: Uv): boolean {
+  return prior != null && withinTrack(measured.v - prior.v, shown.h);
+}
+
+function widthRepeated(prior: Uv | null, measured: Uv, shown: Uv): boolean {
+  return prior != null && withinTrack(measured.u - prior.u, shown.w) && withinTrack(measured.w - prior.w, shown.w);
+}
+
+function wider(shown: Uv, measured: Uv): boolean {
+  return measured.w > shown.w * (1 + BAR_TRACK) + BAR_EPS;
+}
+
+function narrower(shown: Uv, measured: Uv): boolean {
+  return measured.w < shown.w * (1 - BAR_TRACK) - BAR_EPS;
+}
+
+function insideBox(shown: Uv, measured: Uv): boolean {
+  return (
+    measured.u >= shown.u - BAR_EPS &&
+    measured.v >= shown.v - BAR_EPS &&
+    measured.u + measured.w <= shown.u + shown.w + BAR_EPS &&
+    measured.v + measured.h <= shown.v + shown.h + BAR_EPS
+  );
+}
 
 /**
  * The rectangle to declare when a phrase already has a box, and which rule chose it.
- * A measured box within a tenth on every edge replaces the shown box, so jitter tracks.
- * A union larger than 1.8 times the shown area is a different reading, and that reading is declared.
- * Anything between those stays the union, so a short line inside a tall bar does not pull the top down.
- * A union that is already the shown rectangle keeps that rectangle's numbers. That choice is still union.
+ * A move within a tenth on every edge tracks.
+ * A shared bottom in the same column does not grow upward. A lower top replaces the bar when `prior` measured it too.
+ * A bottom more than a line above the shown bottom, inside that box, missed the phrase end.
+ * Tops and bottoms on the same lines do not grow wider. A narrower width replaces the bar when it repeats.
+ * A jump to a wider box keeps the shown column. Any other jump past 1.8 times the area takes the new box.
+ * Anything left is the fresh union of this frame with the shown box. `prior` is the previous frame's measurement.
  */
-export function settleRule(shown: Uv, measured: Uv): { name: SettleName; box: Uv } {
+export function settleRule(
+  shown: Uv,
+  measured: Uv,
+  screen: { w: number; h: number } = { w: 1920, h: 1080 },
+  prior: Uv | null = null,
+): { name: SettleName; box: Uv } {
+  const screenH = screen.h > 0 ? screen.h : PANEL_H;
   const tracks =
     withinTrack(measured.u - shown.u, shown.w) &&
     withinTrack(measured.v - shown.v, shown.h) &&
     withinTrack(measured.w - shown.w, shown.w) &&
     withinTrack(measured.h - shown.h, shown.h);
   if (tracks) return { name: "track", box: copyBox(measured) };
+
+  const bottoms = sameLine(pixelBottom(shown, screenH), pixelBottom(measured, screenH));
+  const tops = sameLine(pixelTop(shown, screenH), pixelTop(measured, screenH));
+  const column = columnAgrees(shown, measured);
+  if (bottoms && column && grewUp(shown, measured)) return { name: "top", box: copyBox(shown) };
+  if (bottoms && column && droppedTop(shown, measured)) {
+    if (topRepeated(prior, measured, shown)) return { name: "line", box: copyBox(measured) };
+    return { name: "top", box: copyBox(shown) };
+  }
+  if (pixelBottom(shown, screenH) - pixelBottom(measured, screenH) > LINE_PX && insideBox(shown, measured)) {
+    return { name: "end", box: copyBox(shown) };
+  }
+  if (tops && bottoms && wider(shown, measured)) return { name: "wide", box: copyBox(shown) };
+  if (tops && bottoms && narrower(shown, measured)) {
+    if (widthRepeated(prior, measured, shown)) return { name: "narrow", box: copyBox(measured) };
+    return { name: "column", box: copyBox(shown) };
+  }
+
   const union = unionUv(shown, measured);
-  if (boxArea(union) > boxArea(shown) * BAR_JUMP + BAR_EPS) return { name: "jump", box: copyBox(measured) };
+  if (boxArea(union) > boxArea(shown) * BAR_JUMP + BAR_EPS) {
+    if (wider(shown, measured)) return { name: "wide", box: copyBox(shown) };
+    if (narrower(shown, measured)) {
+      if (widthRepeated(prior, measured, shown)) return { name: "narrow", box: copyBox(measured) };
+      return { name: "column", box: copyBox(shown) };
+    }
+    return { name: "jump", box: copyBox(measured) };
+  }
   if (
     Math.abs(union.u - shown.u) <= BAR_EPS &&
     Math.abs(union.v - shown.v) <= BAR_EPS &&
@@ -618,13 +704,19 @@ export function settleRule(shown: Uv, measured: Uv): { name: SettleName; box: Uv
   return { name: "union", box: union };
 }
 
-/** The box from `settleRule`. The logged name is track, jump, or union. */
-export function settleBox(shown: Uv, measured: Uv): Uv {
-  return settleRule(shown, measured).box;
+/** The box from `settleRule`. */
+export function settleBox(
+  shown: Uv,
+  measured: Uv,
+  screen: { w: number; h: number } = { w: 1920, h: 1080 },
+  prior: Uv | null = null,
+): Uv {
+  return settleRule(shown, measured, screen, prior).box;
 }
 
-export function settleLine(name: SettleName, shown: Box, measured: Box): string {
-  return `[glass] settle ${name} shown ${shown.w}x${shown.h} at ${shown.x},${shown.y} measured ${measured.w}x${measured.h} at ${measured.x},${measured.y}`;
+export function settleLine(name: SettleName, shown: Box, measured: Box, scrollTop: number | null): string {
+  const scroll = scrollTop == null || !Number.isFinite(scrollTop) ? "?" : String(Math.round(scrollTop));
+  return `[glass] settle ${name} shown ${shown.w}x${shown.h} at ${shown.x},${shown.y} measured ${measured.w}x${measured.h} at ${measured.x},${measured.y} scroll ${scroll}`;
 }
 
 export function nudgeLine(dy: number, before: number | null, after: number | null, center: boolean): string {

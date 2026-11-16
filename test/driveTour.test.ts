@@ -433,6 +433,11 @@ test("a fresh reading of a marked phrase settles before it is declared", () => {
   const watch = live.slice(live.indexOf("async function watchGlass"), live.indexOf("async function readGlass"));
   assert.equal(watch.includes("settleRule"), true);
   assert.ok(watch.indexOf("if (!shown) return mark") < watch.indexOf("settleRule"));
+  assert.ok(watch.indexOf("measuredPrior.get") < watch.indexOf("settleRule"));
+  assert.equal(
+    watch.includes("settleLine(ruled.name, uvPixels(shown, width, height), uvPixels(mark, width, height), top)"),
+    true,
+  );
   assert.ok(watch.indexOf("settleLine") < watch.indexOf("keepHeld"));
 });
 

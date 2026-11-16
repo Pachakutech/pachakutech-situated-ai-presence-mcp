@@ -53,6 +53,7 @@ function liveIo(client: DaemonClient, presenceId: string | undefined, stopping: 
   let taskSeen: string | undefined;
   let holding: string[] = [];
   let boxes = new Map<string, Uv>();
+  let measuredPrior = new Map<string, Uv>();
   let paintedTop: number | null = null;
   let generation: number | null = null;
   let glassSeq = -1;
@@ -78,6 +79,7 @@ function liveIo(client: DaemonClient, presenceId: string | undefined, stopping: 
 
   async function drop(phraseId: string): Promise<void> {
     boxes.delete(phraseId);
+    measuredPrior.delete(phraseId);
     holding = holding.filter((id) => id !== phraseId);
     if (!presenceId) return;
     await client.call("concealHighlight", { presenceId, phraseId });
@@ -95,6 +97,7 @@ function liveIo(client: DaemonClient, presenceId: string | undefined, stopping: 
   async function dropAll(): Promise<void> {
     const ids = [...boxes.keys()];
     boxes.clear();
+    measuredPrior.clear();
     holding = [];
     paintedTop = null;
     for (const id of ids) {
@@ -248,11 +251,16 @@ function liveIo(client: DaemonClient, presenceId: string | undefined, stopping: 
     }
     const settled = marks.map((mark) => {
       const shown = boxes.get(mark.phraseId);
+      const prior = measuredPrior.get(mark.phraseId) ?? null;
+      measuredPrior.set(mark.phraseId, { u: mark.u, v: mark.v, w: mark.w, h: mark.h });
       if (!shown) return mark;
-      const ruled = settleRule(shown, mark);
-      console.error(settleLine(ruled.name, uvPixels(shown, width, height), uvPixels(mark, width, height)));
+      const ruled = settleRule(shown, mark, { w: width, h: height }, prior);
+      console.error(settleLine(ruled.name, uvPixels(shown, width, height), uvPixels(mark, width, height), top));
       return { ...mark, ...ruled.box };
     });
+    for (const id of measuredPrior.keys()) {
+      if (!marks.some((mark) => mark.phraseId === id)) measuredPrior.delete(id);
+    }
     const next = keepHeld(held, settled);
     for (const mark of next) {
       const prev = boxes.get(mark.phraseId);

@@ -1,5 +1,7 @@
 # A tighter top when the bottom holds
 
+Status: landed 16 November 2026 with `union_of_the_new_box.md`. The shared-bottom rule and the one-frame lower top are `settleRule`.
+
 16 November 2026. This revises step 3 of `docs/plans/union_of_the_new_box.md` for one case: the new box ends on the same line as the shown box. The fresh union stays for every other case.
 
 ## Where the extra top comes from
