@@ -41,7 +41,9 @@ const BAND_HIGH = 0.62;
 export const LINE_PX = 24;
 /** Lines of verse drawn under a find when the end phrase is not in the photograph. */
 export const VERSE_LINES = 8;
-/** OCR tokens a contiguous phrase may skip between two query tokens. */
+/** Tokens the glass may hold between the first and second query tokens. */
+const OPENING_SKIP = 0;
+/** OCR tokens a contiguous phrase may skip between later query tokens. */
 const PHRASE_SKIP = 4;
 /** Lines a `...` passage may span, including the anchor lines. */
 const PASSAGE_LINES = 16;
@@ -233,7 +235,7 @@ function matchPhrase(seq: Seq[], from: number, phrase: string[]): Hit | null {
       skipped = 0;
       end = i;
       cost += step;
-    } else if (++skipped > PHRASE_SKIP) {
+    } else if (++skipped > (qi === 1 ? OPENING_SKIP : PHRASE_SKIP)) {
       return null;
     }
   }

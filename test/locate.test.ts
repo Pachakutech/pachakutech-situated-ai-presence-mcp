@@ -10,6 +10,7 @@ import {
   END_NUDGE_MAX,
   findRun,
   leaksLine,
+  lineText,
   LINE_PX,
   BOX_PAD,
   NUDGE_PX,
@@ -95,6 +96,68 @@ test("a phrase that occurs twice is ambiguous", () => {
   const lines = prepareLines(parseTsv(fixture));
   const doubled = lines.concat(lines.map((line) => ({ words: line.words.map((word) => ({ ...word, y: word.y + 2000 })) })));
   assert.equal(findRun(doubled, "man's dominion"), "ambiguous");
+});
+
+const inductive =
+  "The effect of the sigma electron displacement towards the more electronegative atom by which one end becomes positively charged and the other end negatively charged is known as the inductive effect.";
+const locusOpen =
+  "The effect of the sigma electron displacement towards the more electronegative atom by which one end becomes positively charged and the";
+const locusClose =
+  "other end negatively charged is known as the inductive effect. The ~/ effect is a permanent effect & generally represented by an arrow on the";
+const caption = "vicinity of the more electronegative atom.";
+const heading = "Inductive effect";
+const aboveHeading =
+  "covalent bonds. The hydrogen~chiorine bond in HC or the hydrogen-oxygen bonds in water are typical, more negatively charged in the";
+
+function inkRows(rows: string[]): Line[] {
+  return rows.map((row, i) => ({ words: rowAt(row.split(/\s+/), 100 + i * 28) }));
+}
+
+function openingOf(rows: string[], query: string): { start: number; end: number; first: string; last: string } {
+  const lines = inkRows(rows);
+  const run = findRun(lines, query);
+  assert.equal(typeof run, "object");
+  if (run === "ambiguous" || !run) throw new Error("expected one run");
+  return { start: run.start, end: run.end, first: lineText(lines[run.start]), last: lineText(lines[run.end]) };
+}
+
+test("the inductive run opens on The effect, under the caption and the heading", () => {
+  const run = openingOf([caption, heading, locusOpen, locusClose], inductive);
+  assert.equal(run.start, 2);
+  assert.equal(run.end, 3);
+  assert.equal(run.first, locusOpen);
+  assert.match(run.last, /known as the inductive effect/);
+  assert.match(run.last, /arrow/);
+});
+
+test("the inductive run opens on The effect, under the paragraph and the heading", () => {
+  const run = openingOf([aboveHeading, heading, locusOpen, locusClose], inductive);
+  assert.equal(run.start, 2);
+  assert.equal(run.end, 3);
+  assert.equal(run.first, locusOpen);
+  assert.match(run.last, /known as the inductive effect/);
+});
+
+test("the locus lines alone open on The effect and end on the inductive line", () => {
+  const run = openingOf([locusOpen, locusClose], inductive);
+  assert.equal(run.start, 0);
+  assert.equal(run.end, 1);
+  assert.equal(run.first, locusOpen);
+  assert.match(run.last, /known as the inductive effect/);
+});
+
+test("the allyl sentence stays on its one line", () => {
+  const allyl = "All feature three contiguous sp²-hybridized carbon centers and all derive stability from resonance.";
+  const run = openingOf([allyl], allyl);
+  assert.deepEqual({ start: run.start, end: run.end }, { start: 0, end: 0 });
+  assert.equal(run.first, allyl);
+});
+
+test("a later gap of two tokens still matches, and the opening pair does not skip", () => {
+  const query = "alpha beta gamma delta";
+  const joined = openingOf(["alpha beta gamma xx yy delta"], query);
+  assert.deepEqual({ start: joined.start, end: joined.end }, { start: 0, end: 0 });
+  assert.equal(findRun(inkRows(["alpha zz beta gamma delta"]), query), null);
 });
 
 test("doubtna leaks and the matched crop does not", () => {
