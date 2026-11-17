@@ -2,10 +2,10 @@
 // One cell of the quietude grid. The desktop image stays on the GPU.
 // A cell whose center lies in either disc rect, or in a highlight rect, is
 // not the desktop: its heat is written as 0 and its remembered color is left
-// alone. The highlight's own heat is not this zero. The CPU stamps the
-// interior hot, a thin margin like text, and a cool frame outside that,
-// from the rects this dispatch was given. A mark that has stopped showing
-// is not in that list, so the next grid is the desktop again. Samples that
+// alone. The highlight's own heat is not this zero. The CPU writes one
+// text weight on the interior and adds one text weight on the 12 px margin.
+// Nothing past that margin changes because a mark is showing. A mark that has
+// stopped showing is not in that list, so the next grid is the desktop again. Samples that
 // fall inside a masked rect are skipped, so a cell that only overlaps one
 // is measured from the desktop part of that cell. A cell that has never been
 // sampled stores a negative luma and does not report motion on the frame the

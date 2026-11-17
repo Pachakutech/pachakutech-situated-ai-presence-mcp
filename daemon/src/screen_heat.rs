@@ -38,19 +38,12 @@ const W_MOTION: f32 = 1.2;
 /// brightness barely moves when grey type is rewritten, so this is the
 /// term that makes a live paragraph the hot end of the field.
 const W_CHANGING: f32 = 8.0;
-/// Highlight interior. Hotter than text, short of a cell whose letters are
-/// changing. The shader writes 0 there (the tint is not the page); the copy
-/// replaces that 0 with this.
-const W_MARK_HOT: f32 = 4.0;
-/// Subtracted from the frame just outside the highlight and its margin.
-/// A quarter of one text-weight, so the ring is only slightly cooler than
-/// the same pixels unmarked.
-const W_MARK_COOL: f32 = 0.25;
+/// Highlight interior. One text weight, written over the shader's 0.
+/// A disc on the bar feels that mild heat and leaves. A quiet corner stays
+/// cooler, so the bar does not outrank the page.
+const W_MARK_HOT: f32 = 1.0;
 /// Pixels outside the rect that still count with the highlight, at text weight.
 const MARK_MARGIN_PX: f32 = 12.0;
-/// Pixels outside that margin that cool. One cell of the 40 px grid, so the
-/// ring has a center to land in.
-const MARK_FRAME_PX: f32 = 40.0;
 
 #[repr(C)]
 struct HeatPush {
@@ -528,8 +521,8 @@ fn disc_covers(px: f32, py: f32, origin: (i32, i32), side: i32) -> bool {
         && py < origin.1 as f32 + side as f32
 }
 
-/// While a mark is showing: interior becomes `W_MARK_HOT`, the 12 px margin
-/// gains text weight, and the next 40 px cools by `W_MARK_COOL`. Cells under
+/// While a mark is showing: interior becomes `W_MARK_HOT` and the 12 px
+/// margin gains text weight. Nothing past that margin changes. Cells under
 /// a disc stay as the shader left them. No live rect leaves the grid alone,
 /// which is the revert when the mark has stopped showing.
 fn stamp_visible_marks(
@@ -552,7 +545,6 @@ fn stamp_visible_marks(
         return;
     }
     let cell = cell_px.max(1) as f32;
-    let frame_reach = MARK_MARGIN_PX + MARK_FRAME_PX;
     for row in 0..rows {
         for col in 0..cols {
             let cx = (col as f32 + 0.5) * cell;
@@ -562,7 +554,6 @@ fn stamp_visible_marks(
             }
             let mut inside = false;
             let mut margin = false;
-            let mut frame = false;
             for r in marks {
                 let d = rect_outset(cx, cy, *r);
                 if d <= 0.0 {
@@ -570,8 +561,6 @@ fn stamp_visible_marks(
                     break;
                 } else if d <= MARK_MARGIN_PX {
                     margin = true;
-                } else if d <= frame_reach {
-                    frame = true;
                 }
             }
             let i = (row * cols + col) as usize;
@@ -579,8 +568,6 @@ fn stamp_visible_marks(
                 heat[i] = W_MARK_HOT;
             } else if margin {
                 heat[i] += W_TEXT;
-            } else if frame {
-                heat[i] -= W_MARK_COOL;
             }
         }
     }
@@ -595,17 +582,18 @@ mod tests {
     }
 
     #[test]
-    fn a_showing_mark_heats_the_inside_and_cools_the_frame() {
+    fn a_showing_mark_is_one_text_weight_and_the_frame_stays() {
         let mut heat = grid(0.5);
         let mut marks = [[0.0; 4]; 3];
         // Cells are 40 px, centers at 20, 60, 100, 140.
-        // The rect covers (20, 20) only. (60, 20) is 30 px outside: the frame.
-        // (100, 20) is 70 px outside the 52 px reach.
+        // The rect covers (20, 20) only. (60, 20) is 30 px outside, past
+        // the 12 px margin. That cell used to cool. It stays at the picture.
         marks[0] = [0.0, 0.0, 30.0, 30.0];
         stamp_visible_marks(&mut heat, 4, 4, 40, &marks, &[]);
         let at = |c, r| heat[(r * 4 + c) as usize];
-        assert_eq!(at(0, 0), W_MARK_HOT);
-        assert!((at(1, 0) - (0.5 - W_MARK_COOL)).abs() < 1e-5, "frame {}", at(1, 0));
+        assert_eq!(W_MARK_HOT, 1.0);
+        assert_eq!(at(0, 0), 1.0);
+        assert!((at(1, 0) - 0.5).abs() < 1e-5, "frame {}", at(1, 0));
         assert!((at(2, 0) - 0.5).abs() < 1e-5, "untouched {}", at(2, 0));
     }
 

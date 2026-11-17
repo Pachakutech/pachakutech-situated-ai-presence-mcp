@@ -1,5 +1,7 @@
 # No highlight heat, except a mild repel up close
 
+Status: landed 16 November 2026. `W_MARK_HOT` in `stamp_visible_marks` is 1.0. The 12 px margin still adds one text weight. Nothing past that margin is warmed or cooled because a mark is showing. The frame cell stays at the picture's heat. The test is `a_showing_mark_is_one_text_weight_and_the_frame_stays`. The margin test and the disc test stay. Settle, the paint pad, the gesture arc, and the five-second hold are unchanged.
+
 16 November 2026. The last tour parked the avatar in the cool ring beside the bar. That ring is real. It is not why the gesture stays small.
 
 Project `pj-daa6399c608c3911`, presence `p-w1qfwt`, daemon pid 373186. The driver ran to 11:40:10 and exited 0. Allyl was denied. Inductive was accepted.
