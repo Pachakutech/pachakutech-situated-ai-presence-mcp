@@ -1,6 +1,6 @@
 # The tour box for the aim
 
-Status: landed 18 November 2026. One aim key on the presence, written by the driver. `highlightRegion` takes `aim`. `visible_interest` returns that mark's box while it is visible. `AIM_OMEGA` stays 6.5. The 1600 ms spring stays deferred until the arms have been seen on this box.
+Status: landed 18 November 2026. One aim key on the presence, written by the driver. `highlightRegion` takes `aim`. `visible_interest` returns that mark's box while it is visible. The spring later moved to 5/3, about 2400 milliseconds, in `point_in_2400ms.md`. The 1600 ms step was not taken.
 
 18 November 2026. During a research tour the bar is on screen and she is talking, and the arms do the talking lift. The aim never receives the box.
 
@@ -36,7 +36,7 @@ A scan that takes the latest declaration owned by the presence was set aside. Af
 
 ## Leave
 
-`AIM_OMEGA` stays 6.5. A quarter turn from rest has under a tenth left at 600 milliseconds. That arrival has not been seen on a tour, because the aim had no box. See the arms on the allyl line at 6.5 first. If that arrival still feels late, 2.45 is about 90 percent at 1600 milliseconds, and that is a later change. Do not edit the 600 ms sentences in `docs/situated-presence.md`. Do not rename `a_quarter_turn_arrives_in_600_milliseconds`.
+`AIM_OMEGA` was left at 6.5 when this ticket landed. A quarter turn from rest had under a tenth left at 600 milliseconds. That arrival had not been seen on a tour. The same day, before that look, `point_in_2400ms.md` set the frequency to 5/3. The sentences in `docs/situated-presence.md` name 2400 milliseconds. The test is `a_quarter_turn_arrives_in_2400_milliseconds`.
 
 `SWEEP_SETTLE_S` stays 5. The wave period stays 15 seconds. `GestureMode::Wave` is the bits of the rectangle, so a scroll that changes the aim box starts the five-second hold again. The springs do not reset. They ease toward the new middle of the arc. Leave that clock.
 
@@ -49,7 +49,7 @@ The spring and the 33 ms sample stay in the daemon. The overlay thread does not 
 - A later declare of `lc-1` with a new rectangle updates the box `visible_interest("p-a")` returns.
 - Concealing `lc-1` makes `visible_interest("p-a")` return none.
 - A declare with no phrase id still makes `visible_interest("p-a")` return that box.
-- The sweep tests stay. The 600 ms spring test stays.
+- The sweep tests stay. The arrival test is `a_quarter_turn_arrives_in_2400_milliseconds`.
 
 Landed in `daemon/src/registry.rs`: `the_named_phrase_is_the_aim`, `another_phrase_leaves_the_aim`, `a_later_declare_moves_the_aim_box`, `concealing_the_aim_phrase_clears_it`, `a_declare_without_a_phrase_id_is_the_aim`, `a_faded_aim_is_not_returned`, and `closing_the_connection_clears_its_aim`. The wire default is `highlight_aim_defaults_off_and_parses_on`. The driver check is in `test/driveTour.test.ts`.
 
@@ -62,4 +62,4 @@ Landed in `daemon/src/registry.rs`: `the_named_phrase_is_the_aim`, `another_phra
 - `daemon/src/overlay.rs` the `steer` call
 - `daemon/src/avatar/mod.rs` `steer` — a box while talking is the wave, and no box while talking is the 20 degree lift
 - `src/locate/driveTourLive.ts` `paint`, `highlight`, `shiftAll`, `watchGlass`
-- `docs/plans/point_in_600ms.md` — landed at 6.5, and this ticket leaves that frequency
+- `docs/plans/point_in_2400ms.md` — the frequency after this box landed

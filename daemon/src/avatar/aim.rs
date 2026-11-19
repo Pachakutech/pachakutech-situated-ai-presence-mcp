@@ -34,9 +34,9 @@ pub const YAW_SCALE: f32 = 1.0;
 /// Exponent on normalized yaw 1.0 = linear 2.0 = softer
 pub const YAW_POWER: f32 = 16.0;
 
-/// Natural frequency of the aim spring, in rad/s. Critically damped, so a
-/// turn arrives in about 600 milliseconds.
-pub const AIM_OMEGA: f32 = 6.5;
+/// Natural frequency of the aim spring, in rad/s. Critically damped.
+/// `4 / ω` is 2.4 seconds, so a turn arrives in about 2400 milliseconds.
+pub const AIM_OMEGA: f32 = 5.0 / 3.0;
 
 /// Arm joints copied from `Point` onto the breath. Spine stays on `Breathe`.
 pub const ARM_JOINTS: &[&str] = &[
@@ -115,7 +115,7 @@ pub fn aim_yaw(theta: f32) -> f32 {
 }
 
 /// Hold the middle of a highlight arc this long before the wave leaves it.
-/// The spring arrives in about 600 milliseconds. This hold stays five.
+/// The spring arrives in about 2400 milliseconds. This hold stays five.
 pub const SWEEP_SETTLE_S: f32 = 5.0;
 
 /// One trip out to a corner and across to the other.
@@ -366,11 +366,11 @@ mod tests {
     }
 
     #[test]
-    fn a_quarter_turn_arrives_in_600_milliseconds() {
+    fn a_quarter_turn_arrives_in_2400_milliseconds() {
         let target = std::f32::consts::FRAC_PI_2;
         let mut spring = AimSpring::default();
         let dt = 0.001_f32;
-        for _ in 0..600 {
+        for _ in 0..2400 {
             spring.step(target, dt);
         }
         let err = shortest_delta(spring.theta, target).abs();

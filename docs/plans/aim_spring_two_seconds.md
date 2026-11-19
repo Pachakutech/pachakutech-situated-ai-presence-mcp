@@ -1,6 +1,6 @@
 # Aim spring settles in two seconds
 
-Status: landed 18 November 2026 at `AIM_OMEGA` 2.0. Replaced the same day by `point_in_600ms.md`. The frequency is 6.5, about 600 milliseconds. `SWEEP_SETTLE_S` stays 5. The wave period stays 15 seconds.
+Status: landed 18 November 2026 at `AIM_OMEGA` 2.0. Replaced the same day by `point_in_600ms.md`, then by `point_in_2400ms.md`. The frequency is 5/3, about 2400 milliseconds. `SWEEP_SETTLE_S` stays 5. The wave period stays 15 seconds.
 
 18 November 2026. The lag before the arms arrive on a mark is the aim spring. Bring that settle from about five seconds to about two.
 
