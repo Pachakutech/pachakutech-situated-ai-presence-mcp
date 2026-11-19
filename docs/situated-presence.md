@@ -188,6 +188,10 @@ What to expect when she is given a mark and then a sentence:
 - A sentence with no mark raises the left hand as far as frame 20 and
   brings it back, with about 2° of yaw. It does not use the quarter-turn
   aim.
+- The presence keeps one aim. A declare with no phrase id is that aim.
+  A phrase is that aim when the declare sets `aim`. The arms follow that
+  mark while it is visible. Another bar does not take the point. When
+  that mark fades or is concealed, the arms use the talking lift.
 
 A point inside a document, a window, or a page is not yet this
 coordinate system. The viewer adds chrome, zoom, and scroll. Measure the

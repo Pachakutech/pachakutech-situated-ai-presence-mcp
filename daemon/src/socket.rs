@@ -185,10 +185,11 @@ impl SocketServer {
         self.registry.lock().expect("registry mutex poisoned").visible_interests(Instant::now())
     }
 
-    /// The mark still showing for this presence. A faded box stays in the book
-    /// and is not returned here; the point follows the mark, not that leftover.
+    /// The aim mark still showing for this presence. The key is the phrase named
+    /// with `aim`, or the presence id when the declare had no phrase. A faded box
+    /// stays in the book and is not returned here; the point follows the mark.
     pub fn visible_interest(&self, id: &str) -> Option<crate::highlight::UvBox> {
-        self.visible_interests().into_iter().find(|(i, _)| i == id).map(|(_, b)| b)
+        self.registry.lock().expect("registry mutex poisoned").visible_aim(id, Instant::now())
     }
 
     /// Drop a mark that was held for the utterance. The box stays for the next aim.
@@ -564,7 +565,7 @@ fn dispatch(
                 ProposalResult::ok(&proposal_id, Some(json!({ "concealed": concealed })))
             }
         }
-        Proposal::HighlightRegion { presence_id, description, u, v, w, h, duration_seconds, until_speech, until_conceal, phrase_id, .. } => {
+        Proposal::HighlightRegion { presence_id, description, u, v, w, h, duration_seconds, until_speech, until_conceal, phrase_id, aim, .. } => {
             match reg.declare_interest(
                 &presence_id,
                 phrase_id.as_deref(),
@@ -572,6 +573,7 @@ fn dispatch(
                 crate::highlight::UvBox { u, v, w, h },
                 duration_seconds,
                 Instant::now(),
+                aim,
             ) {
                 Ok((box_, secs)) => {
                     let key = phrase_id.as_deref().map(str::trim).filter(|id| !id.is_empty()).unwrap_or(presence_id.as_str());
@@ -767,6 +769,28 @@ mod tests {
     }
 
     #[test]
+    fn highlight_aim_defaults_off_and_parses_on() {
+        match p(
+            r#"{"kind":"highlightRegion","proposalId":"9","presenceId":"p-a","description":"the banner","u":0.1,"v":0.2,"w":0.3,"h":0.4,"durationSeconds":12}"#,
+        ) {
+            Proposal::HighlightRegion { aim, phrase_id, .. } => {
+                assert!(!aim);
+                assert!(phrase_id.is_none());
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        match p(
+            r#"{"kind":"highlightRegion","proposalId":"9","presenceId":"p-a","description":"allyl","u":0.1,"v":0.2,"w":0.3,"h":0.04,"durationSeconds":360,"phraseId":"lc-1","aim":true}"#,
+        ) {
+            Proposal::HighlightRegion { aim, phrase_id, .. } => {
+                assert!(aim);
+                assert_eq!(phrase_id.as_deref(), Some("lc-1"));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
     fn highlight_json_carries_the_uv_box() {
         let proposal = p(
             r#"{"kind":"highlightRegion","proposalId":"9","presenceId":"p-a","description":"the banner","u":0.1,"v":0.2,"w":0.3,"h":0.4,"durationSeconds":12}"#,
@@ -789,12 +813,12 @@ mod tests {
         let mut reg = Registry::new();
         let now = Instant::now();
         let raw = UvBox { u: 0.1, v: 0.2, w: 0.3, h: 0.4 };
-        let err = reg.declare_interest("p-a", None, "banner", raw, 5, now).unwrap_err();
+        let err = reg.declare_interest("p-a", None, "banner", raw, 5, now, false).unwrap_err();
         assert!(err.contains("no live presence with id p-a"), "{err}");
         let mut cmds = vec![];
         run(&mut reg, &mut cmds, &spawn("p-a"));
         assert!(!reg.has_avatar("p-a"));
-        let (got, secs) = reg.declare_interest("p-a", None, "banner", raw, 400, now).unwrap();
+        let (got, secs) = reg.declare_interest("p-a", None, "banner", raw, 400, now, false).unwrap();
         assert_eq!(secs, 360);
         assert_eq!(got, raw);
         assert_eq!(reg.visible_interests(now).len(), 1);

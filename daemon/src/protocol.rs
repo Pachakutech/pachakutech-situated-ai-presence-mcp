@@ -32,6 +32,10 @@ pub enum Proposal {
         /// Tour locus. The mark is keyed by this id. Absent keeps one box per presence.
         #[serde(default, rename = "phraseId")]
         phrase_id: Option<String>,
+        /// Name this mark as the presence's aim. Absent is false.
+        /// A declare with no phrase id is the aim either way.
+        #[serde(default, rename = "aim")]
+        aim: bool,
     },
     #[serde(rename = "spawnPresence")]
     SpawnPresence {

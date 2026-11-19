@@ -472,6 +472,20 @@ test("a finished list keeps the bars until the latched window closes", () => {
   assert.ok(hold.indexOf("noteDismissed") < hold.indexOf('view.state !== "active"'));
 });
 
+test("the phrase she is on is the aim and a later paint of another bar is not", () => {
+  const live = readFileSync(join(root, "src/locate/driveTourLive.ts"), "utf8");
+  const paint = live.slice(live.indexOf("async function paint"), live.indexOf("async function drop"));
+  const shift = live.slice(live.indexOf("async function shiftAll"), live.indexOf("async function trackTravel"));
+  const watch = live.slice(live.indexOf("for (const mark of next)"), live.indexOf("holding = next"));
+  const highlight = live.slice(live.indexOf("async highlight(hit, item)"), live.indexOf("async conceal()"));
+  const drop = live.slice(live.indexOf("async function drop"), live.indexOf("async function concealLeft"));
+  assert.equal(paint.includes("fields.aim = true"), true);
+  assert.equal(highlight.includes('paint(item.phraseId, box, item.query ?? "passage", true)'), true);
+  assert.equal(shift.includes(", true"), false);
+  assert.equal(watch.includes(", true"), false);
+  assert.equal(drop.includes("aimPhrase === phraseId"), true);
+});
+
 test("the live driver conceals on the way out and keeps the 360 second hold", () => {
   const live = readFileSync(join(root, "src/locate/driveTourLive.ts"), "utf8");
   assert.equal(live.includes("driveUntilStop"), true);

@@ -1,6 +1,6 @@
 # The tour box for the aim
 
-Agreed 18 November 2026. One aim box on the presence, written by the driver. The avatar samples that box. `AIM_OMEGA` stays 6.5. The 1600 ms spring waits until this box has been seen on a tour.
+Status: landed 18 November 2026. One aim key on the presence, written by the driver. `highlightRegion` takes `aim`. `visible_interest` returns that mark's box while it is visible. `AIM_OMEGA` stays 6.5. The 1600 ms spring stays deferred until the arms have been seen on this box.
 
 18 November 2026. During a research tour the bar is on screen and she is talking, and the arms do the talking lift. The aim never receives the box.
 
@@ -50,6 +50,8 @@ The spring and the 33 ms sample stay in the daemon. The overlay thread does not 
 - Concealing `lc-1` makes `visible_interest("p-a")` return none.
 - A declare with no phrase id still makes `visible_interest("p-a")` return that box.
 - The sweep tests stay. The 600 ms spring test stays.
+
+Landed in `daemon/src/registry.rs`: `the_named_phrase_is_the_aim`, `another_phrase_leaves_the_aim`, `a_later_declare_moves_the_aim_box`, `concealing_the_aim_phrase_clears_it`, `a_declare_without_a_phrase_id_is_the_aim`, `a_faded_aim_is_not_returned`, and `closing_the_connection_clears_its_aim`. The wire default is `highlight_aim_defaults_off_and_parses_on`. The driver check is in `test/driveTour.test.ts`.
 
 ## Read with
 

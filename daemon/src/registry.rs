@@ -34,8 +34,12 @@ pub struct Registry {
     avatar_available: bool,
     /// The single avatar body belongs to at most one presence at a time.
     avatar_owner: Option<String>,
-    /// One screen box per presence. The mark fades; the box stays until retire.
+    /// One screen box per presence, or one box per phrase when the tour sends a phrase id.
+    /// The mark fades; the box stays until retire.
     interests: InterestBook,
+    /// The one mark this presence is pointing at. The key is a phrase id, or the
+    /// presence id when the declare had none. The avatar samples that mark's visible box.
+    aim_of: HashMap<String, String>,
     /// Connection that last painted each until-conceal mark. Its close retires those marks.
     held_owner: HashMap<String, u64>,
     /// Glass-session phrase log. Retiring a presence does not clear it.
@@ -63,6 +67,7 @@ impl Registry {
             avatar_available: false,
             avatar_owner: None,
             interests: InterestBook::new(),
+            aim_of: HashMap::new(),
             held_owner: HashMap::new(),
             ledger: Ledger::new(),
             tasks: TaskBook::new(),
@@ -273,7 +278,7 @@ impl Registry {
     pub fn apply_tint_samples(&mut self, samples: Vec<crate::task::TintSample>) {
         let dropped = self.tasks.apply_tint_samples(&mut self.ledger, samples);
         for id in dropped {
-            self.interests.retire(&id);
+            self.retire_interest(&id);
         }
     }
 
@@ -310,6 +315,8 @@ impl Registry {
     /// The presence must already be in the daemon map. It does not need the body.
     /// `secs` is clamped to 1..=360. The returned box is the measured rect the book keeps.
     /// The mark surface pads around that rect. This value does not.
+    /// `aim` names this mark as the presence's point. A declare with no phrase id
+    /// is the aim either way. A phrase declare with `aim` false leaves the key alone.
     pub fn declare_interest(
         &mut self,
         presence_id: &str,
@@ -318,13 +325,18 @@ impl Registry {
         raw: UvBox,
         secs: u32,
         now: Instant,
+        aim: bool,
     ) -> Result<(UvBox, u32), String> {
         if !self.has_presence(presence_id) {
             return Err(format!("no live presence with id {presence_id}"));
         }
-        let key = phrase_id.map(str::trim).filter(|id| !id.is_empty()).unwrap_or(presence_id);
+        let phrase = phrase_id.map(str::trim).filter(|id| !id.is_empty());
+        let key = phrase.unwrap_or(presence_id);
         let secs = secs.clamp(1, MAX_SECS);
         let got = self.interests.declare(key, raw, secs, now)?;
+        if phrase.is_none() || aim {
+            self.aim_of.insert(presence_id.to_string(), key.to_string());
+        }
         println!(
             "[registry] highlight {presence_id} uv {:.3},{:.3} {:.3}x{:.3} for {secs}s — {description}",
             got.u, got.v, got.w, got.h
@@ -333,10 +345,17 @@ impl Registry {
     }
 
     /// Still the declared box after the mark has faded.
-    /// The point gesture reads [`Self::visible_interests`], not this.
+    /// The point gesture reads [`Self::visible_aim`], not this.
     #[allow(dead_code)]
     pub fn interest(&self, presence_id: &str) -> Option<UvBox> {
         self.interests.get(presence_id)
+    }
+
+    /// The box this presence is pointing at, while that mark is still visible.
+    /// A faded mark is not returned. An empty sample is the talking lift.
+    pub fn visible_aim(&self, presence_id: &str, now: Instant) -> Option<UvBox> {
+        let key = self.aim_of.get(presence_id)?;
+        self.interests.visible(now).into_iter().find(|(id, _)| id == key).map(|(_, box_)| box_)
     }
 
     pub fn visible_interests(&self, now: Instant) -> Vec<(String, UvBox)> {
@@ -379,12 +398,13 @@ impl Registry {
         eprintln!("[highlight] connection {conn} closed; retiring {}", keys.join(" "));
         for key in &keys {
             self.held_owner.remove(key);
-            self.interests.retire(key);
+            self.retire_interest(key);
         }
     }
 
     pub fn retire_interest(&mut self, id: &str) {
         self.interests.retire(id);
+        self.aim_of.retain(|_, aim| aim != id);
     }
 
     /// Hide a mark that was held for the utterance. The box stays.
@@ -444,7 +464,8 @@ impl Registry {
     /// Retires the presence. Returns true if it owned the avatar body (now released).
     pub fn retire_presence(&mut self, presence_id: &str) -> Result<bool, String> {
         self.presence.retire(presence_id)?;
-        self.interests.retire(presence_id);
+        self.retire_interest(presence_id);
+        self.aim_of.remove(presence_id);
         self.tasks.dismiss_presence(presence_id);
         let owned = self.avatar_owner.as_deref() == Some(presence_id);
         if owned {
@@ -1001,13 +1022,13 @@ mod tests {
         reg.spawn_presence("p-a", "tour", None, None);
         let now = Instant::now();
         let raw = crate::highlight::UvBox { u: 0.1, v: 0.2, w: 0.3, h: 0.1 };
-        reg.declare_interest("p-a", Some("ph-1"), "a", raw, 360, now).unwrap();
+        reg.declare_interest("p-a", Some("ph-1"), "a", raw, 360, now, false).unwrap();
         reg.hold_interest_until_conceal("ph-1");
         reg.claim_held(1, "ph-1");
-        reg.declare_interest("p-a", Some("ph-2"), "b", raw, 360, now).unwrap();
+        reg.declare_interest("p-a", Some("ph-2"), "b", raw, 360, now, false).unwrap();
         reg.hold_interest_until_conceal("ph-2");
         reg.claim_held(2, "ph-2");
-        reg.declare_interest("p-a", Some("ph-3"), "c", raw, 360, now).unwrap();
+        reg.declare_interest("p-a", Some("ph-3"), "c", raw, 360, now, false).unwrap();
 
         let ids = |reg: &Registry, at: Instant| -> Vec<String> {
             reg.visible_interests(at).into_iter().map(|(id, _)| id).collect()
@@ -1025,13 +1046,13 @@ mod tests {
         assert!(after.contains(&"ph-2".into()), "{after:?}");
         assert_eq!(reg.interest("ph-3").unwrap().u, 0.1);
 
-        reg.declare_interest("p-a", Some("ph-1"), "a", raw, 360, now).unwrap();
+        reg.declare_interest("p-a", Some("ph-1"), "a", raw, 360, now, false).unwrap();
         reg.hold_interest_until_conceal("ph-1");
         reg.claim_held(2, "ph-1");
         reg.release_connection(1);
         assert!(ids(&reg, now + Duration::from_secs(10_000)).contains(&"ph-1".into()));
 
-        reg.declare_interest("p-a", Some("ph-2"), "b", raw, 360, now).unwrap();
+        reg.declare_interest("p-a", Some("ph-2"), "b", raw, 360, now, false).unwrap();
         reg.forget_held("ph-2");
         reg.release_connection(2);
         let left = ids(&reg, now + Duration::from_secs(10));
@@ -1042,5 +1063,94 @@ mod tests {
         assert!(!later.contains(&"ph-2".into()), "{later:?}");
         assert_eq!(reg.interest("ph-3").unwrap().u, 0.1);
         assert_eq!(reg.interest("ph-1"), None);
+    }
+
+    fn tour_presence() -> (Registry, std::time::Instant, crate::highlight::UvBox) {
+        let mut reg = Registry::new();
+        reg.spawn_presence("p-a", "tour", None, None);
+        reg.spawn_presence("p-b", "other", None, None);
+        let now = std::time::Instant::now();
+        let allyl = crate::highlight::UvBox { u: 0.2, v: 0.4, w: 0.3, h: 0.05 };
+        (reg, now, allyl)
+    }
+
+    #[test]
+    fn the_named_phrase_is_the_aim() {
+        let (mut reg, now, allyl) = tour_presence();
+        reg.declare_interest("p-a", Some("lc-1"), "allyl", allyl, 360, now, true).unwrap();
+        assert_eq!(reg.visible_aim("p-a", now), Some(allyl));
+        assert_eq!(reg.visible_aim("p-b", now), None);
+        let keys: Vec<String> = reg.visible_interests(now).into_iter().map(|(id, _)| id).collect();
+        assert_eq!(keys, vec!["lc-1".to_string()]);
+        reg.hold_interest_until_conceal("lc-1");
+        let later = now + std::time::Duration::from_secs(10_000);
+        assert_eq!(reg.visible_aim("p-a", later), Some(allyl));
+    }
+
+    #[test]
+    fn closing_the_connection_clears_its_aim() {
+        let (mut reg, now, allyl) = tour_presence();
+        reg.declare_interest("p-a", Some("lc-1"), "allyl", allyl, 360, now, true).unwrap();
+        reg.hold_interest_until_conceal("lc-1");
+        reg.claim_held(1, "lc-1");
+        reg.release_connection(1);
+        assert_eq!(reg.visible_aim("p-a", now), None);
+        assert_eq!(reg.interest("lc-1"), None);
+    }
+
+    #[test]
+    fn another_phrase_leaves_the_aim() {
+        let (mut reg, now, allyl) = tour_presence();
+        reg.declare_interest("p-a", Some("lc-1"), "allyl", allyl, 360, now, true).unwrap();
+        let other = crate::highlight::UvBox { u: 0.5, v: 0.6, w: 0.2, h: 0.04 };
+        reg.declare_interest("p-a", Some("lc-2"), "inductive", other, 360, now, false).unwrap();
+        assert_eq!(reg.visible_aim("p-a", now), Some(allyl));
+        let keys: Vec<String> = reg.visible_interests(now).into_iter().map(|(id, _)| id).collect();
+        assert!(keys.contains(&"lc-1".into()), "{keys:?}");
+        assert!(keys.contains(&"lc-2".into()), "{keys:?}");
+    }
+
+    #[test]
+    fn a_later_declare_moves_the_aim_box() {
+        let (mut reg, now, allyl) = tour_presence();
+        reg.declare_interest("p-a", Some("lc-1"), "allyl", allyl, 360, now, true).unwrap();
+        let moved = crate::highlight::UvBox { u: 0.22, v: 0.55, w: 0.28, h: 0.04 };
+        reg.declare_interest("p-a", Some("lc-1"), "allyl", moved, 360, now, false).unwrap();
+        assert_eq!(reg.visible_aim("p-a", now), Some(moved));
+    }
+
+    #[test]
+    fn concealing_the_aim_phrase_clears_it() {
+        let (mut reg, now, allyl) = tour_presence();
+        reg.declare_interest("p-a", Some("lc-1"), "allyl", allyl, 360, now, true).unwrap();
+        let other = crate::highlight::UvBox { u: 0.5, v: 0.6, w: 0.2, h: 0.04 };
+        reg.declare_interest("p-a", Some("lc-2"), "inductive", other, 360, now, false).unwrap();
+        reg.retire_interest("lc-2");
+        assert_eq!(reg.visible_aim("p-a", now), Some(allyl));
+        reg.retire_interest("lc-1");
+        assert_eq!(reg.visible_aim("p-a", now), None);
+        assert!(reg.visible_interests(now).iter().all(|(id, _)| id != "lc-1"));
+    }
+
+    #[test]
+    fn a_declare_without_a_phrase_id_is_the_aim() {
+        let (mut reg, now, allyl) = tour_presence();
+        reg.declare_interest("p-a", Some("lc-1"), "allyl", allyl, 360, now, true).unwrap();
+        let taught = crate::highlight::UvBox { u: 0.4, v: 0.5, w: 0.2, h: 0.1 };
+        reg.declare_interest("p-a", None, "banner", taught, 360, now, false).unwrap();
+        assert_eq!(reg.visible_aim("p-a", now), Some(taught));
+        let keys: Vec<String> = reg.visible_interests(now).into_iter().map(|(id, _)| id).collect();
+        assert!(keys.contains(&"p-a".into()), "{keys:?}");
+        assert!(keys.contains(&"lc-1".into()), "{keys:?}");
+    }
+
+    #[test]
+    fn a_faded_aim_is_not_returned() {
+        let (mut reg, now, allyl) = tour_presence();
+        reg.declare_interest("p-a", Some("lc-1"), "allyl", allyl, 1, now, true).unwrap();
+        assert_eq!(reg.visible_aim("p-a", now), Some(allyl));
+        let later = now + std::time::Duration::from_secs(2);
+        assert_eq!(reg.visible_aim("p-a", later), None);
+        assert_eq!(reg.interest("lc-1").map(|box_| box_.u), Some(allyl.u));
     }
 }

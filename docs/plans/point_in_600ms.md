@@ -1,6 +1,6 @@
 # Point arrives in 600 milliseconds
 
-Status: landed 18 November 2026. `AIM_OMEGA` is 6.5. A quarter turn from rest has under a tenth left after 600 milliseconds. The test is `a_quarter_turn_arrives_in_600_milliseconds`. `SWEEP_SETTLE_S` stays 5. The wave period stays 15 seconds. `tour_box_for_the_aim.md` hands the aim a box and leaves this frequency. The 1600 ms spring is deferred.
+Status: landed 18 November 2026. `AIM_OMEGA` is 6.5. A quarter turn from rest has under a tenth left after 600 milliseconds. The test is `a_quarter_turn_arrives_in_600_milliseconds`. `SWEEP_SETTLE_S` stays 5. The wave period stays 15 seconds. `tour_box_for_the_aim.md` landed the box and left this frequency. The 1600 ms spring is deferred.
 
 18 November 2026. On the inductive sentence the bar and the avatar sat level, and the arms still took a few seconds to leave the lap, and then only a little. The lag to the commanded angle is the aim spring. Bring that arrival under a second, about 600 milliseconds.
 

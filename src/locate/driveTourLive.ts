@@ -60,11 +60,12 @@ function liveIo(client: DaemonClient, presenceId: string | undefined, stopping: 
   let viewerKind: ViewerKind | null = null;
   let viewerAddress: string | null = null;
   let ended = false;
+  let aimPhrase: string | null = null;
 
-  async function paint(phraseId: string, box: Uv, description: string): Promise<void> {
+  async function paint(phraseId: string, box: Uv, description: string, aim = false): Promise<void> {
     if (!presenceId) return;
     boxes.set(phraseId, box);
-    await client.call("highlightRegion", {
+    const fields: Record<string, unknown> = {
       presenceId,
       phraseId,
       description: description.slice(0, 180),
@@ -74,13 +75,17 @@ function liveIo(client: DaemonClient, presenceId: string | undefined, stopping: 
       h: box.h,
       durationSeconds: 360,
       untilConceal: true,
-    });
+    };
+    if (aim) fields.aim = true;
+    await client.call("highlightRegion", fields);
+    if (aim) aimPhrase = phraseId;
   }
 
   async function drop(phraseId: string): Promise<void> {
     boxes.delete(phraseId);
     measuredPrior.delete(phraseId);
     holding = holding.filter((id) => id !== phraseId);
+    if (aimPhrase === phraseId) aimPhrase = null;
     if (!presenceId) return;
     await client.call("concealHighlight", { presenceId, phraseId });
   }
@@ -100,6 +105,7 @@ function liveIo(client: DaemonClient, presenceId: string | undefined, stopping: 
     measuredPrior.clear();
     holding = [];
     paintedTop = null;
+    aimPhrase = null;
     for (const id of ids) {
       if (presenceId) await client.call("concealHighlight", { presenceId, phraseId: id });
     }
@@ -376,7 +382,7 @@ function liveIo(client: DaemonClient, presenceId: string | undefined, stopping: 
         }
         holding = next;
       }
-      await paint(item.phraseId, box, item.query ?? "passage");
+      await paint(item.phraseId, box, item.query ?? "passage", true);
       await rememberViewer();
     },
     async conceal() {
