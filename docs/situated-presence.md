@@ -104,8 +104,9 @@ that are neither nearest nor farthest, and the arc is the one that has
 the farthest corner between them. She holds the middle for 5 seconds,
 then a 15 second sine travels out to each end. The short way around the
 clock is taken. An exact half-turn tie passes through the arms-down
-pose. Two critically damped springs (natural frequency 0.8 rad/s, a
-settle of about five seconds) carry the pose clock and the yaw. The yaw
+pose. Two critically damped springs (natural frequency 6.5 rad/s, a
+settle of about 600 milliseconds) carry the pose clock and the yaw. The hold
+in the middle of a highlight stays five seconds. The yaw
 target is the aim of the commanded angle, not of the frame the arms
 happen to be crossing, so a rise from the low pose to overhead does not
 yaw the body out to the side and back.
@@ -179,9 +180,8 @@ What to expect when she is given a mark and then a sentence:
   right is frame 90, her left hand. A mark to the viewer's left uses
   frame 270, her right hand. Straight above is frame 180, both hands,
   and no yaw.
-- She holds the middle of that arc for about five seconds, which is
-  also how long the springs take to settle, and then travels the arc
-  over 15 seconds.
+- She holds the middle of that arc for about five seconds, then travels
+  the arc over 15 seconds. The springs settle in about 600 milliseconds.
 - She turns her nose toward the mark, up to a quarter turn. At rest,
   before that turn, frame 90 already places the raised left hand on the
   viewer's right, and nearer than the other wrist.

@@ -35,8 +35,8 @@ pub const YAW_SCALE: f32 = 1.0;
 pub const YAW_POWER: f32 = 16.0;
 
 /// Natural frequency of the aim spring, in rad/s. Critically damped, so a
-/// side-to-side turn settles in about five seconds.
-pub const AIM_OMEGA: f32 = 0.8;
+/// turn arrives in about 600 milliseconds.
+pub const AIM_OMEGA: f32 = 6.5;
 
 /// Arm joints copied from `Point` onto the breath. Spine stays on `Breathe`.
 pub const ARM_JOINTS: &[&str] = &[
@@ -115,7 +115,7 @@ pub fn aim_yaw(theta: f32) -> f32 {
 }
 
 /// Hold the middle of a highlight arc this long before the wave leaves it.
-/// The aim spring settles in about five seconds, so the hold matches.
+/// The spring arrives in about 600 milliseconds. This hold stays five.
 pub const SWEEP_SETTLE_S: f32 = 5.0;
 
 /// One trip out to a corner and across to the other.
@@ -363,6 +363,18 @@ mod tests {
             prev = spring.theta;
         }
         assert!((spring.theta + pi / 2.0).abs() < 0.08, "settled at {}", spring.theta);
+    }
+
+    #[test]
+    fn a_quarter_turn_arrives_in_600_milliseconds() {
+        let target = std::f32::consts::FRAC_PI_2;
+        let mut spring = AimSpring::default();
+        let dt = 0.001_f32;
+        for _ in 0..600 {
+            spring.step(target, dt);
+        }
+        let err = shortest_delta(spring.theta, target).abs();
+        assert!(err < 0.1 * target, "remaining {err} of {target}");
     }
 
     fn near_angle(a: f32, b: f32) -> bool {
