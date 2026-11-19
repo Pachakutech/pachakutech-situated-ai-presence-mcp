@@ -218,16 +218,20 @@ function sequence(lines: Line[]): Seq[] {
 
 type Hit = { start: number; end: number; cost: number };
 
-/** Match `phrase` as an ordered run. Returns the seq index of the last token. */
+/**
+ * Match `phrase` as an ordered run.
+ * A slip still joins a token. The hit stays when half or more of the
+ * quote's words are that same token. A slip does not count as present.
+ */
 function matchPhrase(seq: Seq[], from: number, phrase: string[]): Hit | null {
   if (!phrase.length || from >= seq.length) return null;
   const first = tokenCost(seq[from].tok, phrase[0]);
   if (first === null) return null;
   let cost = first;
+  let present = first === 0 ? 1 : 0;
   let qi = 1;
   let skipped = 0;
   let end = from;
-  if (phrase.length === 1) return { start: from, end: from, cost };
   for (let i = from + 1; i < seq.length && qi < phrase.length; i++) {
     const step = tokenCost(seq[i].tok, phrase[qi]);
     if (step !== null) {
@@ -235,11 +239,13 @@ function matchPhrase(seq: Seq[], from: number, phrase: string[]): Hit | null {
       skipped = 0;
       end = i;
       cost += step;
+      if (step === 0) present++;
     } else if (++skipped > (qi === 1 ? OPENING_SKIP : PHRASE_SKIP)) {
       return null;
     }
   }
-  return qi === phrase.length ? { start: from, end, cost } : null;
+  if (qi !== phrase.length || present * 2 < phrase.length) return null;
+  return { start: from, end, cost };
 }
 
 function allPhrases(seq: Seq[], phrase: string[]): Hit[] {

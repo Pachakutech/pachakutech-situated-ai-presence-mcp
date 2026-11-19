@@ -160,6 +160,32 @@ test("a later gap of two tokens still matches, and the opening pair does not ski
   assert.equal(findRun(inkRows(["alpha zz beta gamma delta"]), query), null);
 });
 
+test("the allyl quote still matches the line that opens on reactions", () => {
+  const allyl = "All feature three contiguous sp²-hybridized carbon centers and all derive stability from resonance.";
+  const ink =
+    "reactions. Al feature three contiguous sp>-hybridized carbon centers and all derive stability from resonance.";
+  const run = openingOf([ink], allyl);
+  assert.deepEqual({ start: run.start, end: run.end }, { start: 0, end: 0 });
+  assert.equal(run.first, ink);
+});
+
+const eight = "alpha beta gamma delta epsilon zeta eta theta";
+
+test("fewer than half the quote's words present discards the run", () => {
+  assert.equal(findRun(inkRows(["alpha beta gamma deltb epsilno ztta etx theth"]), eight), null);
+});
+
+test("half the quote's words present keeps the run", () => {
+  const run = openingOf(["alpha beta gamma delta epsilno ztta etx theth"], eight);
+  assert.deepEqual({ start: run.start, end: run.end }, { start: 0, end: 0 });
+});
+
+test("the quote on its own line still matches", () => {
+  const run = openingOf([eight], eight);
+  assert.deepEqual({ start: run.start, end: run.end }, { start: 0, end: 0 });
+  assert.equal(run.first, eight);
+});
+
 test("doubtna leaks and the matched crop does not", () => {
   assert.equal(leaksLine("I doubtna, whiles, but thou may thieve", "I doubtna, whiles, but thou may thieve"), true);
   const { lines, run } = stanza();
