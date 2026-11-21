@@ -98,6 +98,7 @@ The design sentence in `local_multimodal_reflex.md` stands. Accept a phrase id t
 - `docs/plans/local_multimodal_reflex.md` section 5
 - `docs/plans/complete/B1_sidecar.md`
 - `docs/plans/B1c_compile.md`
+- `docs/plans/offline_tour_avatar.md`
 - `docs/plans/B1b_retrieval.md`
 - `docs/plans/index_and_loci.md`
 - `docs/plans/research_tours.md` sections 1, 4, and 4a

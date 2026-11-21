@@ -1,5 +1,7 @@
 # B1b — the empty shortlist
 
+Status: landed 21 November 2026. `presence sidecar` with `op` `retrieve` reads passages the caller already holds. A passage whose shared-word score with the assertion is zero goes to the local model. The words of a proposal are that passage slice. The daemon score is unchanged. No embedding, no discourse tree, and no joint score. One completion at a time, with a 120 second timeout. An unset endpoint returns an empty list. The proposals stay in the process. The live daemon was not restarted.
+
 Written 8 November 2026. Working memory of a name that had no file. This note records the hole. It picks no method, and it schedules nothing.
 
 ## The hole

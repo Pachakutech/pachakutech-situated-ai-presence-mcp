@@ -61,7 +61,7 @@ A directed job keeps the stance the model gave. A non-directed job stores `unkno
 
 A key on that object named `skip`, `accept`, `deny`, `keep`, `note`, `addNote`, `highlightRegion`, or `avatarSpeak` drops every span from that completion.
 
-The reply holds at most 12 proposals per source, the same cap as one tour task. Once a source has 12, its later passages are not sent to the model. Across a project the reply is every source's list, in source order, then passage order.
+The reply holds every span the walk keeps, in source order, then passage order. A project stores up to 5000 loci. Twelve is the number of items one tour task holds, and the tour seeds the next twelve when that task finishes. This job does not stop a source at twelve, and it does not leave the later passages unread.
 
 ```json
 {
@@ -96,7 +96,7 @@ Nothing here writes a locus, a hand, or a draft task. Nothing calls `selectLoci`
 2. `readPassages` returns the file order from `since`, at most 20, with `next` when more remain. A `queryDocMap` of the same key still returns at most 20 by score.
 3. A model span whose slice is the passage text becomes one proposal. A span whose words are not that slice is absent. Empty narration is absent.
 4. A directed completion may propose `supports`. A non-directed completion of the same span comes back `unknown`, and the user message contains no assertion.
-5. The thirteenth accepted span of one source is absent, and that source's later passages start no completion.
+5. A source that accepts thirteen spans returns thirteen proposals, and the passage after the twelfth is still sent to the model.
 6. A completion that includes `accept` contributes no proposal. A compile line that includes `selectLoci` answers `schema` and starts no completion.
 7. An unset endpoint binds nothing. A refused completion answers `model_down` and the proposals of earlier passages are absent from that reply.
 8. Two passages in one job produce one completion, then the next. The 120-second budget is the per-passage wait.

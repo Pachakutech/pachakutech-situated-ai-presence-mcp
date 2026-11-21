@@ -106,6 +106,7 @@ function usage(): never {
       "  sidecar [json]",
       "                       One local-model job from the argument or from stdin, then exit.",
       "                       judge prints a judgement. draft and map print one reply per line.",
+      "                       retrieve prints slices for passages the word score missed.",
       "  stop <id>            Stop that presence's speech; face returns to neutral",
       "  retire <id>          End the presence, hide its avatar, free its slot",
       "                       The doubled form still works: presence presence speak <id> <text>",

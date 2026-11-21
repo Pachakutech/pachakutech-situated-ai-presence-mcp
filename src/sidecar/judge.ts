@@ -53,16 +53,20 @@ export async function judge(query: string, span: string, io: CompleteIo = {}): P
 
 /** The caller holds the one completion slot. Throws when the call fails. */
 export async function completeUser(userText: string, io: CompleteIo = {}): Promise<string> {
+  return completePrompt(SYSTEM_PROMPT, userText, io, AbortSignal.timeout(3000));
+}
+
+/** One completion with the caller's prompt and signal. Throws when the call fails. */
+export async function completePrompt(system: string, userText: string, io: CompleteIo, signal: AbortSignal): Promise<string> {
   const config = readSidecarConfig(io.env ?? process.env);
   if (!config.endpoint) throw new Error("endpoint unset");
   const payload: Record<string, unknown> = {
     messages: [
-      { role: "system", content: SYSTEM_PROMPT },
+      { role: "system", content: system },
       { role: "user", content: userText },
     ],
   };
   if (config.model) payload.model = config.model;
-  const signal = AbortSignal.timeout(3000);
   const load = io.fetchCompletion ?? defaultFetch;
   const body = await load(completionsUrl(config.endpoint), payload, signal);
   return contentFrom(body);

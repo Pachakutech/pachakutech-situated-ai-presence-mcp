@@ -5,6 +5,7 @@ import { createConnection } from "node:net";
 import { presenceSocketPath, readSidecarConfig, sidecarSocketPath } from "./config.ts";
 import { completeUser, DEFAULT_JUDGEMENT, judge, releaseCompletion, tryAcquireCompletion } from "./judge.ts";
 import { draftUserText, mapModelObject, parseModelContent, type MapContext, type ProposalLine } from "./map.ts";
+import { retrieveJob } from "./retrieve.ts";
 
 const OBSERVE_GAP_MS = 50;
 
@@ -62,6 +63,7 @@ export async function runSidecar(job: unknown, io: SidecarIo = {}): Promise<numb
   if (rec.op === "judge") return runJudge(rec, io);
   if (rec.op === "draft") return runDraft(rec, io);
   if (rec.op === "map") return sendLines(mapModelObject(rec.model, contextFrom(rec, io)), io);
+  if (rec.op === "retrieve") return runRetrieve(rec, io);
   log("sidecar: job unread");
   return 1;
 }
@@ -75,6 +77,13 @@ async function runJudge(job: Record<string, unknown>, io: SidecarIo): Promise<nu
   const judgement = await judge(job.query, job.span, io);
   stdout(JSON.stringify(judgement));
   return 0;
+}
+
+async function runRetrieve(job: Record<string, unknown>, io: SidecarIo): Promise<number> {
+  const stdout = io.stdout ?? ((line: string) => console.log(line));
+  const result = await retrieveJob(job, io);
+  if (result.proposals) stdout(JSON.stringify({ proposals: result.proposals }));
+  return result.exitCode;
 }
 
 async function runDraft(job: Record<string, unknown>, io: SidecarIo): Promise<number> {
