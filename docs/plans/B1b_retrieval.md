@@ -6,7 +6,9 @@ Written 8 November 2026. Working memory of a name that had no file. This note re
 
 B1 judges a span the caller already holds. `queryDocMap` and `selectLoci` propose a span when it shares word types with the question. A frontier account is often a paraphrase of the page. The score is then zero. Research mode stores no locus for that source. The passage a reader would still count never reaches the judge, and never reaches the tour.
 
-That empty shortlist is B1b. The failover would be whatever proposes a span once the shared-word count has proposed none. The computation is still open.
+That empty shortlist is B1b. The failover would be whatever proposes a span once the shared-word count has proposed none. The computation inside `selectLoci` is still open.
+
+The pass that can propose the span the score missed is the compilation in `sidecar_representation.md`. An assertion is the claim. The loci are the graph: a checked span, a proposed stance, and a short narration. A frontier model runs that pass when the cloud answers. The local model runs the same pass only when the cloud does not, or later if that model is optimized for it. The pass stays outside `selectLoci`. This note still picks no embedding, no discourse tree, no joint score, and no model call inside the score.
 
 ## Already shipped, and not this note
 
@@ -18,15 +20,15 @@ Section 4a of `research_tours.md` is a second full-text pass, looking for wordin
 
 ## Where the name sat
 
-On 1 November, the fetch-status fix and the background mapper both left "retrieval failover" as a separate brief. On 2 November, `sidecar_representation.md` said what the failover is for: the paraphrase that shares no tokens, missed by both `queryDocMap` and `selectLoci`. That file does not specify the computation, and it still does not. On 3 November the cleanup list called it an unwritten retrieval brief, and `hand_and_phrase.md` named this file and left it out of that ticket.
+On 1 November, the fetch-status fix and the background mapper both left "retrieval failover" as a separate brief. On 2 November, `sidecar_representation.md` said what the failover is for: the paraphrase that shares no tokens, missed by both `queryDocMap` and `selectLoci`. On 3 November the cleanup list called it an unwritten retrieval brief, and `hand_and_phrase.md` named this file and left it out of that ticket. On 20 November that exploration named the compiler: a frontier model when the cloud answers, the local model only when it does not. The score inside `selectLoci` is still unspecified, and this file still picks no method for it.
 
 ## Stays as it is
 
-The three hands. The phrase-id sentence in `local_multimodal_reflex.md`. C11b is `scroll_highlight.md`, and the driver does not implement it. C12 and C13 stay in their order. The words of a locus still come from the adapter. A label still cannot introduce a span the overlap missed, until a ticket after this note says otherwise.
+The three hands are skip, accept, and deny. Accept does not add a keep. The phrase-id sentence in `local_multimodal_reflex.md`. C11b is `scroll_highlight.md`, and the driver does not implement it. C12 remains the export writer. C13 has landed. The words of a locus still come from the adapter. Inside `selectLoci`, a stance label still cannot introduce a span the overlap missed. The compilation proposes those spans beside that function, and the daemon checks the words before they are stored.
 
 ## Read with this
 
-- `docs/plans/sidecar_representation.md`, the frontier account
+- `docs/plans/sidecar_representation.md`, the assertion and which model compiles the loci
 - `docs/plans/index_and_loci.md`, the landed scorer
 - `docs/plans/B1_sidecar.md`, the judge on a span already in hand
 - `docs/plans/research_tours.md`, section 4 and section 4a

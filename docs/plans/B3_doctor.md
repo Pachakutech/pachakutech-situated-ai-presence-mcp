@@ -17,6 +17,8 @@ Read first:
 
 `presence doctor` also says whether the model endpoint and `sidecar.sock` are there, and it prints the placement rule for this machine class. The overlay is not part of the command. A missing model prints a warn and the process exits 0.
 
+Revisited 20 November 2026. The report is the local endpoint and `sidecar.sock`. The compilation of documents into loci prefers a frontier model when the cloud answers (`sidecar_representation.md`). This command does not probe that cloud, and it does not start either model. When that compilation falls back to this machine, the placement below still holds: one 4-bit completion at a time, on the CPU, off the overlay thread.
+
 ## What already stands
 
 Do not replace these checks. Append the model report after them.
@@ -33,7 +35,7 @@ Do not replace these checks. Append the model report after them.
 | B1 | The completion, the mapper, the 3 s job timeout. This ticket exports the config that client will import. |
 | B2 | Cutting a crop. This ticket names the ceiling the cut will read. |
 | B4 | An in-daemon actor, a fine-tune, a GPU layer inside the daemon. |
-| `sidecar_representation.md` | The collection walk that would call the endpoint this ticket reports. This ticket stays the report. |
+| `sidecar_representation.md` | The compilation of mapped documents into loci. Frontier when the cloud answers. This ticket stays the report of the local endpoint the fallback would use. |
 | `voice_command.md` | Opening a microphone, or letting a transcript approve. |
 | The operator | Starting `llama-server` or Ollama. This command does not spawn either. |
 | K2's number | A live frame-time measurement. The procedure is below. The suite does not fail on an unmeasured budget. |

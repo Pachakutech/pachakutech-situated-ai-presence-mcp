@@ -19,7 +19,9 @@ Read first:
 
 ## Goal
 
-When a phrase is live on a task, the daemon can cut one crop of that phrase from the latest screen-text frame and return the words inside the rectangle, plus a short-lived pixel file. The sidecar may send those words to the model it already calls. Pixels are attached only when vision is explicitly on. A crop writes no ledger event, no keep, and no shader input.
+When a phrase is live on a task, the daemon can cut one crop of that phrase from the latest screen-text frame and return the words inside the rectangle, plus a short-lived pixel file. The sidecar may send those words to the model it already calls. Pixels are attached only when vision is explicitly on. A crop writes no ledger event, no hand, and no shader input. The hands are skip, accept, and deny, and T0 writes them.
+
+Revisited 20 November 2026. The crop feeds the local judge on a span already in hand. The compilation of documents into loci reads mapped passage files, and a frontier model runs that pass when the cloud answers (`sidecar_representation.md`). This ticket does not cut a crop for that pass.
 
 With the screen-text worker down, or the latest reading older than `MAX_AGE` (8 s), the call returns `fresh: false` and writes no file. The tour, the ledger, and B1's default judgement still work.
 
@@ -46,7 +48,7 @@ Do not rebuild any of this.
 | C6 | A doc-map read. This ticket does not open the doc-map directory. An excerpt is copied only when the caller already passed one. |
 | C10 | `selectLoci`. A crop does not choose a locus and does not drop a span. |
 | C11 | Opening a source, `ViewerMove`. |
-| `sidecar_representation.md` | A search of mapped documents for citations that bear on a frontier account. A crop of the glass is a different feed. |
+| `sidecar_representation.md` | The compilation of mapped documents into loci. A frontier model when the cloud answers. A crop of the glass is a different feed, and it stays on the local judge. |
 | The shaders | No uniform, no sampled crop in `avatar_expand.comp` or the projection shader. |
 | The live daemon | Not restarted. The viseme failure `GLB lacks viseme_aa` stays. |
 

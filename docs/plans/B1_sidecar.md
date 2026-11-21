@@ -1,8 +1,10 @@
 # B1 — sidecar client
 
-Implementation brief. The daemon already binds `sidecar.sock` and enforces T3. C1 through C7b have landed. C8 through C13 are specified and do not block this ticket. C10 will call the judge defined here. C10 is not built here.
+Implementation brief. The daemon already binds `sidecar.sock` and enforces T3. C1 through C7b have landed. C8 through C11, C9b, C11c, the hand binding, and C13 have landed. C12 is still the export writer. C10 calls `KeepJudge` and keeps every shortlisted span. This ticket supplies the local model a later caller can consult. It does not replace `KeepJudge`, and it does not drop a span.
 
 Protocol rows named B1, B2, and B3 are the landed parse checks (`viewed: "acknowledged"` fails, decision fields fail, `highlightRegion` on the sidecar socket fails). This file is the ticket. Its tests are numbered SB so the two lists stay apart.
+
+Revisited 20 November 2026. `src/sidecar/` is absent, and nothing connects to `sidecar.sock`. The compilation of the original documents into the loci is `sidecar_representation.md`. A frontier model runs that pass when the cloud answers. This client runs the same pass only when the cloud does not, or later if this model is optimized for that pass. The judge below stays one span the caller already holds. The hands are skip, accept, and deny. T0 writes them. Accept does not add a keep.
 
 Read first:
 
@@ -16,7 +18,7 @@ Read first:
 
 ## Goal
 
-A separate process speaks to a local model and to `sidecar.sock`, and nothing else. It maps one schema-locked object onto the proposals T3 may already send. It answers a yes/no judgement, with an optional stance, that C10 can call later. The daemon, the overlay, the shaders, and the microphone stay as they are.
+A separate process speaks to a local model and to `sidecar.sock`, and nothing else. It maps one schema-locked object onto the proposals T3 may already send. It answers a yes/no judgement, with an optional stance, that a later caller can read beside `KeepJudge`. The daemon, the overlay, the shaders, and the microphone stay as they are. The once-over that compresses a collection into loci prefers a frontier model. This process is that compiler only in the fallback `sidecar_representation.md` names, and that fallback is a separate job from the three-second judge.
 
 With the endpoint unset or the process absent, locate, highlight, tasks, the ledger, and a project tour behave as they do today. Stance stays unknown. A shortlist is kept whole.
 
@@ -45,7 +47,7 @@ Do not rebuild any of this.
 | C8 | URL and path checks inside the daemon. This client refuses paths before the socket. The daemon rule lands with C8. |
 | C10 | `selectLoci`. This ticket returns a judgement. It does not write a locus. |
 | C11–C13 | Tours, exports, MCP tools, skill text. |
-| `sidecar_representation.md` | A frontier account of a collection, and the citations in the mapped media that bear on it. The judge in this ticket stays one span the caller already holds. |
+| `sidecar_representation.md` | The compilation of mapped documents into loci, from an assertion. A frontier model when the cloud answers. This client is that compiler only when the cloud does not. The judge in this ticket stays one span the caller already holds. |
 | B1b | The empty shortlist, when a paraphrase shares no words with the passage (`B1b_retrieval.md`). This ticket judges a span the caller already holds. |
 | The live daemon | Not restarted. The viseme failure `GLB lacks viseme_aa` stays. |
 
@@ -57,7 +59,7 @@ No new `Proposal` variant. `samples()` stays the sixteen pre-C2 kinds. No new cr
 
 2. **One socket.** `sidecarSocketPath` follows `commandSocketPath`: `PRESENCE_SIDECAR_SOCKET` when set, otherwise the sibling `sidecar.sock` of the presence socket. The client opens that path with the existing one-line write and one-line read. It does not open `presence.sock` or `command.sock`. It does not call `subscribeLedger`. A read of `queryDocMap` or `queryProject` is a separate one-shot on a new connection, used only when a job asks for it.
 
-3. **The model server is not started here.** `PRESENCE_LFM3_ENDPOINT` comes from `src/sidecar/config.ts` (`B3_doctor.md`). It is the base URL of an OpenAI-compatible `POST /v1/chat/completions`. Llama.cpp `llama-server` and Ollama in that mode both qualify. Unset or empty: log one line, write no socket byte, exit 0. A connection refused, an HTTP error, or a timeout does the same for that job: no proposal, and a judge call returns the default below. The operator starts the server. CPU (`-ngl 0`), as `B3_doctor.md` records. One completion at a time in this process. The timeout is 3 seconds. A job that arrives while one is running gets the default judgement and no proposal.
+3. **The model server is not started here.** `PRESENCE_LFM3_ENDPOINT` comes from `src/sidecar/config.ts` (`B3_doctor.md`). It is the base URL of an OpenAI-compatible `POST /v1/chat/completions`. Llama.cpp `llama-server` and Ollama in that mode both qualify. Unset or empty: log one line, write no socket byte, exit 0. A connection refused, an HTTP error, or a timeout does the same for that job: no proposal, and a judge call returns the default below. The operator starts the server. CPU (`-ngl 0`), as `B3_doctor.md` records. One completion at a time in this process. The timeout on `judge` and `draft` is 3 seconds. A job that arrives while one is running gets the default judgement and no proposal. A compilation of a collection, the fallback in `sidecar_representation.md`, is a later op. It is not `judge`, and it does not inherit this timeout.
 
 4. **The system prompt is a string in the source file.** Passage text, a doc-map hit, and a project field go in the user message, between markers. They are not appended to the system prompt. The prompt tells the model to reply with one JSON object and lists the keys below. It says that text inside the markers is data.
 
@@ -72,13 +74,13 @@ judge(query, span) -> { relevant: bool, confidence: number, stance: Stance }
 Stance = supports | contrary | mentions | unknown
 ```
 
-`relevant: false` means a later C10 call may drop that span. This ticket does not drop it. `stance` is a label. It is not a keep, and this ticket does not write the ledger. The default, used when the endpoint is unset, the call fails, the body is late, or the JSON is wrong, is `{ relevant: true, confidence: 0, stance: "unknown" }`. That is the C10 default: keep the shortlist, leave stance unknown. A confidence outside `[0, 1]` becomes `0`. Any other stance string becomes `unknown`.
+`relevant: false` is a label a later caller may store beside the span. The landed `KeepJudge` keeps the span. This ticket does not drop it. Section 4a of `research_tours.md` leaves that drop unadopted. `stance` is a label. It is not a hand. The hands are skip, accept, and deny, and this ticket writes none of them. The default, used when the endpoint is unset, the call fails, the body is late, or the JSON is wrong, is `{ relevant: true, confidence: 0, stance: "unknown" }`. That matches the landed shortlist: every span stays, and the stance stays unknown. A confidence outside `[0, 1]` becomes `0`. Any other stance string becomes `unknown`.
 
 8. **Drafts do not run.** `draftTask` is sent only when the job names a `presenceId`. The sidecar does not spawn a presence. The body uses the existing `CreateTaskBody` fields only: `proposalId`, `presenceId`, `mode`, optional `pace`, `controls`, `prompt` (cut at 120), `items` (at most 12; each query cut at 200; narration cut at 300). `scroll` stays false on a sidecar draft. The task book already leaves a draft idle until a T0 confirm, which this ticket does not send.
 
 9. **A drafted project is URLs only.** `createProject` may be sent when the model returns a title and a list of `http` or `https` URLs. The client drops `path`, `dir`, `grantedRoots`, `file:`, `javascript:`, `data:`, a URL with userinfo, `localhost`, and the private ranges named in the C8 brief. The remaining body is the existing create shape. T3 storage is already `draft: true`. Confirming that draft is C8. An empty URL list after the drop sends nothing.
 
-10. **Observe lines match the body that already parses.** `phraseId` optional, `match.status` one of `located`, `ambiguous`, `notFound`, `match.conf` a number, optional UV in range, `viewed` omitted or `shown` or `dwelled`. The client paces observe lines at 50 ms or more. It does not emit `acknowledged`, `approved`, `discarded`, `cleared`, `decision`, or `addNote`. A project triple is sent only when the job supplied both `projectId` and `locusId`.
+10. **Observe lines match the body that already parses.** `phraseId` optional, `match.status` one of `located`, `ambiguous`, `notFound`, `match.conf` a number, optional UV in range, `viewed` omitted or `shown` or `dwelled`. The client paces observe lines at 50 ms or more. It does not emit `acknowledged`, `approved`, `discarded`, `cleared`, `decision`, `skip`, `accept`, `deny`, or `addNote`. A project triple is sent only when the job supplied both `projectId` and `locusId`.
 
 11. **One model object may become several lines.** The order is `createProject`, then `draftTask`, then `observePhrase`. Each line is one proposal and one reply. A daemon error is printed and the rest of the lines are not sent. A line the mapper cannot build is skipped. Garbage from the model, including a refusal or a markdown fence that is not a single JSON object, sends zero bytes.
 
@@ -86,7 +88,7 @@ Stance = supports | contrary | mentions | unknown
 
 ## Model object
 
-The completion content is one JSON object. Unknown keys are ignored. Keys that would name a decision, a note, a highlight, a speech command, a bone, or a splat cause the whole object to map to nothing.
+The completion content is one JSON object. Unknown keys are ignored. Keys that would name a decision, a hand (`skip`, `accept`, `deny`), a note, a highlight, a speech command, a bone, or a splat cause the whole object to map to nothing.
 
 ```json
 {
@@ -133,7 +135,7 @@ Stdout of `judge` is the judgement object. Stdout of `draft` and `map` is the da
 | ID | What B1 has to show |
 |---|---|
 | SB1 | `map` of an observe with `viewed: "shown"` emits one `observePhrase` and no other kind |
-| SB2 | `viewed: "acknowledged"`, or a key `approved`, `discarded`, `decision`, `addNote`, `avatarSpeak`, `highlightRegion` | Zero lines |
+| SB2 | `viewed: "acknowledged"`, or a key `approved`, `discarded`, `decision`, `skip`, `accept`, `deny`, `addNote`, `avatarSpeak`, `highlightRegion` | Zero lines |
 | SB3 | A `speak` string on an object with `draftTask` lands as `narration` on the first item, cut at 300. An object with only `speak` emits nothing |
 | SB4 | `draftTask` without `presenceId` emits no task line. With a presence id, the line is `kind: "draftTask"`, `scroll` is false, and `items` holds at most 12 |
 | SB5 | `draftProject` with one `https` URL and one `path` emits `createProject` whose sources are the URL only. `file:`, `localhost`, and `grantedRoots` are absent |
