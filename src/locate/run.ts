@@ -580,6 +580,11 @@ async function readEvincePage(path: string): Promise<number | null> {
   return model + 1;
 }
 
+/** The PDF page Evince has open, counting from 1. Null when the file has no page yet. */
+export async function readViewerPage(path: string): Promise<number | null> {
+  return readEvincePage(path);
+}
+
 async function fitWidth(bus: string): Promise<void> {
   await run(
     "busctl",

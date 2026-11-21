@@ -1,170 +1,153 @@
 # Desktop Browser Plugin + Presence Runtime Bridge
 
-Status: exploratory plan  
-Date: 13 November 2026  
-Related: `research_tours.md`, project store / ledger (`queryProject`, register, `pseq`), Native Messaging
+Status: ticketed. The implementation briefs are `BR1_BR4_browser_bridge.md`.  
+Date: 13 November 2026. Revisited 20 November 2026.  
+Related: `research_tours.md`, `queryProject` (`register`, `pseq`), Native Messaging, `tour_confirm.md`
+
+The hands are skip, accept, and deny. T0 writes them. Accept does not add a keep. The cursor the page receives is the register. `queryProject` still returns a `keeps` field from older rows, and the host leaves that field off the cursor.
 
 ## 1. Goal
 
 Enable a lightweight browser extension to:
 
-1. Capture an **assertion** (selected text or detected claim) and a set of **cited URLs** from the current page.
-2. Hand them off to the full Presence / Research runtime (the existing desktop daemon that already contains the blackboard, tour driver, sidecar, project store, and ledger).
-3. Let the user run a normal research or citation tour (plan approval, locate / highlight / speak, keep / skip / deny, notes).
-4. Stream the live **user-choice cursor** (keeps, decisions, notes, register, `pseq`) back into the originating page so that an LLM running in that tab (e.g. Grok on x.com) can observe the user’s decisions in near real time.
+1. Let the user grab **tabs** and send those URLs to the runtime.
+2. Ask for an **assertion phrase** along the way, and send when the field is left empty.
+3. Have the sidecar compile the mapped tabs: a **directed** knowledge base when the phrase is present, a **non-directed** knowledge base when it is empty.
+4. Stream the live **user-choice cursor** (the register, notes, `pseq`) back into the originating page so that an LLM running in that tab can observe the user's decisions once a tour is walking those loci.
 
 This closes the information loop:
 
 ```
-Page (LLM response + citations)
-→ Extension (capture)
+Tabs the user checked, and an optional phrase
+→ Extension
 → Native Messaging
-→ Presence Runtime (tour + T0 decisions)
-← Native Messaging (ledger / register deltas)
-← Extension injects into page
-← LLM in the tab can now see the user’s choices
+→ Bridge host (stores the tabs, and the phrase when there is one)
+→ Sidecar, the local model (directed when a phrase was sent, non-directed when it was empty)
+   A frontier model already in the conversation may work the same project at the same time
+→ Presence runtime (tour + T0 decisions, once the loci are stored)
+← Native Messaging (register / notes / pseq)
+← Extension injects into the originating page
+← LLM in the tab can now see the user's choices
 ```
 
-The runtime remains the single source of truth. The page only receives a compact, read-only window onto the same cursor already exposed to other clients via `queryProject` / `listPhraseFlags`.
+The runtime remains the single source of truth. The page receives a compact, read-only window onto the register `queryProject` already returns.
+
+A phrase is one ask, cut at 500 characters. An empty phrase stores no ask. Either way the capture asks the sidecar, the bundled local model, to compile, as `sidecar_representation.md` describes. A frontier model may work the same tabs at the same time, on its own seat. When the cloud does not answer, the sidecar still compiles. `selectLoci` stays the token score for other callers. This capture does not call it. The bridge host, the sidecar, and the frontier client stay separate processes.
 
 ## 2. Why Native Messaging
 
-Native Messaging is the standard, bidirectional, privileged channel between a browser extension and a local native application on desktop Chromium browsers (Chrome, Edge, Brave, etc.) and Firefox.
+Native Messaging is the standard, bidirectional, privileged channel between a browser extension and a local native application on desktop Chromium browsers (Chrome, Edge, Brave) and Firefox.
 
-- Extension requests the `nativeMessaging` permission.
-- A small native host (or the daemon itself) is registered via a host manifest.
+- The extension requests the `nativeMessaging` permission.
+- A small native host is registered via a host manifest.
 - Communication is length-prefixed JSON over stdin/stdout.
-- Supports both one-shot `sendNativeMessage` and persistent `connectNative` ports.
-- User must install both the extension and the native host; the channel is therefore explicit and user-mediated.
+- The host is a Node process, `presence bridge`. The daemon does not read that stream.
+- The user installs both the extension and the native host. The channel is explicit and user-mediated.
 
-Custom protocol handlers (`researcher://…`) remain useful for simple one-way launch, but Native Messaging is the right tool for the live two-way cursor feed.
+The extension runs in the user's browser. The tour's locate Chromium, on port 9222, is the viewer the Node driver launches after `confirmTour`. They are different processes.
 
 ## 3. Components
 
 ### 3.1 Browser Extension (thin)
 
 Responsibilities:
-- Toolbar button and/or context-menu item on selected text (“Research this assertion”).
-- Optional “Send page citations” action.
-- Extract assertion + URLs (see §4).
+
+- Toolbar button and a context-menu item ("Send tabs").
+- List the open tabs, let the user check the ones to send, and ask for an assertion phrase without requiring one.
+- Send only after the user confirms. An empty phrase is a valid send.
 - Maintain a Native Messaging port to the host.
-- On receiving ledger/register updates, inject them into the page via content-script messaging, `window.postMessage`, or a known DOM/JSON channel.
+- On a cursor frame, deliver it to the tab that sent the capture.
 - Never contains the blackboard, OCR, tour logic, or project store.
 
 ### 3.2 Native Messaging Host
 
-A small bridge process (or an endpoint already inside the presence daemon) that:
-- Speaks the Native Messaging wire protocol.
-- Forwards capture messages into the runtime (create/select project, `showCitations` / research-ask flow, etc.).
-- Subscribes to project/ledger changes (`pseq`, register, keeps, decisions, notes).
-- Pushes compact deltas back to the extension.
+`presence bridge`, specified in BR1 and BR2:
 
-### 3.3 Presence / Research Runtime (existing)
+- Speaks the Native Messaging wire protocol on stdin and stdout.
+- Stores the checked tab URLs with `createProject` on `presence.sock`. A phrase is the one ask. An empty phrase sends no ask.
+- After the map, writes one compilation job to the sidecar (`sidecar-jobs.sock`). A phrase sets `directed`. An empty phrase sets the non-directed job.
+- Polls `queryProject` and pushes the register back to the extension.
+- Leaves `command.sock` and the daemon's `sidecar.sock` closed. It does not call `selectLoci`.
 
-Unchanged in responsibility:
-- Full blackboard, screen-text actor, map worker, tour state machine, sidecar, project store, exports.
-- T0-only keeps / accept / deny.
-- Already exposes the preferences cursor via `queryProject` (register, keeps, decisions, notes, `pseq`).
+### 3.3 Presence runtime (existing)
 
-The new work is only the bridge that makes that cursor available to a browser page in real time.
+Unchanged by these tickets:
 
-## 4. Capture Heuristics (URL list)
+- Tour, map worker, project store, ledger, locate driver.
+- T0 is the only writer of skip, accept, and deny.
+- `confirmTour` is T1. The host cannot press it.
+- `queryProject` already returns the register, notes on the loci, and `pseq`.
 
-Start simple; tighten later.
+## 4. Capture
 
-Possible strategies (in increasing quality):
-- All `a[href]` on the page (noisy).
-- Links inside the same message / turn / response block as the assertion.
-- Links that appear in explicit citation containers (many AI UIs mark them).
-- Selected text + nearest N links + any user-highlighted links.
-- Site-specific extractors (x.com/Grok, ChatGPT, Claude, etc.) as optional improvements.
+The popup lists the open http(s) tabs and an assertion field. The user checks the tabs, may edit the list, and may leave the phrase empty. Send is the second click. A phrase compiles a directed knowledge base. An empty phrase compiles a non-directed one. Both jobs go to the sidecar. BR4's page collector can add links from the current page under the same cap. Site-specific extractors are a hook that ships empty.
 
-The extension should always let the user see and edit the extracted assertion + URL list before sending.
+`modeHint` `research`, and an absent hint, remember `select` / `wait` for the later tour start. `citation` remembers `explain` / `flow`. The hint does not choose the graph. The phrase does.
 
-## 5. Message Shapes (sketch)
+## 5. Message shapes
 
-### Extension → Runtime (capture)
-
-```json
-{
-  "type": "capture",
-  "assertion": "…",
-  "urls": ["https://…", "https://…"],
-  "sourcePage": "https://x.com/…",
-  "title": "…",
-  "timestamp": "2026-11-13T…",
-  "modeHint": "citation" | "research" | null
-}
-```
-
-### Runtime → Extension (cursor delta)
+The frames are specified in the briefs. The capture is the checked tab URLs and an optional phrase. The cursor is:
 
 ```json
 {
   "type": "cursor",
   "projectId": "…",
   "pseq": 42,
-  "register": {
-    "skip": […],
-    "accept": […],
-    "deny": […]
-  },
-  "latest": { "locusId": "…", "decision": "accept", "ts": "…" },
-  "notes": […],
-  "keeps": […]
+  "register": { "skip": [], "accept": [], "deny": [] },
+  "changed": [{ "locusId": "…", "decision": "accept" }],
+  "notes": []
 }
 ```
 
-Only deltas or a compact snapshot should be sent; the full passage text stays in the runtime.
+Passage files stay in the runtime. The register's `words` are the locus text the hand was on.
 
-## 6. Page Integration
+## 6. Page integration
 
-Two levels:
+BR3 does both:
 
-1. **Generic** – extension injects a custom event or `window.postMessage`. Any page (or userscript) can listen.
-2. **Cooperative** – sites that know about the channel can read the cursor directly and feed it into the LLM context on the next turn.
+1. **Generic.** The content script posts a message and dispatches `pachakutech-presence` on the document. Any page can listen.
+2. **Cooperative.** A site that knows the event can read the cursor and feed it into the next LLM turn.
 
-For the motivating example (Grok on x.com): the page would listen for the cursor updates and either display a live summary (“User kept 4, denied 2”) or inject a compact state block into the conversation.
+The extension writes nothing into the page's composer. Delivery is limited to the tab that sent the capture. The action badge reads `on` while that tab is receiving the cursor, with the title `This page is receiving tour choices`.
 
-## 7. Security & Permissions
+## 7. Security and permissions
 
-- User must install both extension and native host.
-- All capture actions are user-initiated (toolbar click or context menu).
-- Native host manifest allow-lists the extension ID / origin.
-- Runtime continues to enforce its existing tier model: only T0 input can write keeps/decisions.
-- Extension never receives write access to the project store; it only receives read-only cursor data.
+- The user installs both the extension and the native host.
+- Capture is a user action, and Send is a second click.
+- The host manifest allow-lists the extension id.
+- The host is T2. It can submit public URLs and read the project. It cannot write a hand, a note, or `confirmTour`.
+- The extension receives the cursor and has no write path to the project store.
 
-## 8. Mobile Note
+## 8. Mobile
 
-The full bidirectional Native Messaging pattern does not exist on iOS/Android in the same form.  
-Mobile would use one-way hand-off (Share Sheet, custom URL scheme, App Links) into the Researcher app. Returning the live cursor into a mobile browser tab is not required for the first version and is out of scope for this desktop plan.
+The bidirectional Native Messaging pattern does not exist on iOS and Android in this form. Mobile would use a one-way hand-off into the Researcher app. Returning the live cursor into a mobile browser tab is out of scope for these tickets.
 
-## 9. Implementation Sketch (phased)
+## 9. Tickets
 
-**Phase A – one-way capture**  
-Extension + native host can send assertion + URLs into the runtime and start a tour. No return channel yet.
+| Ticket | What it builds |
+|---|---|
+| BR1 | The host, the install manifests, the tab popup, the optional phrase, and the sidecar compilation job |
+| BR2 | The register cursor back through the same port |
+| BR3 | Injection into the originating tab, and the badge |
+| BR4 | The citation collector, popup status, and reconnect |
 
-**Phase B – return channel**  
-Runtime pushes `pseq` / register / keeps deltas back through the same Native Messaging port. Extension logs them or shows a simple popup.
+Decisions that the 13 November note left open:
 
-**Phase C – page injection**  
-Content script injects the cursor into the originating page. Cooperative pages (or a userscript) can consume it.
+- The host is `presence bridge`, a Node process the browser launches. It is not an endpoint inside the daemon.
+- URLs are deduped and capped at 40, in document order. They are not ranked.
+- A custom protocol handler is unused.
+- The badge in BR3 is the privacy indicator.
+- BR2 sends at most one cursor per 500 ms, and it holds the latest view while a write is still draining.
 
-**Phase D – polish**  
-Better URL extraction, site-specific helpers, edit-before-send UI, connection status, reconnection logic.
+## 10. Success criteria
 
-## 10. Open Questions
+- The user can check tabs, leave the assertion phrase blank or fill it, and send with a second click. A phrase yields a directed compilation. An empty phrase yields a non-directed one. The sidecar runs both. `presence tour-start` remains the confirm that opens a tour once those loci are stored. The LLM in the originating tab can observe the skip, accept, and deny rows as the hand lands.
+- The runtime stays the source of truth. The page receives the compact cursor.
+- The extension stays thin. Mapping, the tour, speech, and exports stay in the desktop runtime.
 
-- Exact native-host packaging (separate small binary vs. endpoint inside the existing daemon).
-- How aggressively to deduplicate / rank extracted URLs.
-- Whether the extension should also support the older custom-protocol one-way launch for users who do not want Native Messaging.
-- Privacy UX: clear indicator when a page is receiving live cursor data.
-- Rate limiting and back-pressure on the return channel so a busy tour does not flood the extension.
+## Read with
 
-## 11. Success Criteria
-
-- User can select an assertion + citations on a page (e.g. Grok response), send them to the Presence runtime with one or two clicks, run a tour, and have the LLM in that same tab observe the keep/skip/deny decisions without the user manually copying anything.
-- The runtime stays the source of truth; the browser page only receives a compact, read-only cursor.
-- The extension remains thin; all heavy lifting (blackboard, mapping, tour, speech, exports) stays in the existing desktop runtime.
-
----
+- `docs/plans/BR1_BR4_browser_bridge.md`
+- `docs/plans/sidecar_representation.md`
+- `docs/plans/complete/tour_confirm.md`
+- `docs/plans/research_tours.md`

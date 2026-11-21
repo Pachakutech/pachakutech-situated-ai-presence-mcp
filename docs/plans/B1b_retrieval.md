@@ -8,7 +8,7 @@ B1 judges a span the caller already holds. `queryDocMap` and `selectLoci` propos
 
 That empty shortlist is B1b. The failover would be whatever proposes a span once the shared-word count has proposed none. The computation inside `selectLoci` is still open.
 
-The pass that can propose the span the score missed is the compilation in `sidecar_representation.md`. An assertion is the claim. The loci are the graph: a checked span, a proposed stance, and a short narration. A frontier model runs that pass when the cloud answers. The local model runs the same pass only when the cloud does not, or later if that model is optimized for it. The pass stays outside `selectLoci`. This note still picks no embedding, no discourse tree, no joint score, and no model call inside the score.
+The pass that can propose the span the score missed is the compilation in `sidecar_representation.md`. The sidecar is the bundled local model, and it is in that pass. A frontier model may be in the same pass at the same time, on its own seat. A phrase compiles a directed graph: a checked span, a proposed stance, and a short narration of how the span bears on the phrase. An empty phrase compiles a non-directed graph: a checked span, stance unknown, and a narration of the span. The browser capture in `BR1_BR4_browser_bridge.md` asks the sidecar for whichever of those the user sent. When the cloud does not answer, the sidecar still compiles. The pass stays outside `selectLoci`. This note still picks no embedding, no discourse tree, no joint score, and no model call inside the score.
 
 ## Already shipped, and not this note
 
@@ -20,16 +20,17 @@ Section 4a of `research_tours.md` is a second full-text pass, looking for wordin
 
 ## Where the name sat
 
-On 1 November, the fetch-status fix and the background mapper both left "retrieval failover" as a separate brief. On 2 November, `sidecar_representation.md` said what the failover is for: the paraphrase that shares no tokens, missed by both `queryDocMap` and `selectLoci`. On 3 November the cleanup list called it an unwritten retrieval brief, and `hand_and_phrase.md` named this file and left it out of that ticket. On 20 November that exploration named the compiler: a frontier model when the cloud answers, the local model only when it does not. The score inside `selectLoci` is still unspecified, and this file still picks no method for it.
+On 1 November, the fetch-status fix and the background mapper both left "retrieval failover" as a separate brief. On 2 November, `sidecar_representation.md` said what the failover is for: the paraphrase that shares no tokens, missed by both `queryDocMap` and `selectLoci`. On 3 November the cleanup list called it an unwritten retrieval brief, and `hand_and_phrase.md` named this file and left it out of that ticket. On 20 November that exploration named both graphs, directed when the browser capture has a phrase and non-directed when the phrase is empty. On 21 November the seats were split: the sidecar is the bundled local model and is always in the pass, and the frontier model may join at the same time when the cloud answers. The score inside `selectLoci` is still unspecified, and this file still picks no method for it.
 
 ## Stays as it is
 
-The three hands are skip, accept, and deny. Accept does not add a keep. The phrase-id sentence in `local_multimodal_reflex.md`. C11b is `scroll_highlight.md`, and the driver does not implement it. C12 remains the export writer. C13 has landed. The words of a locus still come from the adapter. Inside `selectLoci`, a stance label still cannot introduce a span the overlap missed. The compilation proposes those spans beside that function, and the daemon checks the words before they are stored.
+The three hands are skip, accept, and deny. Accept does not add a keep. The phrase-id sentence in `local_multimodal_reflex.md`. The scroll tour in `scroll_highlight.md` has landed. The cap of three, the word "Understood.", and a hand taking the mark down are withdrawn there. The page of marks is `tour_page_marks.md`. C12 remains the export writer. C13 has landed. The words of a locus still come from the adapter. Inside `selectLoci`, a stance label still cannot introduce a span the overlap missed. The compilation proposes those spans beside that function, and the daemon checks the words before they are stored.
 
 ## Read with this
 
-- `docs/plans/sidecar_representation.md`, the assertion and which model compiles the loci
+- `docs/plans/sidecar_representation.md`, the directed and non-directed graphs, and the two seats
 - `docs/plans/index_and_loci.md`, the landed scorer
-- `docs/plans/B1_sidecar.md`, the judge on a span already in hand
+- `docs/plans/complete/B1_sidecar.md`, the judge on a span already in hand
+- `docs/plans/BR1_BR4_browser_bridge.md`, the tabs and the optional phrase
 - `docs/plans/research_tours.md`, section 4 and section 4a
 - `daemon/src/select.rs`, `token_score`, and research mode storing nothing at a score of zero

@@ -22,7 +22,7 @@
 //! (no `zwp_linux_dmabuf_v1`, no GBM, etc.) never causes a black screen.
 
 use crate::actors::ingress::screen_dmabuf::DmabufScreenSource;
-use crate::highlight::{expand_paint_rect, paint_mark, rects_share_a_pixel, to_pixels, MarkColor, UvBox};
+use crate::highlight::{aim_heat_rects, expand_paint_rect, paint_mark, rects_share_a_pixel, to_pixels, MarkColor, UvBox};
 use crate::task::{TintMark, TintSample};
 use crate::actors::ingress::screen_wlr::WlrScreenSource;
 use crate::actors::ingress::webcam_dmabuf::{self, WebcamMsg, WEBCAM_YIELD_ACK};
@@ -560,13 +560,18 @@ impl Overlay {
 
     /// One Top-layer surface per visible box. An empty list removes them.
     /// The surface is the measured box plus the paint pad. The returned rects
-    /// are the measured pixels, for the heat mask. Width of 0 is none.
+    /// are the aim marks only, in measured pixels, for the heat mask.
+    /// Companion tints stay paint. Width of 0 is none.
     /// `in_rect` ignores a width of 1 or less, so a 1px box is masked as 2.
-    fn sync_marks(&mut self, boxes: &[(String, UvBox)], colors: &[(String, MarkColor)]) -> [[f32; 4]; 3] {
+    fn sync_marks(
+        &mut self,
+        boxes: &[(String, UvBox)],
+        colors: &[(String, MarkColor)],
+        aim_ids: &[String],
+    ) -> [[f32; 4]; 3] {
         let (sw, sh) = (self.state.output_width, self.state.output_height);
         let measured: Vec<(String, i32, i32, i32, i32)> = boxes
             .iter()
-            .take(3)
             .map(|(id, box_)| {
                 let (x, y, w, h) = to_pixels(*box_, sw, sh);
                 (id.clone(), x, y, w, h)
@@ -654,13 +659,7 @@ impl Overlay {
         self.paint_marks();
         self.sweep_marks();
 
-        let mut rects = [[0.0f32; 4]; 3];
-        for (i, (_, x, y, w, h)) in measured.iter().enumerate() {
-            let rw = if *w <= 1 { 2.0 } else { *w as f32 };
-            let rh = if *h <= 1 { 2.0 } else { *h as f32 };
-            rects[i] = [*x as f32, *y as f32, rw, rh];
-        }
-        rects
+        aim_heat_rects(&measured, aim_ids)
     }
 
     /// Move or resize the surface already up. The generation stays, and so does a press.
@@ -3240,11 +3239,12 @@ pub fn run(
             sleeping.load(Ordering::Relaxed),
         );
         let mark_rects = if hide {
-            overlay.sync_marks(&[], &[])
+            overlay.sync_marks(&[], &[], &[])
         } else {
             let boxes = server.visible_interests();
             let colors = server.mark_colors();
-            overlay.sync_marks(&boxes, &colors)
+            let aims = server.visible_aim_ids();
+            overlay.sync_marks(&boxes, &colors, &aims)
         };
         gpu.set_heat_marks(mark_rects);
 

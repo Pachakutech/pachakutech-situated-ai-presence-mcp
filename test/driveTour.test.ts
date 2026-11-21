@@ -413,12 +413,13 @@ test("stopping the driver conceals, and a conceal failure still returns", async 
   });
 });
 
-test("the phrase just answered is concealed before the next find", () => {
+test("a phrase from another page is concealed before the next find", () => {
   const live = readFileSync(join(root, "src/locate/driveTourLive.ts"), "utf8");
   const locate = live.slice(live.indexOf("async locate(item)"), live.indexOf("async highlight(hit"));
   const left = live.slice(live.indexOf("async function concealLeft"), live.indexOf("async function dropAll"));
-  const drop = live.slice(live.indexOf("async function drop("), live.indexOf("async function concealLeft"));
-  assert.ok(locate.indexOf("await concealLeft(item.phraseId)") < locate.indexOf("placeForTour"));
+  const drop = live.slice(live.indexOf("async function drop("), live.indexOf("async function rememberProject"));
+  assert.ok(locate.indexOf("await concealLeft(item)") < locate.indexOf("placeForTour"));
+  assert.equal(left.includes("onPage") || left.includes("candidates"), true);
   assert.equal(left.includes("tour: conceal"), true);
   assert.equal(left.includes("await drop"), true);
   assert.equal(drop.includes("concealHighlight"), true);
@@ -476,14 +477,22 @@ test("the phrase she is on is the aim and a later paint of another bar is not", 
   const live = readFileSync(join(root, "src/locate/driveTourLive.ts"), "utf8");
   const paint = live.slice(live.indexOf("async function paint"), live.indexOf("async function drop"));
   const shift = live.slice(live.indexOf("async function shiftAll"), live.indexOf("async function trackTravel"));
-  const watch = live.slice(live.indexOf("for (const mark of next)"), live.indexOf("holding = next"));
+  const watch = live.slice(live.indexOf("for (const mark of next)"), live.indexOf("async function readGlass"));
   const highlight = live.slice(live.indexOf("async highlight(hit, item)"), live.indexOf("async conceal()"));
+  const companions = highlight.slice(highlight.indexOf("for (const mark of marks)"));
   const drop = live.slice(live.indexOf("async function drop"), live.indexOf("async function concealLeft"));
+  const project = live.slice(live.indexOf("async function readProject"), live.indexOf("function sourceOf"));
   assert.equal(paint.includes("fields.aim = true"), true);
   assert.equal(highlight.includes('paint(item.phraseId, box, item.query ?? "passage", true)'), true);
+  assert.equal(highlight.includes("paint(left, previous, left)"), true);
+  assert.equal(highlight.includes(".slice(0, 3)"), false);
+  assert.equal(highlight.includes(".slice(0, 12)"), false);
+  assert.equal(companions.includes(", true"), false);
   assert.equal(shift.includes(", true"), false);
   assert.equal(watch.includes(", true"), false);
   assert.equal(drop.includes("aimPhrase === phraseId"), true);
+  assert.equal(project.includes("sincePseq"), true);
+  assert.equal(project.includes("limit: PROJECT_PAGE"), true);
 });
 
 test("the live driver conceals on the way out and keeps the 360 second hold", () => {

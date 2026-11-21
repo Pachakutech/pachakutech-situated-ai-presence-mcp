@@ -5,6 +5,8 @@ import {
   followScroll,
   glassDeclareLine,
   glassMarks,
+  lociFromProject,
+  onPage,
   keepHeld,
   linesFromColumns,
   nudgeLine,
@@ -25,7 +27,7 @@ function line(y: number, text: string): Line {
 
 const screen = { w: 1000, h: 1000 };
 
-test("the glass pass keeps the current locus, then a skip, then one decided locus", () => {
+test("two skips and one accept stay, and a quote that is absent does not", () => {
   const lines = [line(200, "alpha one stays"), line(400, "beta two stays"), line(600, "gamma three stays"), line(800, "delta four stays")];
   const loci: GlassLocus[] = [
     { phraseId: "lc-a", opening: "alpha one", hand: "skip", current: true },
@@ -41,9 +43,42 @@ test("the glass pass keeps the current locus, then a skip, then one decided locu
       ["lc-a", "yellow"],
       ["lc-b", "yellow"],
       ["lc-c", "green"],
+      ["lc-d", "red"],
     ],
   );
+  assert.equal(marks.some((mark) => mark.phraseId === "lc-e"), false);
   assert.ok(marks[0].v > 0.1 && marks[0].v < 0.3);
+});
+
+test("onPage keeps the pdf page that is open and every locus of a web source", () => {
+  const loci = [
+    { phraseId: "lc-a", page: 2 },
+    { phraseId: "lc-b", page: 3 },
+    { phraseId: "lc-c", page: null },
+  ];
+  assert.deepEqual(
+    onPage(loci, { kind: "pdf", page: 2 }).map((locus) => locus.phraseId),
+    ["lc-a"],
+  );
+  assert.deepEqual(
+    onPage(loci, { kind: "web" }).map((locus) => locus.phraseId),
+    ["lc-a", "lc-b", "lc-c"],
+  );
+});
+
+test("a locus the register has not entered is skip", () => {
+  const rows = lociFromProject({
+    loci: [
+      { locusId: "lc-a", sourceId: "sr-1", words: "alpha one", page: "2" },
+      { locusId: "lc-b", sourceId: "sr-1", words: "beta two" },
+    ],
+    register: { accept: [{ phraseId: "lc-a" }], skip: [], deny: [] },
+  });
+  assert.equal(rows[0].hand, "accept");
+  assert.equal(rows[0].page, 2);
+  assert.equal(rows[0].opening, "alpha one");
+  assert.equal(rows[1].hand, "skip");
+  assert.equal(rows[1].page, null);
 });
 
 test("an ambiguous find is a miss", () => {
@@ -135,6 +170,21 @@ test("the same lines do not grow wider, and a jump to the chat width keeps the c
   assert.deepEqual(settleBox(sentence, chat, panel), sentence);
   assert.equal(settleRule(sentence, chat, panel, chat).name, "wide");
   assert.deepEqual(settleBox(sentence, chat, panel, chat), sentence);
+});
+
+test("a reading keeps every phrase it sees", () => {
+  const seen = ["a", "b", "c", "d"].map((id, i) => ({
+    phraseId: id,
+    color: "yellow" as const,
+    u: 0.1,
+    v: 0.1 * (i + 1),
+    w: 0.1,
+    h: 0.04,
+  }));
+  assert.deepEqual(
+    keepHeld([], seen).map((mark) => mark.phraseId),
+    ["a", "b", "c", "d"],
+  );
 });
 
 test("a miss leaves a placed mark and a hit moves it", () => {

@@ -494,9 +494,10 @@ export function meanConfidence(lines: Line[], run: Run): number {
   return Math.min(1, Math.max(0, mean));
 }
 
-export const MARK_CAP = 3;
 /** The mark drops when its box enters this fraction of the window, top or bottom. */
 export const EDGE_BAND = 0.05;
+/** The tour's find string. The same cut as the task seed. */
+const OPENING_CHARS = 200;
 
 export type HandName = "skip" | "accept" | "deny";
 
@@ -530,7 +531,6 @@ export function glassDeclareLine(phraseId: string, quote: string, firstLine: str
 }
 
 function placeGlass(hits: GlassMark[], locus: GlassLocus, lines: Line[], screen: { w: number; h: number }): void {
-  if (hits.length >= MARK_CAP) return;
   if (!locus.opening.trim()) return;
   if (hits.some((mark) => mark.phraseId === locus.phraseId)) return;
   const run = findRun(lines, locus.opening);
@@ -550,22 +550,84 @@ function placeGlass(hits: GlassMark[], locus: GlassLocus, lines: Line[], screen:
   });
 }
 
-/** Current locus first, then other skips on the glass, then one decided locus. A miss is absent from this list. */
+/** Current locus first, then the other loci on the page. A miss is absent from this list. */
 export function glassMarks(loci: GlassLocus[], lines: Line[], screen: { w: number; h: number }): GlassMark[] {
   const hits: GlassMark[] = [];
   const current = loci.find((locus) => locus.current);
   if (current) placeGlass(hits, current, lines, screen);
   for (const locus of loci) {
-    if (locus.current || locus.hand !== "skip") continue;
+    if (locus.current) continue;
     placeGlass(hits, locus, lines, screen);
-  }
-  for (const locus of loci) {
-    if (locus.hand === "skip") continue;
-    const before = hits.length;
-    placeGlass(hits, locus, lines, screen);
-    if (hits.length > before) break;
   }
   return hits;
+}
+
+export type OpenPage = { kind: "web" } | { kind: "pdf"; page: number };
+
+/** A web source keeps every locus. A PDF locus stays when its page is the one open. */
+export function onPage<T extends { page: number | null }>(loci: readonly T[], open: OpenPage): T[] {
+  if (open.kind === "web") return loci.slice();
+  return loci.filter((locus) => locus.page === open.page);
+}
+
+export type SourcedLocus = {
+  phraseId: string;
+  sourceId: string;
+  opening: string;
+  page: number | null;
+  hand: HandName;
+};
+
+export function openingWords(words: string): string {
+  return Array.from(words).slice(0, OPENING_CHARS).join("");
+}
+
+function pageNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isInteger(value) && value >= 0) return value;
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    if (Number.isInteger(parsed) && parsed >= 0) return parsed;
+  }
+  return null;
+}
+
+function handFromRegister(register: unknown): Map<string, HandName> {
+  const hands = new Map<string, HandName>();
+  if (!register || typeof register !== "object") return hands;
+  const book = register as Record<string, unknown>;
+  for (const name of ["skip", "accept", "deny"] as const) {
+    const rows = book[name];
+    if (!Array.isArray(rows)) continue;
+    for (const row of rows) {
+      if (!row || typeof row !== "object") continue;
+      const fields = row as { phraseId?: unknown; locusId?: unknown };
+      const id = typeof fields.phraseId === "string" && fields.phraseId ? fields.phraseId : fields.locusId;
+      if (typeof id === "string" && id) hands.set(id, name);
+    }
+  }
+  return hands;
+}
+
+/** The open project's loci. A locus the register has not entered is skip. */
+export function lociFromProject(detail: { loci?: unknown; register?: unknown }): SourcedLocus[] {
+  const rows = Array.isArray(detail.loci) ? detail.loci : [];
+  const hands = handFromRegister(detail.register);
+  const loci: SourcedLocus[] = [];
+  for (const row of rows) {
+    if (!row || typeof row !== "object") continue;
+    const fields = row as { locusId?: unknown; sourceId?: unknown; words?: unknown; page?: unknown };
+    const phraseId = typeof fields.locusId === "string" ? fields.locusId : "";
+    if (!phraseId) continue;
+    const words = typeof fields.words === "string" ? fields.words : "";
+    loci.push({
+      phraseId,
+      sourceId: typeof fields.sourceId === "string" ? fields.sourceId : "",
+      opening: openingWords(words),
+      page: pageNumber(fields.page),
+      hand: hands.get(phraseId) ?? "skip",
+    });
+  }
+  return loci;
 }
 
 export type HeldMark = { phraseId: string; box: Uv };
@@ -750,7 +812,6 @@ export function keepHeld(held: HeldMark[], seen: (Uv & { phraseId: string })[]):
     return { phraseId: mark.phraseId, box: { u: hit.u, v: hit.v, w: hit.w, h: hit.h } };
   });
   for (const hit of seen) {
-    if (next.length >= MARK_CAP) break;
     if (next.some((mark) => mark.phraseId === hit.phraseId)) continue;
     next.push({ phraseId: hit.phraseId, box: { u: hit.u, v: hit.v, w: hit.w, h: hit.h } });
   }

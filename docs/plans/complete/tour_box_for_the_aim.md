@@ -1,6 +1,6 @@
 # The tour box for the aim
 
-Status: landed 18 November 2026. One aim key on the presence, written by the driver. `highlightRegion` takes `aim`. `visible_interest` returns that mark's box while it is visible. The spring later moved to 5/3, about 2400 milliseconds, in `point_in_2400ms.md`. The 1600 ms step was not taken.
+Status: landed 18 November 2026. One aim key on the presence, written by the driver. `highlightRegion` takes `aim`. `visible_interest` returns that mark's box while it is visible. The spring later moved to 5/3, about 2400 milliseconds, in `point_in_2400ms.md`. The 1600 ms step was not taken. Heat later stamps the aim rectangle only, in `tour_page_marks.md`.
 
 18 November 2026. During a research tour the bar is on screen and she is talking, and the arms do the talking lift. The aim never receives the box.
 

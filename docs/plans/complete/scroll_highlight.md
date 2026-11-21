@@ -2,6 +2,16 @@
 
 Written 8 November 2026. This is the C11b brief. It is the order for a person taking the scroll during a citation tour, and for the highlight that has to live on a page they are moving.
 
+## Later order, 21 November 2026
+
+The scroll tour landed. Their scroll does not stop the narration. The glass moves a mark onto the ink. A reading that misses leaves a mark already placed (`tour_hold.md`). The hand is skip, accept, and deny.
+
+Three sentences below are withdrawn. The page of marks is `tour_page_marks.md`.
+
+- The glass pass does not stop at three marks. Every locus the reading places on the open page is painted, in the color of the hand.
+- She does not say "Understood." A tap stores the hand. The demos tap the bar she is narrating, and that path never sets the line. A tap on another locus still returns `say: "Understood."` from `task.rs`, and `sayHandoff` would speak it. That return comes out with the painter. The narration of the locus she is on is the only line.
+- A hand does not take the mark down. The tint stays in the new color while the reading still finds it. The companion ids that `apply_tint_samples` retires come out with the same change. `concealLeft` still clears the bars of the page being left when the next source is found. A mark that scrolls into the outer band of the screen still comes down, and a later reading may put it back on the ink.
+
 It supersedes the pause-and-stop reading of protocol rows G6 and G7 in `command_layer_protocol.md`, the "user preempts" sentence in `presence_command_layer.md`, the unwritten pause-time highlight in `hand_and_phrase.md` and `review_demo.md`, and the rewind that `tour_confirm.md` left with the scroll takeover. Those files keep their other orders. Where they still say the tour pauses and issues no further move, or that C11b has no brief, this file is the later one.
 
 The allyl run on `pj-a80c517377f1b1c1` is the case. The inductive sentence's own find was 992 by 44, low in the viewport. The locator scrolled 80 pixels, which is `NUDGE_PX`. The tint that stayed on the glass was 900 by 114 at 982,739, a screen rectangle. The page moved. The mark did not. The words and the yellow no longer met, and a press on the words wrote no hand row. The item then closed on the 20 second clock counted from entry.
@@ -14,7 +24,7 @@ The daemon already runs that reading. The `screen-text` thread owns one screenco
 
 Locate's own grim of a window, used while placing a box during a move, stays that move's measure. The idle recovery pass does not copy it. Section tints stay. The cost of sampling the window faster than this pass is the thing this brief refuses.
 
-A pass looks for tour loci whose opening words are in that message, one `findRun` each. A hit paints or moves that locus's mark to the ink. A miss leaves a mark we already placed. `tour_hold.md` is the later order on that point: a failed reading is not a reason to take the highlight down. Up to three marks, the cap the overlay already has. The locus the tour is on takes the first. Visible skips take the next. A decided locus takes a free mark after those.
+A pass looks for tour loci whose opening words are in that message, one `findRun` each. A hit paints or moves that locus's mark to the ink. A miss leaves a mark we already placed. `tour_hold.md` is the later order on that point: a failed reading is not a reason to take the highlight down. The cap of three is withdrawn. Every locus the reading places on the open page is painted, in the color of the hand. The order and the aim are `tour_page_marks.md`.
 
 The color is the register, read from `queryProject`. No hand row is yellow. The latest accept is green. The latest deny is red. The pass does not write a hand row. T0 remains the only writer of those rows.
 
@@ -24,7 +34,7 @@ A scroll that is theirs stops our scroll. We do not nudge against it. The narrat
 
 When the viewer reports scroll position, the locator that already talks to that viewer subscribes and moves the mark by that delta. Chromium's scroll is that client's. Evince's is that client's. The daemon does not grow a CDP client to obtain it. The mark drops when the highlighted section enters the outer 5 percent of the window, top or bottom. A later glass pass may put it back once the ink sits inside the seat.
 
-With no scroll report, the mark stays where it was painted until the next glass pass moves it onto the ink or drops it because the words have left the frame. That is the whole of the recovery. It does not have to run more often than the reading we already take.
+With no scroll report, the mark stays where it was painted until the next glass pass moves it onto the ink. A miss leaves it. That is the whole of the recovery. It does not have to run more often than the reading we already take.
 
 A pointer in the window during a hop we are still performing withholds the next nudge we have not sent. It does not cut the voice, and it does not clear a mark that still covers its words. That is what remains of G7.
 
@@ -32,11 +42,9 @@ A pointer in the window during a hop we are still performing withholds the next 
 
 A tap on a mark enters the tour at that locus. The tap is the hand, on the switch already specified: short tap yellow to green, short tap green to yellow, long tap from yellow or green to red, short or long tap on red to yellow. The register updates on that press.
 
-A second tap on the same locus inside `GRACE_MS` (1500) rewrites that decision, including after the mark has started to drop. `DOUBLE_CLICK_MS` (250) stays the suppressor for an unpainted square. It is not this window. After the grace, the decision changes when they scroll back and tap the mark the pass has painted in the stored color. The tour does not rewind itself to offer the change.
+A second tap on the same locus inside `GRACE_MS` (1500) rewrites that decision. `DOUBLE_CLICK_MS` (250) stays the suppressor for an unpainted square. It is not this window. After the grace, the decision changes when they scroll back and tap the mark the pass has painted in the stored color. The tour does not rewind itself to offer the change.
 
-If a presence owns the body, she says "Understood." as the mark goes. That is one short clip. It replaces whatever narration is still playing. It is not the locus narration, and the locus narration is not spoken again for the locus they just left.
-
-The mark drops with that word. Today it stays up across the scroll. That stay is the behavior this brief ends.
+A tap stores the hand. She does not say a separate word for it. The mark stays in the new color while the reading still finds it. The narration already playing for the current locus finishes, or stops on a stop we already have. It is not replaced by another line.
 
 We then take the scroll. The next locus is the next item in the tour's own order. That order is the list on the task. It does not have to follow the page. The viewer's find brings that locus onto the glass. The glass pass places the mark. If the mark sits in the outer band, one centering nudge, the same 80 pixels, runs while we still own the scroll. The mark moves by that same delta in the same step. We do not paint a rectangle and then scroll the page out from under it. A later pass may correct the box from the ink.
 
@@ -48,7 +56,7 @@ A client may ask the tour to continue over loci that still read skip, in tour or
 
 ## Stays as it is
 
-Yellow, green, and red, and the three register names. A hand accept adds no keep. Keyboard interactivity on the mark stays `None`. The phrase id of a tour locus stays the locus id. The design sentence in `local_multimodal_reflex.md` stays. One mouth. Narration still cuts at 300 characters. The 20 second hand clock is removed by `tour_hold.md`. This brief does not implement the driver, the pass, or the listener.
+Yellow, green, and red, and the three register names. A hand accept adds no keep. Keyboard interactivity on the mark stays `None`. The phrase id of a tour locus stays the locus id. The design sentence in `local_multimodal_reflex.md` stays. One mouth. Narration still cuts at 300 characters. The 20 second hand clock is removed by `tour_hold.md`. The scroll, the glass follow, and the hand switch are in the driver. The three withdrawn sentences are the painter's.
 
 ## Read with this
 

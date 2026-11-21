@@ -2,10 +2,12 @@
 // type-stripping test can import it. This module is the driver's import.
 
 export {
-  MARK_CAP,
   EDGE_BAND,
   handColor,
   glassMarks,
+  onPage,
+  lociFromProject,
+  openingWords,
   keepHeld,
   settleBox,
   followScroll,
@@ -13,4 +15,4 @@ export {
   centerWithMark,
   linesFromColumns,
 } from "./core.js";
-export type { HandName, GlassLocus, Uv, GlassMark, HeldMark } from "./core.js";
+export type { HandName, GlassLocus, Uv, GlassMark, HeldMark, OpenPage, SourcedLocus } from "./core.js";

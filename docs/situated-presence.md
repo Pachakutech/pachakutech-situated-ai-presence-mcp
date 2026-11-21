@@ -190,8 +190,10 @@ What to expect when she is given a mark and then a sentence:
   aim.
 - The presence keeps one aim. A declare with no phrase id is that aim.
   A phrase is that aim when the declare sets `aim`. The arms follow that
-  mark while it is visible. Another bar does not take the point. When
-  that mark fades or is concealed, the arms use the talking lift.
+  mark while it is visible. Another bar does not take the point. Other
+  loci on the open page are painted in the hand's color. They do not
+  take the point. Heat is the aim rectangle only. When that mark fades
+  or is concealed, the arms use the talking lift.
 
 A point inside a document, a window, or a page is not yet this
 coordinate system. The viewer adds chrome, zoom, and scroll. Measure the

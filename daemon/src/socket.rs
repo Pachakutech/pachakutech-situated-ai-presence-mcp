@@ -192,6 +192,11 @@ impl SocketServer {
         self.registry.lock().expect("registry mutex poisoned").visible_aim(id, Instant::now())
     }
 
+    /// Aim mark ids still showing. The overlay stamps heat with these rectangles only.
+    pub fn visible_aim_ids(&self) -> Vec<String> {
+        self.registry.lock().expect("registry mutex poisoned").visible_aim_ids(Instant::now())
+    }
+
     /// Drop a mark that was held for the utterance. The box stays for the next aim.
     pub fn conceal_speech_interest(&self, id: &str) {
         self.registry.lock().expect("registry mutex poisoned").conceal_speech_interest(id, Instant::now());

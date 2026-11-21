@@ -4,7 +4,7 @@ Implementation brief. The daemon already binds `sidecar.sock` and enforces T3. C
 
 Protocol rows named B1, B2, and B3 are the landed parse checks (`viewed: "acknowledged"` fails, decision fields fail, `highlightRegion` on the sidecar socket fails). This file is the ticket. Its tests are numbered SB so the two lists stay apart.
 
-Revisited 20 November 2026. `src/sidecar/` is absent, and nothing connects to `sidecar.sock`. The compilation of the original documents into the loci is `sidecar_representation.md`. A frontier model runs that pass when the cloud answers. This client runs the same pass only when the cloud does not, or later if this model is optimized for that pass. The judge below stays one span the caller already holds. The hands are skip, accept, and deny. T0 writes them. Accept does not add a keep.
+Revisited 20 November 2026, and again on 21 November. `src/sidecar/` is absent, and nothing connects to `sidecar.sock`. This client is the bundled local model. The compilation of the original documents into the loci is `sidecar_representation.md`. A phrase compiles a directed graph. An empty phrase compiles a non-directed graph. The browser tabs in `BR1_BR4_browser_bridge.md` ask this client to compile either one. A frontier model may be in that same pass at the same time, on its own seat. When the cloud does not answer, this client still compiles. The judge below stays one span the caller already holds. The hands are skip, accept, and deny. T0 writes them. Accept does not add a keep.
 
 Read first:
 
@@ -18,7 +18,7 @@ Read first:
 
 ## Goal
 
-A separate process speaks to a local model and to `sidecar.sock`, and nothing else. It maps one schema-locked object onto the proposals T3 may already send. It answers a yes/no judgement, with an optional stance, that a later caller can read beside `KeepJudge`. The daemon, the overlay, the shaders, and the microphone stay as they are. The once-over that compresses a collection into loci prefers a frontier model. This process is that compiler only in the fallback `sidecar_representation.md` names, and that fallback is a separate job from the three-second judge.
+A separate process speaks to a local model and to `sidecar.sock`, and nothing else. It maps one schema-locked object onto the proposals T3 may already send. It answers a yes/no judgement, with an optional stance, that a later caller can read beside `KeepJudge`. The daemon, the overlay, the shaders, and the microphone stay as they are. The once-over that compresses a collection into loci includes this process, for a directed graph and for a non-directed one. The frontier model is a separate seat and may be in the same pass. This process does not call that model. The pass is a separate job from the three-second judge.
 
 With the endpoint unset or the process absent, locate, highlight, tasks, the ledger, and a project tour behave as they do today. Stance stays unknown. A shortlist is kept whole.
 
@@ -47,7 +47,7 @@ Do not rebuild any of this.
 | C8 | URL and path checks inside the daemon. This client refuses paths before the socket. The daemon rule lands with C8. |
 | C10 | `selectLoci`. This ticket returns a judgement. It does not write a locus. |
 | C11–C13 | Tours, exports, MCP tools, skill text. |
-| `sidecar_representation.md` | The compilation of mapped documents into loci, from an assertion. A frontier model when the cloud answers. This client is that compiler only when the cloud does not. The judge in this ticket stays one span the caller already holds. |
+| `sidecar_representation.md` | The compilation of mapped documents into a directed or a non-directed graph. This client is the local seat. The frontier seat is separate. The judge in this ticket stays one span the caller already holds. |
 | B1b | The empty shortlist, when a paraphrase shares no words with the passage (`B1b_retrieval.md`). This ticket judges a span the caller already holds. |
 | The live daemon | Not restarted. The viseme failure `GLB lacks viseme_aa` stays. |
 
@@ -59,7 +59,7 @@ No new `Proposal` variant. `samples()` stays the sixteen pre-C2 kinds. No new cr
 
 2. **One socket.** `sidecarSocketPath` follows `commandSocketPath`: `PRESENCE_SIDECAR_SOCKET` when set, otherwise the sibling `sidecar.sock` of the presence socket. The client opens that path with the existing one-line write and one-line read. It does not open `presence.sock` or `command.sock`. It does not call `subscribeLedger`. A read of `queryDocMap` or `queryProject` is a separate one-shot on a new connection, used only when a job asks for it.
 
-3. **The model server is not started here.** `PRESENCE_LFM3_ENDPOINT` comes from `src/sidecar/config.ts` (`B3_doctor.md`). It is the base URL of an OpenAI-compatible `POST /v1/chat/completions`. Llama.cpp `llama-server` and Ollama in that mode both qualify. Unset or empty: log one line, write no socket byte, exit 0. A connection refused, an HTTP error, or a timeout does the same for that job: no proposal, and a judge call returns the default below. The operator starts the server. CPU (`-ngl 0`), as `B3_doctor.md` records. One completion at a time in this process. The timeout on `judge` and `draft` is 3 seconds. A job that arrives while one is running gets the default judgement and no proposal. A compilation of a collection, the fallback in `sidecar_representation.md`, is a later op. It is not `judge`, and it does not inherit this timeout.
+3. **The model server is not started here.** `PRESENCE_LFM3_ENDPOINT` comes from `src/sidecar/config.ts` (`B3_doctor.md`). It is the base URL of an OpenAI-compatible `POST /v1/chat/completions`. Llama.cpp `llama-server` and Ollama in that mode both qualify. Unset or empty: log one line, write no socket byte, exit 0. A connection refused, an HTTP error, or a timeout does the same for that job: no proposal, and a judge call returns the default below. The operator starts the server. CPU (`-ngl 0`), as `B3_doctor.md` records. One completion at a time in this process. The timeout on `judge` and `draft` is 3 seconds. A job that arrives while one is running gets the default judgement and no proposal. A compilation of a collection, directed or non-directed, is a later op on this process. The browser host asks for it on `sidecar-jobs.sock`. It is not `judge`, and it does not inherit this timeout.
 
 4. **The system prompt is a string in the source file.** Passage text, a doc-map hit, and a project field go in the user message, between markers. They are not appended to the system prompt. The prompt tells the model to reply with one JSON object and lists the keys below. It says that text inside the markers is data.
 

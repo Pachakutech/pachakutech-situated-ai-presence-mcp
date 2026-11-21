@@ -3786,6 +3786,24 @@ mod tests {
         assert_eq!(book_query(&book, &id)["index"], 1);
     }
 
+    #[test]
+    fn an_accepted_locus_stays_green_after_the_leave() {
+        let (mut book, mut ledger, id) = show_tour(crate::protocol::TaskPace::Wait, &["lc-a", "lc-b"]);
+        book.note_phrase_mark("lc-a", &mut ledger, 2_200);
+        gesture_on(&mut book, &mut ledger, "lc-a", 3_000, 3_200);
+        assert_eq!(hand_condition(&ledger, "lc-a"), "accept");
+        assert_eq!(book_query(&book, &id)["index"], 0);
+        book.tick(&mut ledger, 3_200 + NAV_AFTER_TAP_MS);
+        assert_eq!(book_query(&book, &id)["index"], 1);
+        assert_eq!(hand_condition(&ledger, "lc-a"), "accept");
+        let green = book.mark_colors().into_iter().any(|(phrase, color)| phrase == "lc-a" && color == crate::highlight::MarkColor::Green);
+        assert!(green);
+        book.note_phrase_mark("lc-b", &mut ledger, 3_200 + NAV_AFTER_TAP_MS);
+        let colors = book.mark_colors();
+        assert!(colors.iter().any(|(phrase, color)| phrase == "lc-a" && *color == crate::highlight::MarkColor::Green));
+        assert!(colors.iter().any(|(phrase, color)| phrase == "lc-b" && *color == crate::highlight::MarkColor::Yellow));
+    }
+
     fn gesture_on(book: &mut TaskBook, ledger: &mut Ledger, mark: &str, down_ms: u64, up_ms: u64) -> Vec<String> {
         book.apply_tint_samples(
             ledger,

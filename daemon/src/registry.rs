@@ -358,6 +358,22 @@ impl Registry {
         self.interests.visible(now).into_iter().find(|(id, _)| id == key).map(|(_, box_)| box_)
     }
 
+    /// Phrase ids the presences are pointing at, while those marks are still visible.
+    /// One id per aim. The heat field uses these and ignores companion bars.
+    pub fn visible_aim_ids(&self, now: Instant) -> Vec<String> {
+        let showing = self.interests.visible(now);
+        let mut ids = Vec::new();
+        for aim in self.aim_of.values() {
+            if ids.iter().any(|id: &String| id == aim) {
+                continue;
+            }
+            if showing.iter().any(|(id, _)| id == aim) {
+                ids.push(aim.clone());
+            }
+        }
+        ids
+    }
+
     pub fn visible_interests(&self, now: Instant) -> Vec<(String, UvBox)> {
         self.interests.visible(now)
     }
@@ -1152,5 +1168,27 @@ mod tests {
         let later = now + std::time::Duration::from_secs(2);
         assert_eq!(reg.visible_aim("p-a", later), None);
         assert_eq!(reg.interest("lc-1").map(|box_| box_.u), Some(allyl.u));
+    }
+
+    #[test]
+    fn an_aim_past_three_marks_is_still_the_point() {
+        let (mut reg, now, allyl) = tour_presence();
+        let boxes = [
+            ("lc-1", allyl),
+            ("lc-2", crate::highlight::UvBox { u: 0.1, v: 0.1, w: 0.1, h: 0.1 }),
+            ("lc-3", crate::highlight::UvBox { u: 0.2, v: 0.1, w: 0.1, h: 0.1 }),
+            ("lc-4", crate::highlight::UvBox { u: 0.3, v: 0.1, w: 0.1, h: 0.1 }),
+        ];
+        for (i, (id, box_)) in boxes.iter().enumerate() {
+            reg.declare_interest("p-a", Some(id), id, *box_, 360, now, i == 3).unwrap();
+        }
+        reg.declare_interest("p-b", Some("lc-2"), "companion", boxes[1].1, 360, now, true).unwrap();
+        assert_eq!(reg.visible_interests(now).len(), 4);
+        assert_eq!(reg.visible_aim("p-a", now), Some(boxes[3].1));
+        assert_eq!(reg.visible_aim("p-b", now), Some(boxes[1].1));
+        let aims = reg.visible_aim_ids(now);
+        assert_eq!(aims.len(), 2);
+        assert!(aims.iter().any(|id| id == "lc-4"), "{aims:?}");
+        assert!(aims.iter().any(|id| id == "lc-2"), "{aims:?}");
     }
 }

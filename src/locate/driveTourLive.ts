@@ -3,9 +3,9 @@
 
 import { DaemonClient } from "../daemonClient.js";
 import { launchListed, locatePortOpen, navigateLocate, spawnListed } from "./openSource.js";
-import { centerWithMark, followScroll, glassMarks, keepHeld, linesFromColumns, type GlassLocus, type HandName, type Uv } from "./glass.js";
+import { centerWithMark, followScroll, glassMarks, keepHeld, linesFromColumns, lociFromProject, onPage, type GlassLocus, type HandName, type OpenPage, type SourcedLocus, type Uv } from "./glass.js";
 import { noteOwnedScroll, releaseScroll as clearScrollHold, scrollDrifted } from "./scrollHold.js";
-import { listHyprClients, nudgePage, outputSize, readPageGeneration, readScrollTop } from "./run.js";
+import { listHyprClients, nudgePage, outputSize, readPageGeneration, readScrollTop, readViewerPage } from "./run.js";
 import { runTour, type GlassHit, type TourItem, type TourView } from "./tour.js";
 import { driveUntilStop, type DriveIo, type OpenRequest } from "./driveTour.js";
 import { NUDGE_PX, frameAfterSettle, glassPhraseBox, nudgeLine, settleLine, settleRule, uvPixels, type GlassFrame } from "./core.js";
@@ -61,6 +61,9 @@ function liveIo(client: DaemonClient, presenceId: string | undefined, stopping: 
   let viewerAddress: string | null = null;
   let ended = false;
   let aimPhrase: string | null = null;
+  let projectIdHeld: string | null = null;
+  let openSourceId: string | null = null;
+  let projectLoci: SourcedLocus[] = [];
 
   async function paint(phraseId: string, box: Uv, description: string, aim = false): Promise<void> {
     if (!presenceId) return;
@@ -90,10 +93,134 @@ function liveIo(client: DaemonClient, presenceId: string | undefined, stopping: 
     await client.call("concealHighlight", { presenceId, phraseId });
   }
 
-  /** The phrase just answered leaves before the next page is found. The phrase being placed is not in this set. */
-  async function concealLeft(nextPhraseId: string): Promise<void> {
-    const leaving = [...boxes.keys()].filter((id) => id !== nextPhraseId);
-    for (const id of leaving) {
+  function rememberProject(detail: Record<string, unknown>): SourcedLocus[] {
+    const open = detail.openRequest;
+    if (open && typeof open === "object") {
+      const id = (open as { sourceId?: unknown }).sourceId;
+      if (typeof id === "string" && id) openSourceId = id;
+    }
+    return lociFromProject(detail);
+  }
+
+  /** One queryProject page. The wire caps a page here. */
+  const PROJECT_PAGE = 500;
+  /** The store holds at most 5000 loci. Ten pages cover that. */
+  const PROJECT_PAGES = 10;
+
+  /**
+   * The open project's loci. Pages of 500, walked with sincePseq.
+   * Locus rows omit pseq. New rows are numbered from 1 with no gaps,
+   * so the next exclusive cursor is how many rows this walk has already taken.
+   * A failed page leaves the list already stored.
+   */
+  async function readProject(): Promise<Record<string, unknown>> {
+    if (!projectIdHeld) return {};
+    const merged: SourcedLocus[] = [];
+    let since = 0;
+    let first: Record<string, unknown> | null = null;
+    for (let page = 0; page < PROJECT_PAGES; page++) {
+      const detail = await client.call("queryProject", {
+        projectId: projectIdHeld,
+        sincePseq: since,
+        limit: PROJECT_PAGE,
+      });
+      if (!first) first = detail;
+      const listed = rememberProject(detail);
+      for (const locus of listed) {
+        if (!merged.some((row) => row.phraseId === locus.phraseId)) merged.push(locus);
+      }
+      if (listed.length < PROJECT_PAGE) break;
+      since += listed.length;
+    }
+    if (merged.length) projectLoci = merged;
+    return first ?? {};
+  }
+
+  function sourceOf(task: TourView): string | null {
+    if (openSourceId) return openSourceId;
+    const current = task.items[task.index]?.phraseId;
+    const found = current ? projectLoci.find((locus) => locus.phraseId === current)?.sourceId : undefined;
+    if (found) openSourceId = found;
+    return openSourceId;
+  }
+
+  /** The open source. A failed read keeps the last list. An empty project falls back to the task. */
+  async function sourced(task: TourView): Promise<SourcedLocus[]> {
+    if (projectIdHeld) {
+      try {
+        await readProject();
+      } catch {
+        // The last list is still the page.
+      }
+    }
+    const source = sourceOf(task);
+    const rows = source ? projectLoci.filter((locus) => locus.sourceId === source) : projectLoci;
+    if (rows.length) return rows;
+    return task.items.map((item) => ({
+      phraseId: item.phraseId,
+      sourceId: source ?? "",
+      opening: item.query ?? "",
+      page: item.page ?? null,
+      hand: handName(item.hand),
+    }));
+  }
+
+  function glassLoci(rows: SourcedLocus[], task: TourView): GlassLocus[] {
+    const current = task.items[task.index]?.phraseId;
+    return rows.map((locus) => {
+      const item = task.items.find((row) => row.phraseId === locus.phraseId);
+      return {
+        phraseId: locus.phraseId,
+        opening: item?.query || locus.opening,
+        hand: item ? handName(item.hand) : locus.hand,
+        current: locus.phraseId === current,
+      };
+    });
+  }
+
+  /** The page the viewer has open. A PDF falls back to the locus the tour is on. */
+  async function pageNow(task: TourView): Promise<OpenPage> {
+    const item = task.items[task.index];
+    const pdf = viewerKind === "pdf" || item?.page != null;
+    if (!pdf) return { kind: "web" };
+    if (reference && viewerKind === "pdf") {
+      try {
+        const read = await readViewerPage(reference);
+        if (read != null) return { kind: "pdf", page: read };
+      } catch {
+        // The locus page is the one the tour opened.
+      }
+    }
+    if (item?.page != null) return { kind: "pdf", page: item.page };
+    return { kind: "web" };
+  }
+
+  /** The page this hop is opening. Evince still shows the page being left. */
+  function pageOfItem(item: TourItem): OpenPage {
+    if (item.page == null) return { kind: "web" };
+    return { kind: "pdf", page: item.page };
+  }
+
+  async function candidates(task: TourView, open: OpenPage): Promise<GlassLocus[]> {
+    return glassLoci(onPage(await sourced(task), open), task);
+  }
+
+  /**
+   * A phrase on the page being opened stays. A phrase from another page is concealed
+   * before the find. The phrase being placed stays either way.
+   */
+  async function concealLeft(item: TourItem): Promise<void> {
+    const staying = new Set<string>([item.phraseId]);
+    if (taskSeen) {
+      try {
+        const view = asTourView(await client.call("queryTask", { taskId: taskSeen }), taskSeen);
+        for (const locus of await candidates(view, pageOfItem(item))) staying.add(locus.phraseId);
+      } catch {
+        // The phrase being placed still stays.
+      }
+    }
+    for (const id of [...boxes.keys()]) {
+      if (staying.has(id)) continue;
       console.error(`tour: conceal ${id}`);
       await drop(id);
     }
@@ -274,7 +401,15 @@ function liveIo(client: DaemonClient, presenceId: string | undefined, stopping: 
         prev !== undefined && prev.u === mark.box.u && prev.v === mark.box.v && prev.w === mark.box.w && prev.h === mark.box.h;
       if (!same) await paint(mark.phraseId, mark.box, mark.phraseId);
     }
-    holding = next.map((mark) => mark.phraseId);
+    const listed = await sourced(view);
+    const page = glassLoci(onPage(listed, await pageNow(view)), view);
+    holding = page.map((locus) => locus.phraseId);
+    if (listed.length) {
+      const allowed = new Set(holding);
+      for (const id of [...boxes.keys()]) {
+        if (!allowed.has(id)) await drop(id);
+      }
+    }
   }
 
   async function readGlass(task: TourView): Promise<GlassHit[]> {
@@ -287,18 +422,14 @@ function liveIo(client: DaemonClient, presenceId: string | undefined, stopping: 
     const h = Array.isArray(detail.h) ? (detail.h as number[]) : [];
     const width = typeof detail.width === "number" && detail.width > 0 ? detail.width : 1;
     const height = typeof detail.height === "number" && detail.height > 0 ? detail.height : 1;
-    const loci: GlassLocus[] = task.items.map((item, index) => ({
-      phraseId: item.phraseId,
-      opening: item.query ?? "",
-      hand: handName(item.hand),
-      current: index === task.index,
-    }));
+    const loci = await candidates(task, await pageNow(task));
     return glassMarks(loci, linesFromColumns(text, x, y, w, h), { w: width, h: height });
   }
 
   return {
     async queryProject(projectId) {
-      const detail = await client.call("queryProject", { projectId });
+      projectIdHeld = projectId;
+      const detail = await readProject();
       const open = detail.openRequest;
       const openRequest = open && typeof open === "object" ? (open as OpenRequest) : undefined;
       reference = openRequest?.reference;
@@ -337,7 +468,7 @@ function liveIo(client: DaemonClient, presenceId: string | undefined, stopping: 
     async locate(item) {
       if (!viewerKind) viewerKind = item.page != null ? "pdf" : "web";
       const source = item.page != null ? "pdf" : "web";
-      await concealLeft(item.phraseId);
+      await concealLeft(item);
       const beforeTop = await readScrollTop();
       const beforeGen = generation;
       const { placeForTour } = await import("./run.js");
@@ -375,14 +506,23 @@ function liveIo(client: DaemonClient, presenceId: string | undefined, stopping: 
       paintedTop = await readScrollTop();
       const origin = await readPageGeneration();
       if (origin != null) generation = origin;
-      if (!holding.includes(item.phraseId)) {
-        const next = [item.phraseId, ...holding].slice(0, 3);
-        for (const id of holding) {
-          if (!next.includes(id)) await drop(id);
-        }
-        holding = next;
-      }
+      const left = aimPhrase;
+      const previous = left && left !== item.phraseId ? boxes.get(left) : undefined;
       await paint(item.phraseId, box, item.query ?? "passage", true);
+      if (left && previous) await paint(left, previous, left);
+      if (taskSeen) {
+        try {
+          const view = asTourView(await client.call("queryTask", { taskId: taskSeen }), taskSeen);
+          const marks = await readGlass(view);
+          for (const mark of marks) {
+            if (mark.phraseId === item.phraseId) continue;
+            await paint(mark.phraseId, { u: mark.u, v: mark.v, w: mark.w, h: mark.h }, mark.phraseId);
+          }
+          holding = (await candidates(view, await pageNow(view))).map((locus) => locus.phraseId);
+        } catch {
+          // The current bar is already up.
+        }
+      }
       await rememberViewer();
     },
     async conceal() {

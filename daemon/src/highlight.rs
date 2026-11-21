@@ -1,11 +1,11 @@
-//! One screen box per presence. The numbers stay here, on the CPU.
+//! One screen box per locus. One presence points at one of them.
+//! The numbers stay here, on the CPU.
 //! A mark layer reads them only while it is supposed to be visible.
 //! After that the box remains, so a later gesture can aim at it.
 
 use std::time::{Duration, Instant};
 
 pub const MAX_SECS: u32 = 360;
-pub const MAX_MARKS: usize = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct UvBox {
@@ -87,16 +87,40 @@ impl InterestBook {
         self.items.iter().find(|it| it.id == id).map(|it| it.box_)
     }
 
-    /// Boxes whose mark should be on screen right now. At most three,
-    /// the same cap as live presences.
+    /// Boxes whose mark should be on screen right now.
+    /// Every held or unexpired mark. The aim is one of these.
     pub fn visible(&self, now: Instant) -> Vec<(String, UvBox)> {
         self.items
             .iter()
             .filter(|it| it.held || it.shown_until > now)
-            .take(MAX_MARKS)
             .map(|it| (it.id.clone(), it.box_))
             .collect()
     }
+}
+
+/// Pixel rects for the heat field. Only aim marks. Companions stay paint.
+/// Width or height of 1 or less is stored as 2, matching the mask. Empty slots stay 0.
+pub fn aim_heat_rects(measured: &[(String, i32, i32, i32, i32)], aim_ids: &[String]) -> [[f32; 4]; 3] {
+    let mut rects = [[0.0f32; 4]; 3];
+    let mut filled = 0usize;
+    let mut seen: Vec<&str> = Vec::new();
+    for aim in aim_ids {
+        if filled >= rects.len() {
+            break;
+        }
+        if seen.iter().any(|id| *id == aim.as_str()) {
+            continue;
+        }
+        let Some((_, x, y, w, h)) = measured.iter().find(|(id, _, _, _, _)| id == aim) else {
+            continue;
+        };
+        seen.push(aim.as_str());
+        let rw = if *w <= 1 { 2.0 } else { *w as f32 };
+        let rh = if *h <= 1 { 2.0 } else { *h as f32 };
+        rects[filled] = [*x as f32, *y as f32, rw, rh];
+        filled += 1;
+    }
+    rects
 }
 
 impl Default for InterestBook {
@@ -432,5 +456,34 @@ mod tests {
         assert!(w2 > w && h2 > h && x2 < x && y2 < y);
         assert_eq!(book.get("p-a"), Some(raw));
         assert_eq!(book.visible(t0)[0].1, raw);
+    }
+
+    #[test]
+    fn four_held_marks_all_stay_visible() {
+        let mut book = InterestBook::new();
+        let t0 = Instant::now();
+        for i in 0..4 {
+            let id = format!("lc-{i}");
+            book.declare(&id, box_at(0.1, 0.1, 0.2, 0.2), 1, t0).unwrap();
+            book.hold_until_conceal(&id);
+        }
+        let later = t0 + Duration::from_secs(10_000);
+        assert_eq!(book.visible(later).len(), 4);
+    }
+
+    #[test]
+    fn heat_rects_are_the_aim_while_companions_show() {
+        let measured = vec![
+            ("lc-1".to_string(), 10, 20, 30, 40),
+            ("lc-2".to_string(), 50, 60, 70, 80),
+            ("lc-3".to_string(), 90, 100, 1, 12),
+        ];
+        let rects = aim_heat_rects(&measured, &["lc-2".to_string()]);
+        assert_eq!(rects[0], [50.0, 60.0, 70.0, 80.0]);
+        assert_eq!(rects[1], [0.0; 4]);
+        assert_eq!(rects[2], [0.0; 4]);
+        let thin = aim_heat_rects(&measured, &["lc-3".to_string()]);
+        assert_eq!(thin[0], [90.0, 100.0, 2.0, 12.0]);
+        assert_eq!(thin[1], [0.0; 4]);
     }
 }

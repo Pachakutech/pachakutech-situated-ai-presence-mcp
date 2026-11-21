@@ -7,7 +7,7 @@ Protocol rows named B3 are the landed parse checks. This file is the ticket. Its
 Read first:
 
 - `docs/plans/local_multimodal_reflex.md` sections 5, 6, 7, and 8 (one 4-bit job, CPU or iGPU behind the disc submits, doctor reports reachability, Iris Xe numbers are a record)
-- `docs/plans/B1_sidecar.md` (the client that will read this config; it does not spawn the server; one completion, 3 s timeout)
+- `docs/plans/complete/B1_sidecar.md` (the client that will read this config; it does not spawn the server; one completion, 3 s timeout)
 - `docs/plans/B2_crops.md` (the crop long side is 384 to 1024; vision is off unless `PRESENCE_LFM3_VISION` is set)
 - `docs/plans/voice_command.md` (`PRESENCE_VOICE_ANSWERS_APPROVE` is not a behavior switch)
 - `docs/plans/command_layer_protocol.md` H6 and H9, and K2
@@ -17,7 +17,7 @@ Read first:
 
 `presence doctor` also says whether the model endpoint and `sidecar.sock` are there, and it prints the placement rule for this machine class. The overlay is not part of the command. A missing model prints a warn and the process exits 0.
 
-Revisited 20 November 2026. The report is the local endpoint and `sidecar.sock`. The compilation of documents into loci prefers a frontier model when the cloud answers (`sidecar_representation.md`). This command does not probe that cloud, and it does not start either model. When that compilation falls back to this machine, the placement below still holds: one 4-bit completion at a time, on the CPU, off the overlay thread.
+Revisited 20 November 2026, and again on 21 November. The report is the local endpoint and `sidecar.sock`. The sidecar is the bundled local model. It takes part in a directed compilation and in a non-directed one, and a frontier model may be in the same pass (`sidecar_representation.md`). This command does not probe that cloud, does not choose a model, and does not start either model. The local placement still holds: one 4-bit completion at a time, on the CPU, off the overlay thread.
 
 ## What already stands
 
@@ -35,7 +35,7 @@ Do not replace these checks. Append the model report after them.
 | B1 | The completion, the mapper, the 3 s job timeout. This ticket exports the config that client will import. |
 | B2 | Cutting a crop. This ticket names the ceiling the cut will read. |
 | B4 | An in-daemon actor, a fine-tune, a GPU layer inside the daemon. |
-| `sidecar_representation.md` | The compilation of mapped documents into loci. Frontier when the cloud answers. This ticket stays the report of the local endpoint the fallback would use. |
+| `sidecar_representation.md` | The compilation of a directed or a non-directed graph. The sidecar is the local seat. This ticket stays the report of that endpoint. |
 | `voice_command.md` | Opening a microphone, or letting a transcript approve. |
 | The operator | Starting `llama-server` or Ollama. This command does not spawn either. |
 | K2's number | A live frame-time measurement. The procedure is below. The suite does not fail on an unmeasured budget. |
