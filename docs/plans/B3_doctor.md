@@ -1,5 +1,7 @@
 # B3 — doctor, config, and placement
 
+Status: landed 21 November 2026. `presence doctor` prints the model sidecar report after the existing checks and keeps the closing sentence. The socket probe connects and closes. An unset endpoint is not fetched. A warn still exits 0. Jobs stay 1. The crop line runs from 384 to the ceiling. The frame budget line stays unmeasured. `socketReachable` lives in `src/reach.ts` so the report and the daemon command share it. No daemon file changed. The live daemon was not restarted.
+
 Implementation brief. `presence doctor` already runs. It checks Linux x64, Node, the bundled daemon, Wayland, the daemon socket, and the render node, then prints warn lines and returns. Warns do not change the exit status, and they do not stop `presence mcp`. This ticket adds the local-model report to that command. It does not start a server, and it does not start the daemon.
 
 Protocol rows named B3 are the landed parse checks. This file is the ticket. Its tests are numbered DR.

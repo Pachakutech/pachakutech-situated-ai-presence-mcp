@@ -7,10 +7,10 @@ import { createConnection } from "node:net";
 import { basename, dirname, join } from "node:path";
 import { socketPath } from "./daemonClient.js";
 import { getBundledDaemonPath } from "./daemonBinary.js";
+import { CONNECT_TIMEOUT_MS, socketReachable as reachSocket } from "./reach.js";
 
 const START_TIMEOUT_MS = 5000;
 const STOP_TIMEOUT_MS = 5000;
-const CONNECT_TIMEOUT_MS = 400;
 
 export function daemonStateDir(): string {
   const runtimeDir = process.env.XDG_RUNTIME_DIR || "/tmp";
@@ -28,20 +28,7 @@ export function daemonPidPath(): string {
 }
 
 export function socketReachable(path: string = socketPath(), timeoutMs = CONNECT_TIMEOUT_MS): Promise<boolean> {
-  return new Promise((resolve) => {
-    const sock = createConnection({ path });
-    let settled = false;
-    const finish = (ok: boolean) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      sock.destroy();
-      resolve(ok);
-    };
-    const timer = setTimeout(() => finish(false), timeoutMs);
-    sock.once("connect", () => finish(true));
-    sock.once("error", () => finish(false));
-  });
+  return reachSocket(path, timeoutMs);
 }
 
 async function waitUntil(predicate: () => Promise<boolean>, timeoutMs: number): Promise<boolean> {

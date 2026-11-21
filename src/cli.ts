@@ -22,6 +22,7 @@ import { sendProposal, socketReachable, startDaemon, statusDaemon, stopDaemon } 
 import { cueFollowMain } from "./locate/cues.js";
 import { tourDriveCommand } from "./locate/driveTour.js";
 import { fuseCommand, locateCommand, screenTextCommand } from "./locate/run.js";
+import { sidecarReport } from "./sidecar/doctor.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SERVER_ENTRY = join(__dirname, "index.js");
@@ -229,6 +230,9 @@ async function doctor() {
   console.log("presence doctor\n");
   for (const [label, ok, note] of checks) {
     console.log(`  ${ok ? "ok  " : "warn"}  ${label}${ok ? "" : `  — ${note}`}`);
+  }
+  for (const row of await sidecarReport(process.env)) {
+    console.log(row);
   }
   console.log(
     "\nWarn items do not block `presence mcp` (it falls back to notify-send when the " +

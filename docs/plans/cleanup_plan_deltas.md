@@ -19,7 +19,7 @@ Status: cleaned 3 November 2026. The 31 October record described code through C7
 | Topic | What is true now | Later |
 |---|---|---|
 | `exportProject` writer | The MCP tool forwards the kind. The daemon has no writer, so the call returns the daemon's error. It is not a success stub. | C12. A value read across a stretch of the register waits for that pass. |
-| Sidecar process | `sidecar.sock` is bound. Nothing connects. | B1. |
+| Sidecar process | `sidecar.sock` is bound. `presence doctor` probes it and does not keep the connection. No client is attached. | B1. |
 | Retrieval brief | Working memory is `B1b_retrieval.md`. The hole is the empty shortlist. No method is chosen. | B1b, when a ticket picks the method. |
 | Pause-time highlight | The scroll tour landed. `scroll_highlight.md` records it. The cap of three, the word "Understood.", and taking a mark down on a hand are withdrawn. | Landed as `tour_page_marks.md`. Every locus the reading finds on the open page is painted. The cap of three is gone. "Understood." still returns on a tap that is in the task and is not the current locus. |
 | Narrated 20 second wait | `tour_hold.md` removes that clock and the highlight drops that are not the phrase leaving the glass. | When that ticket is implemented. |
