@@ -193,6 +193,9 @@ pub enum Proposal {
     /// Passages from a map. This is not a move and not a decision.
     #[serde(rename = "queryDocMap")]
     QueryDocMap(QueryDocMapBody),
+    /// Stored passages in file order. This is not a search and not a move.
+    #[serde(rename = "readPassages")]
+    ReadPassages(ReadPassagesBody),
     /// T1 and T2 store an active project after intake checks. T3 stores `draft: true` unchecked.
     #[serde(rename = "createProject")]
     CreateProject(CreateProjectBody),
@@ -269,6 +272,7 @@ impl Proposal {
             Proposal::TourSignal(body) => &body.proposal_id,
             Proposal::BuildDocMap(body) => &body.proposal_id,
             Proposal::QueryDocMap(body) => &body.proposal_id,
+            Proposal::ReadPassages(body) => &body.proposal_id,
             Proposal::CreateProject(body) => &body.proposal_id,
             Proposal::AddSources(body) => &body.proposal_id,
             Proposal::ConfirmProject(body) => &body.proposal_id,
@@ -311,6 +315,7 @@ impl Proposal {
             Proposal::TourSignal(_) => "tourSignal",
             Proposal::BuildDocMap(_) => "buildDocMap",
             Proposal::QueryDocMap(_) => "queryDocMap",
+            Proposal::ReadPassages(_) => "readPassages",
             Proposal::CreateProject(_) => "createProject",
             Proposal::AddSources(_) => "addSources",
             Proposal::ConfirmProject(_) => "confirmProject",
@@ -606,6 +611,22 @@ pub struct QueryDocMapBody {
     pub query: String,
     #[serde(default)]
     pub k: Option<u32>,
+    #[serde(default, rename = "kind")]
+    pub wire_kind: Option<String>,
+}
+
+/// File order from `since`. `limit` defaults to 20 and is at most 20. No score.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadPassagesBody {
+    #[serde(rename = "proposalId")]
+    pub proposal_id: String,
+    #[serde(rename = "docKey")]
+    pub doc_key: String,
+    #[serde(default)]
+    pub since: Option<u64>,
+    #[serde(default)]
+    pub limit: Option<u32>,
     #[serde(default, rename = "kind")]
     pub wire_kind: Option<String>,
 }

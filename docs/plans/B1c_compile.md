@@ -1,5 +1,7 @@
 # B1c — the compile job
 
+Status: landed 21 November 2026. `presence sidecar listen` binds `sidecar-jobs.sock` and answers one compile line. `readPassages` returns the passage file in order. Each passage is one local completion. The words are the passage slice. Nothing is stored. The release binary was staged. The live daemon was not restarted.
+
 21 November 2026. Plan. This file does not implement the listener.
 
 B1 is the local client: `judge`, `draft`, and `observe`, one completion, three seconds, then the process exits. BR1 writes one compile line and waits for the proposals. The process that binds `sidecar-jobs.sock` and answers that line is this ticket. B1 names it and does not build it.

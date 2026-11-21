@@ -78,10 +78,15 @@ export function passageUserText(assertion: string | null, text: string): string 
 }
 
 /** Spans whose offsets land in the passage. A fence or trailing prose is null. */
-export function proposalsFromContent(content: string, passage: PassageIn, directed: boolean): Proposal[] | null {
+export function proposalsFromContent(
+  content: string,
+  passage: PassageIn,
+  directed: boolean,
+  poison: ReadonlySet<string> = POISON,
+): Proposal[] | null {
   const value = parseModelContent(content);
   if (!value) return null;
-  if (poisoned(value) || !Array.isArray(value.spans)) return [];
+  if (poisoned(value, poison) || !Array.isArray(value.spans)) return [];
   const out: Proposal[] = [];
   for (const entry of value.spans) {
     const span = oneSpan(entry, passage, directed);
@@ -222,11 +227,11 @@ function tokens(text: string): Set<string> {
   return out;
 }
 
-function poisoned(value: unknown): boolean {
+function poisoned(value: unknown, keys: ReadonlySet<string> = POISON): boolean {
   if (!value || typeof value !== "object") return false;
-  if (Array.isArray(value)) return value.some((entry) => poisoned(entry));
+  if (Array.isArray(value)) return value.some((entry) => poisoned(entry, keys));
   for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
-    if (POISON.has(key) || poisoned(child)) return true;
+    if (keys.has(key) || poisoned(child, keys)) return true;
   }
   return false;
 }

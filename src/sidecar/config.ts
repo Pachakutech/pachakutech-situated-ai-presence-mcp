@@ -15,6 +15,13 @@ export function sidecarSocketPath(presenceSocket: string, env: NodeJS.ProcessEnv
   return join(dirname(presenceSocket), "sidecar.sock");
 }
 
+/** `PRESENCE_SIDECAR_JOBS`, otherwise the sibling `sidecar-jobs.sock`. The daemon does not bind it. */
+export function jobsSocketPath(presenceSocket: string, env: NodeJS.ProcessEnv = process.env): string {
+  const over = env.PRESENCE_SIDECAR_JOBS;
+  if (over && over.length > 0) return over;
+  return join(dirname(presenceSocket), "sidecar-jobs.sock");
+}
+
 export interface SidecarConfig {
   /** Base URL of POST /v1/chat/completions. Null when unset. */
   endpoint: string | null;

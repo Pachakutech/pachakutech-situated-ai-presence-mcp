@@ -59,6 +59,7 @@ pub fn allowed(tier: Tier, proposal: &Proposal) -> bool {
         Proposal::ResolveItem(_) | Proposal::TourSignal(_) => matches!(tier, Tier::T1User | Tier::T2Client),
         Proposal::BuildDocMap(_) => matches!(tier, Tier::T1User | Tier::T2Client),
         Proposal::QueryDocMap(_) => matches!(tier, Tier::T1User | Tier::T2Client | Tier::T3Sidecar),
+        Proposal::ReadPassages(_) => matches!(tier, Tier::T1User | Tier::T2Client | Tier::T3Sidecar),
         // T2 is checked in the handler: public URLs, and a path only under a T1 root.
         Proposal::CreateProject(_) => matches!(tier, Tier::T1User | Tier::T2Client | Tier::T3Sidecar),
         Proposal::AddSources(_) => matches!(tier, Tier::T1User | Tier::T2Client),
@@ -294,7 +295,7 @@ mod tests {
             let t3 = allowed(Tier::T3Sidecar, &proposal);
             match kind {
                 "buildDocMap" => assert!(t1 && t2 && !t3, "{kind}"),
-                "queryDocMap" => assert!(t1 && t2 && t3, "{kind}"),
+                "queryDocMap" | "readPassages" => assert!(t1 && t2 && t3, "{kind}"),
                 other => panic!("unexpected docmap kind {other}"),
             }
         }
@@ -397,6 +398,10 @@ mod tests {
             (
                 r#"{"kind":"queryDocMap","proposalId":"q","docKey":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","query":"refund"}"#,
                 "queryDocMap",
+            ),
+            (
+                r#"{"kind":"readPassages","proposalId":"r","docKey":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
+                "readPassages",
             ),
         ];
         LINES

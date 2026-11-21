@@ -19,6 +19,7 @@ pub(crate) const MAX_PASSAGE_CHARS: usize = 2000;
 pub(crate) const MAX_PASSAGES: usize = 2000;
 const DEFAULT_K: usize = 5;
 const MAX_K: u32 = 20;
+const READ_PAGE: usize = 20;
 
 #[derive(Clone)]
 struct Passage {
@@ -192,6 +193,32 @@ impl DocMap {
         Ok(out)
     }
 
+    /// File order from `since`. At most 20. `next` is the following index when more remain.
+    /// No score, and this does not write.
+    pub fn read_page(&self, tier: Tier, doc_key: &str, since: Option<u64>, limit: Option<u32>) -> Result<Value, String> {
+        if !matches!(tier, Tier::T1User | Tier::T2Client | Tier::T3Sidecar) {
+            return Err("not_allowed_for_tier:readPassages".to_string());
+        }
+        let start = match since {
+            None => 0usize,
+            Some(n) => usize::try_from(n).map_err(|_| "schema".to_string())?,
+        };
+        let page = match limit {
+            None => READ_PAGE,
+            Some(0) => return Err("schema".to_string()),
+            Some(n) => (n as usize).min(READ_PAGE),
+        };
+        let all = self.read_passages(doc_key)?;
+        let taken = if start >= all.len() { 0 } else { page.min(all.len() - start) };
+        let passages: Vec<Value> = all.iter().skip(start).take(taken).map(indexed_value).collect();
+        let mut detail = json!({ "docKey": doc_key, "passages": passages });
+        let next = start.saturating_add(taken);
+        if next < all.len() {
+            detail["next"] = json!(next);
+        }
+        Ok(detail)
+    }
+
     /// Writes the passage files when this docKey is new. An existing map is left as it is.
     pub fn write_if_absent(&mut self, key: &str, kind_name: &str, passages: &[IndexedPassage]) -> Result<(), String> {
         if !valid_doc_key(key) {
@@ -222,8 +249,22 @@ pub fn route_docmap(proposal: &Proposal, tier: Tier, map: &mut DocMap) -> Option
             Ok(detail) => ProposalResult::ok(&body.proposal_id, Some(detail)),
             Err(message) => ProposalResult::err(&body.proposal_id, message),
         }),
+        Proposal::ReadPassages(body) => Some(match map.read_page(tier, &body.doc_key, body.since, body.limit) {
+            Ok(detail) => ProposalResult::ok(&body.proposal_id, Some(detail)),
+            Err(message) => ProposalResult::err(&body.proposal_id, message),
+        }),
         _ => None,
     }
+}
+
+fn indexed_value(passage: &IndexedPassage) -> Value {
+    json!({
+        "passageId": passage.passage_id,
+        "text": passage.text,
+        "page": passage.page,
+        "line": passage.line,
+        "headingPath": passage.heading_path,
+    })
 }
 
 fn passage_value(passage: &Passage) -> Value {
@@ -1040,6 +1081,67 @@ mod tests {
         assert_eq!(passages[2].page, Some(2));
         assert_eq!(passages[2].line, 1);
         assert_eq!(passages[2].text, "next");
+    }
+
+    #[test]
+    fn read_passages_is_file_order_and_the_query_stays_a_score() {
+        let dir = scratch("read");
+        let mut body = String::new();
+        for n in 0..24 {
+            body.push_str(&format!("alpha row {n}\n"));
+        }
+        body.push_str("alpha refund refund\n");
+        let file = write_file(&dir, "note.txt", body.as_bytes());
+        let mut map = DocMap::new(dir.join("maps"));
+        let built = build_file(&mut map, &file);
+        let key = built["docKey"].as_str().unwrap().to_string();
+        let stored = fs::read(dir.join("maps").join(&key).join("passages.jsonl")).unwrap();
+
+        let first = parse(&format!(r#"{{"kind":"readPassages","proposalId":"r","docKey":"{key}"}}"#));
+        let result = route_docmap(&first, Tier::T3Sidecar, &mut map).unwrap();
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        let detail = result.detail.unwrap();
+        let passages = detail["passages"].as_array().unwrap();
+        assert_eq!(passages.len(), 20);
+        assert_eq!(passages[0]["text"], "alpha row 0");
+        assert_eq!(passages[0]["line"], 1);
+        assert!(passages.iter().all(|row| row.get("score").is_none()));
+        assert_eq!(detail["next"], 20);
+        assert_eq!(fs::read(dir.join("maps").join(&key).join("passages.jsonl")).unwrap(), stored);
+
+        let second = parse(&format!(
+            r#"{{"kind":"readPassages","proposalId":"r2","docKey":"{key}","since":20,"limit":100}}"#
+        ));
+        let rest = route_docmap(&second, Tier::T1User, &mut map).unwrap();
+        let tail = rest.detail.unwrap();
+        let rows = tail["passages"].as_array().unwrap();
+        assert_eq!(rows.len(), 5);
+        assert_eq!(rows[0]["text"], "alpha row 20");
+        assert_eq!(rows[4]["text"], "alpha refund refund");
+        assert!(tail.get("next").is_none());
+
+        let past = parse(&format!(r#"{{"kind":"readPassages","proposalId":"r3","docKey":"{key}","since":40}}"#));
+        let empty = route_docmap(&past, Tier::T2Client, &mut map).unwrap();
+        let none = empty.detail.unwrap();
+        assert!(none["passages"].as_array().unwrap().is_empty());
+        assert!(none.get("next").is_none());
+
+        let query = parse(&format!(
+            r#"{{"kind":"queryDocMap","proposalId":"q","docKey":"{key}","query":"alpha refund","k":20}}"#
+        ));
+        let found = route_docmap(&query, Tier::T2Client, &mut map).unwrap();
+        let hits = found.detail.unwrap()["passages"].as_array().unwrap().clone();
+        assert_eq!(hits.len(), 20);
+        assert!(hits[0]["text"].as_str().unwrap().contains("refund"));
+        assert!(hits[0].get("score").is_some());
+
+        let zero = parse(&format!(r#"{{"kind":"readPassages","proposalId":"z","docKey":"{key}","limit":0}}"#));
+        assert_eq!(route_docmap(&zero, Tier::T1User, &mut map).unwrap().error.as_deref(), Some("schema"));
+        let escaped = parse(r#"{"kind":"readPassages","proposalId":"e","docKey":"../secret"}"#);
+        assert_eq!(route_docmap(&escaped, Tier::T1User, &mut map).unwrap().error.as_deref(), Some("schema"));
+        assert!(!include_str!("overlay.rs").contains("readPassages"));
+        assert_eq!(fs::read(dir.join("maps").join(&key).join("passages.jsonl")).unwrap(), stored);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     fn fn_body(src: &str, name: &str) -> String {

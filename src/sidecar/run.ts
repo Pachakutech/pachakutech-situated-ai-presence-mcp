@@ -5,6 +5,7 @@ import { createConnection } from "node:net";
 import { presenceSocketPath, readSidecarConfig, sidecarSocketPath } from "./config.ts";
 import { completeUser, DEFAULT_JUDGEMENT, judge, releaseCompletion, tryAcquireCompletion } from "./judge.ts";
 import { draftUserText, mapModelObject, parseModelContent, type MapContext, type ProposalLine } from "./map.ts";
+import { listenSidecar, type ListenIo } from "./listen.ts";
 import { retrieveJob } from "./retrieve.ts";
 
 const OBSERVE_GAP_MS = 50;
@@ -34,7 +35,8 @@ export interface SidecarIo {
   readStdin?: () => Promise<string>;
 }
 
-export async function sidecarCommand(args: string[], io: SidecarIo = {}): Promise<number> {
+export async function sidecarCommand(args: string[], io: SidecarIo & ListenIo = {}): Promise<number> {
+  if (args.length === 1 && args[0] === "listen") return listenSidecar(io);
   const log = logger(io);
   let raw: string;
   try {
