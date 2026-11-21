@@ -108,6 +108,7 @@ Unknown keys are ignored. `decision`, `skip`, `accept`, `deny`, `keep`, `keeps`,
 | BR3 | `postMessage` into the page |
 | BR4 | The richer collector, the toolbar status, reconnect |
 | `sidecar_representation.md` | The account field, and the socket shape that stores the checked spans. This ticket asks for the proposals and holds them |
+| `B1c_compile.md` | The process that binds `sidecar-jobs.sock` and answers the compile line. This host writes the line and waits |
 | The daemon's `sidecar.sock` | T3. The compile job uses `sidecar-jobs.sock`, which the sidecar process binds |
 | `tour_confirm.md` | `confirmTour`. The popup tells the user the tour is waiting for `presence tour-start` |
 | C12 | Export |

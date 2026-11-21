@@ -6,13 +6,7 @@ import { dirname, join } from "node:path";
 export const CROP_FLOOR = 384;
 export const CROP_LONG_MAX_DEFAULT = 1024;
 
-/** Presence socket from the passed env. Blank overrides are unset. */
-export function presenceSocketPath(env: NodeJS.ProcessEnv = process.env): string {
-  const over = env.PRESENCE_DAEMON_SOCKET;
-  if (over && over.length > 0) return over;
-  const runtime = env.XDG_RUNTIME_DIR && env.XDG_RUNTIME_DIR.length > 0 ? env.XDG_RUNTIME_DIR : "/tmp";
-  return join(runtime, "pachakutech", "presence.sock");
-}
+export { presenceSocketPath } from "../reach.ts";
 
 /** `PRESENCE_SIDECAR_SOCKET`, otherwise the sibling `sidecar.sock` of the presence socket. */
 export function sidecarSocketPath(presenceSocket: string, env: NodeJS.ProcessEnv = process.env): string {
@@ -74,9 +68,19 @@ export function readSidecarConfig(env: NodeJS.ProcessEnv): SidecarConfig {
   };
 }
 
-/** `GET {base}/v1/models`. A trailing slash, or a trailing `/v1`, is not doubled. */
-export function modelsUrl(endpoint: string): string {
+/** Strip a trailing slash and one trailing `/v1` so the suffix is not doubled. */
+function endpointBase(endpoint: string): string {
   let base = endpoint.trim().replace(/\/+$/, "");
   if (base.endsWith("/v1")) base = base.slice(0, -3);
-  return `${base}/v1/models`;
+  return base;
+}
+
+/** `GET {base}/v1/models`. A trailing slash, or a trailing `/v1`, is not doubled. */
+export function modelsUrl(endpoint: string): string {
+  return `${endpointBase(endpoint)}/v1/models`;
+}
+
+/** `POST {base}/v1/chat/completions`. The same base rule as `modelsUrl`. */
+export function completionsUrl(endpoint: string): string {
+  return `${endpointBase(endpoint)}/v1/chat/completions`;
 }

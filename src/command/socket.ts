@@ -11,6 +11,8 @@ export function commandSocketPath(presenceSocket: string, env: NodeJS.ProcessEnv
   return join(dirname(presenceSocket), "command.sock");
 }
 
+export { sidecarSocketPath } from "../sidecar/config.ts";
+
 export interface CommandReply {
   status: string;
   error?: string;

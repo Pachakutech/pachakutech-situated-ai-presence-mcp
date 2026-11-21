@@ -17,12 +17,13 @@ import { noteCommand } from "./command/note.js";
 import { docmapProposal } from "./command/docmap.js";
 import { tourStartCommand } from "./command/tourStart.js";
 import { runLedger } from "./command/ledger.js";
-import { commandSocketPath, connectCommand, openCommand } from "./command/socket.js";
+import { commandSocketPath, connectCommand, openCommand, sidecarSocketPath } from "./command/socket.js";
 import { sendProposal, socketReachable, startDaemon, statusDaemon, stopDaemon } from "./daemonControl.js";
 import { cueFollowMain } from "./locate/cues.js";
 import { tourDriveCommand } from "./locate/driveTour.js";
 import { fuseCommand, locateCommand, screenTextCommand } from "./locate/run.js";
 import { sidecarReport } from "./sidecar/doctor.js";
+import { sidecarCommand } from "./sidecar/run.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SERVER_ENTRY = join(__dirname, "index.js");
@@ -102,6 +103,9 @@ function usage(): never {
       "                       Send the user's words as addNote on command.sock.",
       "                       Enter commits. Esc, Ctrl-C, and Ctrl-D discard.",
       "                       --editor uses $EDITOR on a 0600 temp file.",
+      "  sidecar [json]",
+      "                       One local-model job from the argument or from stdin, then exit.",
+      "                       judge prints a judgement. draft and map print one reply per line.",
       "  stop <id>            Stop that presence's speech; face returns to neutral",
       "  retire <id>          End the presence, hide its avatar, free its slot",
       "                       The doubled form still works: presence presence speak <id> <text>",
@@ -487,6 +491,11 @@ switch (command) {
         writer: { write: (body) => connectCommand(commandPath, body) },
       }),
     );
+    break;
+  }
+  case "sidecar": {
+    const sidecarPath = sidecarSocketPath(socketPath(), process.env);
+    process.exit(await sidecarCommand(process.argv.slice(3), { env: process.env, socketPath: sidecarPath }));
     break;
   }
   default:
