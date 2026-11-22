@@ -11,10 +11,11 @@ import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { getBundledDaemonPath } from "./daemonBinary.js";
-import { socketPath } from "./daemonClient.js";
+import { DaemonClient, socketPath } from "./daemonClient.js";
 import { askCommand } from "./command/ask.js";
 import { noteCommand } from "./command/note.js";
 import { docmapProposal } from "./command/docmap.js";
+import { showCitationsCommand } from "./command/showCitations.js";
 import { tourStartCommand } from "./command/tourStart.js";
 import { runLedger } from "./command/ledger.js";
 import { commandSocketPath, connectCommand, openCommand, sidecarSocketPath } from "./command/socket.js";
@@ -49,6 +50,10 @@ function usage(): never {
       "  speak <id> <text>    That presence speaks: local TTS, audio, synced mouth",
       "  highlight <id> <u> <v> <w> <h> [seconds]",
       "                       Tint that UV box (top-left, v down, 0..1). Default 5s, max 360",
+      "  show-citations [json]",
+      "                       Call showCitations and stop at awaitingStart.",
+      "                       The JSON is the argument, a file path, or stdin.",
+      "                       Does not confirm and does not open a window.",
       "  tour-drive <projectId> [--presence <id>]",
       "                       Poll the parked source and open that window.",
       "                       Does not press Start and does not create a project.",
@@ -425,6 +430,13 @@ switch (command) {
       }),
     );
   }
+  case "show-citations":
+    process.exit(
+      await showCitationsCommand(process.argv.slice(3), {
+        connect: async () => new DaemonClient(socketPath()),
+      }),
+    );
+    break;
   case "locate":
     process.exit(await locateCommand(process.argv.slice(3)));
     break;

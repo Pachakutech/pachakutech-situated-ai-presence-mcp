@@ -8,7 +8,7 @@ The counted tour is the one on 10 November 2026. Project `pj-093c536f2492060a`, 
 
 ## What the frontier still sends
 
-The model writes the claim, the quote, and one or two sentences of narration. That writing is the job either way. `showCitations` takes it and does not take a page.
+The model writes the claim, the quote, and one or two sentences of narration. That writing is the job either way. `showCitations` takes it and does not take a page. The call itself is `docs/start_the_tour.md`. Reading the daemon, the mapper, or the page HTML to discover that call is the spend this card is there to skip.
 
 Counted from the loci that tour stored:
 
