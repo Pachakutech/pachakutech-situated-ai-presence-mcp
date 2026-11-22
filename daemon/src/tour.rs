@@ -2,6 +2,7 @@
 //! The locate modules open the window this module names. This module does not
 //! read a screen buffer and does not spawn a viewer.
 
+use crate::document_arrows::{arrow_hotkey, Arrow};
 use crate::gate::Tier;
 use crate::ledger::Ledger;
 use crate::project::{Cursor, Locus, MatchKind, Project, ProjectStore, Source, SourceKind, SourceStatus, StoreError};
@@ -893,6 +894,47 @@ fn park_later(desk: &mut TourDesk, store: &mut ProjectStore, after: &str, now_ms
     Ok(())
 }
 
+/// Previous and next documents while the tour is running. Anything else is neither.
+pub fn document_neighbors(desk: &TourDesk, store: &ProjectStore) -> (bool, bool) {
+    let Some(active) = desk.active.as_ref() else {
+        return (false, false);
+    };
+    if active.phase != Phase::Active {
+        return (false, false);
+    }
+    let Some(project) = store.get(&active.project_id) else {
+        return (false, false);
+    };
+    let current = project.cursor.source_index as usize;
+    let current_id = project.sources.get(current).map(|source| source.source_id.as_str());
+    let Some(pos) = current_id.and_then(|id| active.source_ids.iter().position(|item| item == id)) else {
+        return (false, false);
+    };
+    (pos > 0, pos + 1 < active.source_ids.len())
+}
+
+/// A bubble click that is allowed to change the document. The note field closes because the page leaves.
+pub fn apply_arrow_step(
+    desk: &mut TourDesk,
+    store: &mut ProjectStore,
+    book: &mut TaskBook,
+    ledger: &mut Ledger,
+    opener: &mut dyn SourceOpener,
+    which: Arrow,
+    now_ms: u64,
+) -> bool {
+    let (prev, next) = document_neighbors(desk, store);
+    let allowed = match which {
+        Arrow::Back => prev,
+        Arrow::Forward => next,
+    };
+    if !allowed {
+        return false;
+    }
+    book.close_row_for_document_leave(ledger, now_ms);
+    on_hotkey(desk, store, book, ledger, opener, arrow_hotkey(which), now_ms)
+}
+
 fn move_source(
     desk: &mut TourDesk,
     store: &mut ProjectStore,
@@ -1419,6 +1461,81 @@ mod tests {
             .iter()
             .map(|item| item["query"].as_str().unwrap().to_string())
             .collect()
+    }
+
+    #[test]
+    fn document_arrow_steps_the_source_and_the_note_back_icon_does_not() {
+        use crate::control_row::Px as RowPx;
+        use crate::document_arrows::{arrow_hotkey, Arrow};
+        let mut scratch = bench("arrows");
+        let id = project(
+            &mut scratch.store,
+            &[
+                SourceInput { kind: SourceKind::Web, reference: "https://example.com/a".into() },
+                SourceInput { kind: SourceKind::Web, reference: "https://other.example/b".into() },
+            ],
+        );
+        let first = put(&mut scratch.store, &id, "sr-1", "alpha passage", MatchKind::Exact, None, None, 0);
+        put(&mut scratch.store, &id, "sr-2", "beta passage", MatchKind::Exact, None, None, 0);
+        let mut book = TaskBook::new();
+        let mut ledger = Ledger::new();
+        let mut desk = TourDesk::default();
+        let mut opener = Rec::new();
+        let started = go(&mut scratch, &mut book, &mut ledger, &mut desk, &mut opener, &id, Tier::T1User, 0);
+        let task_id = started.detail.unwrap()["taskId"].as_str().unwrap().to_string();
+        book.begin_task(&task_id, &mut ledger, 1).unwrap();
+        assert_ne!(arrow_hotkey(Arrow::Back), Hotkey::Back);
+        assert_eq!(document_neighbors(&desk, &scratch.store), (false, true));
+        assert!(!apply_arrow_step(
+            &mut desk,
+            &mut scratch.store,
+            &mut book,
+            &mut ledger,
+            &mut opener,
+            Arrow::Back,
+            MOVE_WAIT_MS
+        ));
+        assert_eq!(scratch.store.get(&id).unwrap().cursor.source_index, 0);
+        assert!(book.handle_ui(&mut ledger, UiEvent::Hotkey(Hotkey::Back), MOVE_WAIT_MS));
+        assert_eq!(scratch.store.get(&id).unwrap().cursor.source_index, 0);
+        assert_eq!(book.query_value(&task_id).unwrap()["index"], 0);
+
+        book.row_enter(&first, RowPx { x: 400, y: 300, w: 200, h: 40 }, None, 1_000, &mut ledger);
+        click_note(&mut book, &mut ledger, 1_000);
+        assert!(book.row_editor_open());
+        book.row_type("kept", &mut ledger, 1_000);
+        book.row_back(&mut ledger, 1_100);
+        assert!(!book.row_editor_open());
+        assert_eq!(scratch.store.get(&id).unwrap().cursor.source_index, 0);
+
+        book.row_enter(&first, RowPx { x: 400, y: 300, w: 200, h: 40 }, None, 2_000, &mut ledger);
+        click_note(&mut book, &mut ledger, 2_000);
+        book.row_type("again", &mut ledger, 2_000);
+        assert!(book.row_editor_open());
+        let before = ledger.events().len();
+        assert!(apply_arrow_step(
+            &mut desk,
+            &mut scratch.store,
+            &mut book,
+            &mut ledger,
+            &mut opener,
+            Arrow::Forward,
+            MOVE_WAIT_MS
+        ));
+        assert!(!book.row_editor_open());
+        assert_eq!(scratch.store.get(&id).unwrap().cursor.source_index, 1);
+        assert_eq!(book.query_value(&task_id).unwrap()["state"], "dismissed");
+        assert!(ledger.events()[before..].iter().all(|ev| {
+            !matches!(ev.kind, LedgerKind::Skip | LedgerKind::Accept | LedgerKind::Deny)
+        }));
+    }
+
+    fn click_note(book: &mut TaskBook, ledger: &mut Ledger, now: u64) {
+        use crate::control_row::RowHit;
+        let paint = book.row_paint(1920, 1080).expect("row");
+        let rect = paint.squares.iter().find(|(hit, _)| *hit == RowHit::Note).expect("note").1;
+        book.row_press_at(rect.x + 2, rect.y + 2);
+        book.row_release_at(rect.x + 2, rect.y + 2, ledger, now);
     }
 
     #[test]

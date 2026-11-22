@@ -70,6 +70,9 @@ pub fn allowed(tier: Tier, proposal: &Proposal) -> bool {
         Proposal::ReportSourceOpen(_) => matches!(tier, Tier::T1User | Tier::T2Client),
         Proposal::ConfirmTour(_) => matches!(tier, Tier::T1User),
         Proposal::AddNote(_) | Proposal::DeleteNote(_) => matches!(tier, Tier::T1User),
+        // The driver reports the scroll ends. The click has no socket: T0 posts it on the overlay.
+        Proposal::ReportDocEdge(_) => matches!(tier, Tier::T2Client),
+        Proposal::DocumentArrow(_) => false,
     }
 }
 
@@ -323,6 +326,36 @@ mod tests {
                 "addNote" | "deleteNote" => assert!(t1 && !t2 && !t3, "{kind}"),
                 other => panic!("unexpected note kind {other}"),
             }
+        }
+    }
+
+    #[test]
+    fn document_arrow_is_refused_on_the_model_sockets() {
+        let proposal: Proposal = serde_json::from_str(
+            r#"{"kind":"documentArrow","proposalId":"a","direction":"forward"}"#,
+        )
+        .unwrap();
+        assert_eq!(proposal.kind_name(), "documentArrow");
+        for tier in [Tier::T0Physical, Tier::T1User, Tier::T2Client, Tier::T3Sidecar] {
+            assert!(!allowed(tier, &proposal), "{tier:?}");
+            let message = check(tier, &proposal).unwrap_err().error.expect("error string");
+            assert_eq!(message, "not_allowed_for_tier:documentArrow");
+        }
+    }
+
+    #[test]
+    fn document_arrow_report_is_allowed_for_the_driver() {
+        let proposal: Proposal = serde_json::from_str(
+            r#"{"kind":"reportDocEdge","proposalId":"e","surface":"web","scrollTop":0,"scrollHeight":4000,"clientHeight":900}"#,
+        )
+        .unwrap();
+        assert_eq!(proposal.kind_name(), "reportDocEdge");
+        assert!(allowed(Tier::T2Client, &proposal));
+        assert!(check(Tier::T2Client, &proposal).is_ok());
+        for tier in [Tier::T0Physical, Tier::T1User, Tier::T3Sidecar] {
+            assert!(!allowed(tier, &proposal), "{tier:?}");
+            let message = check(tier, &proposal).unwrap_err().error.expect("error string");
+            assert_eq!(message, "not_allowed_for_tier:reportDocEdge");
         }
     }
 

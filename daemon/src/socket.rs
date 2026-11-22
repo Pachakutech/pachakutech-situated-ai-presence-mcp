@@ -179,6 +179,18 @@ impl SocketServer {
         self.registry.lock().expect("registry mutex poisoned").row_paint(screen_w, screen_h)
     }
 
+    /// Bubble samples already carry screen pixels. Applied before the arrows are painted.
+    pub fn apply_arrow_input(&self, input: Vec<crate::document_arrows::ArrowInput>, screen_w: i32, screen_h: i32) {
+        if input.is_empty() {
+            return;
+        }
+        self.registry.lock().expect("registry mutex poisoned").apply_arrow_input(input, screen_w, screen_h, now_ms());
+    }
+
+    pub fn arrow_paint(&self, screen_w: i32, screen_h: i32) -> Vec<crate::document_arrows::BubblePaint> {
+        self.registry.lock().expect("registry mutex poisoned").arrow_paint(screen_w, screen_h)
+    }
+
     pub fn row_held_phrase(&self) -> Option<String> {
         self.registry.lock().expect("registry mutex poisoned").row_held_phrase()
     }
@@ -672,6 +684,14 @@ fn dispatch(
         | Proposal::ReportSourceOpen(_)
         | Proposal::ConfirmTour(_) => ProposalResult::err(&proposal_id, "unrouted project proposal"),
         Proposal::AddNote(_) | Proposal::DeleteNote(_) => ProposalResult::err(&proposal_id, "unrouted note proposal"),
+        Proposal::ReportDocEdge(body) => {
+            reg.note_doc_edge(crate::document_arrows::edge_from_report(&body));
+            ProposalResult::ok(&proposal_id, None)
+        }
+        Proposal::DocumentArrow(body) => {
+            let _ = &body.direction;
+            ProposalResult::err(&proposal_id, "not_allowed_for_tier:documentArrow")
+        }
     };
     (result, false)
 }

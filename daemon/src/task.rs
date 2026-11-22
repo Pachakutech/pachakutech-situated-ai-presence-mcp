@@ -616,6 +616,14 @@ impl TaskBook {
         self.row_scroll = true;
     }
 
+    /// The document is leaving. Flush the note the way a scroll does, then hide the buttons.
+    /// The highlight stays. This does not set `row_scroll`.
+    pub fn close_row_for_document_leave(&mut self, ledger: &mut Ledger, now_ms: u64) {
+        if let Some(flush) = self.row.scroll() {
+            self.store_flush(ledger, flush, now_ms);
+        }
+    }
+
     pub fn row_is_open(&self) -> bool {
         self.row.is_open()
     }

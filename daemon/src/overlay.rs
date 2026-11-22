@@ -55,6 +55,7 @@ use wayland_protocols_wlr::screencopy::v1::client::{
     zwlr_screencopy_frame_v1, zwlr_screencopy_manager_v1,
 };
 
+mod arrow_surface;
 mod row_surface;
 
 const OVERLAY_VERT_SPV: &[u8] =
@@ -128,6 +129,11 @@ pub struct OverlayState {
     row: Option<row_surface::RowSlot>,
     row_input: Vec<crate::control_row::RowInput>,
     on_row: bool,
+    /// Document arrows. Their input region is the bubble, in `arrow_surface`.
+    arrow_back: Option<arrow_surface::BubbleSlot>,
+    arrow_forward: Option<arrow_surface::BubbleSlot>,
+    arrow_input: Vec<crate::document_arrows::ArrowInput>,
+    on_arrow: bool,
     pointer_xy: (f64, f64),
     pointer_origin: (i32, i32),
     row_shift: u8,
@@ -260,6 +266,10 @@ impl Overlay {
             row: None,
             row_input: Vec::new(),
             on_row: false,
+            arrow_back: None,
+            arrow_forward: None,
+            arrow_input: Vec::new(),
+            on_arrow: false,
             pointer_xy: (0.0, 0.0),
             pointer_origin: (0, 0),
             row_shift: 0,
@@ -577,6 +587,10 @@ impl Overlay {
         std::mem::take(&mut self.state.row_input)
     }
 
+    fn take_arrow_input(&mut self) -> Vec<crate::document_arrows::ArrowInput> {
+        std::mem::take(&mut self.state.arrow_input)
+    }
+
     fn sync_row(&mut self, paint: Option<crate::control_row::Paint>) {
         let qh = self.event_queue.handle();
         row_surface::sync(&mut self.state, &qh, paint.as_ref());
@@ -592,6 +606,18 @@ impl Overlay {
                 row_surface::paint_now(&mut self.state, &qh, paint);
             }
         }
+    }
+
+    fn sync_arrows(&mut self, paints: Vec<crate::document_arrows::BubblePaint>) {
+        let qh = self.event_queue.handle();
+        arrow_surface::sync(&mut self.state, &qh, &paints);
+        if arrow_surface::waiting(&self.state) {
+            if let Err(e) = self.event_queue.roundtrip(&mut self.state) {
+                eprintln!("[highlight] arrow configure: {e}");
+            }
+        }
+        let qh = self.event_queue.handle();
+        arrow_surface::paint_now(&mut self.state, &qh, &paints);
     }
 
     /// One Top-layer surface per visible box. An empty list removes them.
@@ -1105,9 +1131,18 @@ impl Dispatch<wl_pointer::WlPointer, ()> for OverlayState {
         match event {
             wl_pointer::Event::Enter { surface, surface_x, surface_y, .. } => {
                 state.pointer_xy = (surface_x, surface_y);
-                if row_surface::is_row(state, &surface) {
+                if let Some(which) = arrow_surface::which(state, &surface) {
+                    state.pointer_on = None;
+                    state.on_row = false;
+                    state.on_arrow = true;
+                    state.pointer_origin = arrow_surface::origin(state, which);
+                    let x = state.pointer_origin.0 + surface_x as i32;
+                    let y = state.pointer_origin.1 + surface_y as i32;
+                    state.arrow_input.push(crate::document_arrows::ArrowInput::Pointer { x, y });
+                } else if row_surface::is_row(state, &surface) {
                     state.pointer_on = None;
                     state.on_row = true;
+                    state.on_arrow = false;
                     if let Some(row) = state.row.as_ref() {
                         state.pointer_origin = (row.origin_x, row.origin_y);
                     }
@@ -1125,17 +1160,26 @@ impl Dispatch<wl_pointer::WlPointer, ()> for OverlayState {
                     });
                 } else {
                     state.on_row = false;
+                    state.on_arrow = false;
                     state.pointer_on = None;
                 }
             }
             wl_pointer::Event::Leave { .. } => {
                 state.pointer_on = None;
                 state.on_row = false;
+                if state.on_arrow {
+                    state.arrow_input.push(crate::document_arrows::ArrowInput::Leave);
+                }
+                state.on_arrow = false;
                 state.row_input.push(crate::control_row::RowInput::Pointer { inside: false });
             }
             wl_pointer::Event::Motion { surface_x, surface_y, .. } => {
                 state.pointer_xy = (surface_x, surface_y);
-                if state.pointer_on.is_some() || state.on_row {
+                if state.on_arrow {
+                    let x = state.pointer_origin.0 + surface_x as i32;
+                    let y = state.pointer_origin.1 + surface_y as i32;
+                    state.arrow_input.push(crate::document_arrows::ArrowInput::Pointer { x, y });
+                } else if state.pointer_on.is_some() || state.on_row {
                     state.row_input.push(crate::control_row::RowInput::Motion);
                 }
             }
@@ -1147,6 +1191,18 @@ impl Dispatch<wl_pointer::WlPointer, ()> for OverlayState {
                 }
                 let x = state.pointer_origin.0 + state.pointer_xy.0 as i32;
                 let y = state.pointer_origin.1 + state.pointer_xy.1 as i32;
+                // A press on a document arrow is that bubble. It is not a tint sample.
+                if state.on_arrow {
+                    if button != crate::task::BTN_LEFT {
+                        return;
+                    }
+                    if down {
+                        state.arrow_input.push(crate::document_arrows::ArrowInput::Press { x, y });
+                    } else {
+                        state.arrow_input.push(crate::document_arrows::ArrowInput::Release { x, y });
+                    }
+                    return;
+                }
                 // A press on the row is that square. It is not also a tint sample.
                 if state.on_row {
                     if button != crate::task::BTN_LEFT {
@@ -3312,6 +3368,7 @@ pub fn run(
         server.apply_tint_samples(samples);
         let (screen_w, screen_h) = overlay.output_size();
         server.apply_row_input(overlay.take_row_input(), screen_w as i32, screen_h as i32);
+        server.apply_arrow_input(overlay.take_arrow_input(), screen_w as i32, screen_h as i32);
         if overlay.take_dirty() {
             let extent = overlay.extent();
             if extent.width != gpu.extent.width || extent.height != gpu.extent.height {
@@ -3351,9 +3408,11 @@ pub fn run(
         };
         if hide {
             overlay.sync_row(None);
+            overlay.sync_arrows(Vec::new());
         } else {
             let (screen_w, screen_h) = overlay.output_size();
             overlay.sync_row(server.row_paint(screen_w as i32, screen_h as i32));
+            overlay.sync_arrows(server.arrow_paint(screen_w as i32, screen_h as i32));
         }
         gpu.set_heat_marks(mark_rects);
 

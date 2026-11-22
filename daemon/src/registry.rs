@@ -6,6 +6,7 @@ use crate::actors::gpu_layout::to_gpu_splat;
 use crate::actors::{ControlActor, PresenceActor, SceneMemory};
 use crate::gate::Tier;
 use crate::control_row::{Paint, Px as RowPx, RowInput};
+use crate::document_arrows::{ArrowInput, BubblePaint, DocumentArrows, EdgeRead};
 use crate::highlight::{InterestBook, UvBox, MAX_SECS};
 use crate::docmap::DocMap;
 use crate::ledger::Ledger;
@@ -51,6 +52,8 @@ pub struct Registry {
     docmap: DocMap,
     /// The project tour for this run. The cursor itself lives on the project.
     tour: TourDesk,
+    /// Ends of the open document, and which neighbor documents exist.
+    arrows: DocumentArrows,
     /// Descriptors for the map worker. Prepare runs on that thread.
     map_inbox: MapInbox,
 }
@@ -74,6 +77,7 @@ impl Registry {
             tasks: TaskBook::new(),
             docmap: DocMap::new(crate::docmap::docmap_root_from_env()),
             tour: TourDesk::default(),
+            arrows: DocumentArrows::new(),
             map_inbox: MapInbox::open(),
         }
     }
@@ -307,6 +311,67 @@ impl Registry {
 
     pub fn note_row_scroll(&mut self) {
         self.tasks.note_row_scroll();
+    }
+
+    pub fn note_doc_edge(&mut self, read: EdgeRead) {
+        self.arrows.note_read(read);
+    }
+
+    fn refresh_arrow_neighbors(&mut self) {
+        let pair = self
+            .ledger
+            .projects()
+            .map(|store| crate::tour::document_neighbors(&self.tour, store))
+            .unwrap_or((false, false));
+        self.arrows.note_neighbors(pair.0, pair.1);
+    }
+
+    /// Bubble samples. A release on the pressed bubble steps the source. A slide off does not.
+    pub fn apply_arrow_input(&mut self, input: Vec<ArrowInput>, screen_w: i32, screen_h: i32, now_ms: u64) {
+        if input.is_empty() {
+            return;
+        }
+        self.refresh_arrow_neighbors();
+        for ev in input {
+            match ev {
+                ArrowInput::Pointer { x, y } => self.arrows.hover_at(x, y, screen_w, screen_h),
+                ArrowInput::Leave => self.arrows.leave(),
+                ArrowInput::Press { x, y } => self.arrows.press_at(x, y, screen_w, screen_h),
+                ArrowInput::Release { x, y } => {
+                    let which = self.arrows.release_at(x, y, screen_w, screen_h);
+                    if let Some(which) = which {
+                        self.step_from_arrow(which, now_ms);
+                    }
+                }
+            }
+        }
+    }
+
+    fn step_from_arrow(&mut self, which: crate::document_arrows::Arrow, now_ms: u64) -> bool {
+        let Some(mut store) = self.ledger.take_projects() else {
+            return false;
+        };
+        let mut opener = crate::tour::ParkOpener;
+        let stepped = crate::tour::apply_arrow_step(
+            &mut self.tour,
+            &mut store,
+            &mut self.tasks,
+            &mut self.ledger,
+            &mut opener,
+            which,
+            now_ms,
+        );
+        if stepped {
+            self.arrows.note_read(EdgeRead::Failed);
+        }
+        self.ledger.give_projects(store);
+        self.refresh_arrow_neighbors();
+        stepped
+    }
+
+    pub fn arrow_paint(&mut self, screen_w: i32, screen_h: i32) -> Vec<BubblePaint> {
+        self.refresh_arrow_neighbors();
+        self.arrows.bubbles(screen_w, screen_h)
     }
 
     pub fn row_paint(&self, screen_w: i32, screen_h: i32) -> Option<Paint> {
@@ -1346,5 +1411,175 @@ mod tests {
         reg.tick_tasks(3_050);
         assert!(!reg.task_book().row_is_open());
         assert!(reg.row_hold_json().is_none());
+    }
+
+    #[test]
+    fn document_arrow_click_leaves_the_interest() {
+        use crate::document_arrows::{Arrow, ArrowInput, EdgeRead};
+        use crate::highlight::UvBox;
+        use crate::project::SourceStatus;
+        use crate::task::MOVE_WAIT_MS;
+        use std::time::Instant;
+
+        let mut idle = Registry::new();
+        idle.note_doc_edge(EdgeRead::Web { scroll_top: 4100.0, scroll_height: 5000.0, client_height: 900.0 });
+        assert!(idle.arrow_paint(1920, 1080).is_empty());
+        idle.apply_arrow_input(
+            vec![ArrowInput::Press { x: 1854, y: 1014 }, ArrowInput::Release { x: 1854, y: 1014 }],
+            1920,
+            1080,
+            1,
+        );
+        assert!(idle.arrow_paint(1920, 1080).is_empty());
+
+        let root = std::env::temp_dir().join(format!("presence-arrow-reg-{}-{}", std::process::id(), line!()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut reg = Registry::new();
+        reg.open_projects(&root.join("projects")).unwrap();
+        let create = json!({
+            "kind": "createProject",
+            "proposalId": "c",
+            "title": "Arrows",
+            "asks": [{ "text": "Is X supported?", "kind": "question" }],
+            "sources": [
+                { "url": "https://example.com/a" },
+                { "url": "https://example.com/b" },
+            ],
+        });
+        let proposal: Proposal = serde_json::from_value(create).unwrap();
+        let created = reg.route_project_proposal(&proposal, Tier::T1User, 1).unwrap();
+        assert_eq!(created.status, "ok", "{:?}", created.error);
+        let id = created.detail.unwrap()["projectId"].as_str().unwrap().to_string();
+        let source_ids: Vec<String> = reg
+            .projects_mut()
+            .unwrap()
+            .get(&id)
+            .unwrap()
+            .sources
+            .iter()
+            .map(|source| source.source_id.clone())
+            .collect();
+        assert_eq!(source_ids, vec!["sr-1".to_string(), "sr-2".to_string()]);
+        for source_id in &source_ids {
+            reg.projects_mut().unwrap().set_source_status(&id, source_id, SourceStatus::Mapped, None).unwrap();
+        }
+        let locus = upsert_web(&mut reg, &id, "sr-1", "alpha passage");
+        upsert_web(&mut reg, &id, "sr-2", "beta passage");
+        let start = json!({
+            "kind": "startProjectTour",
+            "proposalId": "g",
+            "projectId": id,
+            "askId": "ak-1",
+            "mode": "explain",
+            "pace": "flow",
+        });
+        let start_proposal: Proposal = serde_json::from_value(start).unwrap();
+        let started = reg.route_tour_proposal(&start_proposal, Tier::T1User, 2).unwrap();
+        assert_eq!(started.status, "ok", "{:?}", started.error);
+        let report = json!({
+            "kind": "reportSourceOpen",
+            "proposalId": "r",
+            "projectId": id,
+            "sourceId": "sr-1",
+            "ok": true,
+        });
+        let report_proposal: Proposal = serde_json::from_value(report).unwrap();
+        let reported = reg.route_tour_proposal(&report_proposal, Tier::T2Client, 3).unwrap();
+        assert_eq!(reported.status, "ok", "{:?}", reported.error);
+        let task_id = reported.detail.unwrap()["taskId"].as_str().unwrap().to_string();
+
+        reg.spawn_presence("p-a", "tour", None, None);
+        let now = Instant::now();
+        let high = UvBox { u: 0.2, v: 0.02, w: 0.3, h: 0.04 };
+        reg.declare_interest("p-a", Some(&locus), "alpha passage", high, 30, now, true).unwrap();
+        let shown = reg.visible_interests(now);
+        let aims = reg.visible_aim_ids(now);
+        reg.note_doc_edge(EdgeRead::Web { scroll_top: 800.0, scroll_height: 5000.0, client_height: 900.0 });
+        assert!(reg.arrow_paint(1920, 1080).is_empty());
+        let hands_before = hand_kinds(reg.ledger());
+        reg.apply_arrow_input(
+            vec![ArrowInput::Press { x: 1854, y: 1014 }, ArrowInput::Release { x: 1854, y: 1014 }],
+            1920,
+            1080,
+            MOVE_WAIT_MS,
+        );
+        assert_eq!(reg.projects_mut().unwrap().get(&id).unwrap().cursor.source_index, 0);
+        assert_eq!(reg.visible_interests(now), shown);
+        assert_eq!(reg.visible_aim_ids(now), aims);
+
+        reg.note_doc_edge(EdgeRead::Web { scroll_top: 4100.0, scroll_height: 5000.0, client_height: 900.0 });
+        let paints = reg.arrow_paint(1920, 1080);
+        assert_eq!(paints.len(), 1);
+        assert_eq!(paints[0].which, Arrow::Forward);
+        let x = paints[0].origin_x + paints[0].diameter / 2;
+        let y = paints[0].origin_y + paints[0].diameter / 2;
+        reg.apply_arrow_input(
+            vec![ArrowInput::Press { x, y }, ArrowInput::Release { x, y }],
+            1920,
+            1080,
+            MOVE_WAIT_MS,
+        );
+        assert_eq!(reg.projects_mut().unwrap().get(&id).unwrap().cursor.source_index, 1);
+        assert_eq!(reg.task_book().query_value(&task_id).unwrap()["state"], "dismissed");
+        assert_eq!(reg.visible_interests(now), shown);
+        assert_eq!(reg.visible_aim_ids(now), aims);
+        assert_eq!(hand_kinds(reg.ledger()), hands_before);
+        assert!(reg.arrow_paint(1920, 1080).is_empty());
+
+        reg.note_doc_edge(EdgeRead::Web { scroll_top: 0.0, scroll_height: 5000.0, client_height: 900.0 });
+        let back = reg.arrow_paint(1920, 1080);
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0].which, Arrow::Back);
+        let x = back[0].origin_x + back[0].diameter / 2;
+        let y = back[0].origin_y + back[0].diameter / 2;
+        reg.apply_arrow_input(
+            vec![ArrowInput::Press { x, y }, ArrowInput::Release { x, y }],
+            1920,
+            1080,
+            MOVE_WAIT_MS * 2,
+        );
+        assert_eq!(reg.projects_mut().unwrap().get(&id).unwrap().cursor.source_index, 0);
+        assert_eq!(reg.visible_interests(now), shown);
+        assert!(reg.arrow_paint(1920, 1080).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn upsert_web(reg: &mut Registry, id: &str, source_id: &str, words: &str) -> String {
+        use crate::project::{LocusInput, MatchKind};
+        reg.projects_mut()
+            .unwrap()
+            .upsert_locus(
+                id,
+                LocusInput {
+                    source_id: source_id.into(),
+                    ask_id: Some("ak-1".into()),
+                    doc_key: format!("doc-{source_id}"),
+                    span_start: 0,
+                    span_end: 10,
+                    words: words.into(),
+                    page: None,
+                    line: Some(1),
+                    heading_path: None,
+                    stance: None,
+                    stance_by: None,
+                    stance_conf: None,
+                    match_kind: Some(MatchKind::Exact),
+                    narration: None,
+                    ocr_only: false,
+                    view: None,
+                },
+            )
+            .unwrap()
+    }
+
+    fn hand_kinds(ledger: &crate::ledger::Ledger) -> Vec<crate::ledger::LedgerKind> {
+        use crate::ledger::LedgerKind;
+        ledger
+            .events()
+            .iter()
+            .filter(|ev| matches!(ev.kind, LedgerKind::Skip | LedgerKind::Accept | LedgerKind::Deny))
+            .map(|ev| ev.kind)
+            .collect()
     }
 }

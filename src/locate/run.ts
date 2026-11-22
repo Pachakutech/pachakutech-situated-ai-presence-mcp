@@ -409,6 +409,34 @@ export async function readScrollTop(): Promise<number | null> {
   return reply.ok && typeof reply.value === "number" ? reply.value : null;
 }
 
+/** scrollTop, scrollHeight, and clientHeight of the scrolling element. Null when the page cannot be read. */
+export async function readScrollMetrics(): Promise<{ scrollTop: number; scrollHeight: number; clientHeight: number } | null> {
+  await ensureCdpPort();
+  if (!cdpPort) return null;
+  const reply = await cdpCall(`(() => {
+    const el = document.scrollingElement || document.documentElement;
+    if (!el) return null;
+    return { scrollTop: el.scrollTop, scrollHeight: el.scrollHeight, clientHeight: el.clientHeight };
+  })()`);
+  if (!reply.ok || !reply.value || typeof reply.value !== "object") return null;
+  const row = reply.value as { scrollTop?: unknown; scrollHeight?: unknown; clientHeight?: unknown };
+  if (typeof row.scrollTop !== "number" || typeof row.scrollHeight !== "number" || typeof row.clientHeight !== "number") {
+    return null;
+  }
+  return { scrollTop: row.scrollTop, scrollHeight: row.scrollHeight, clientHeight: row.clientHeight };
+}
+
+/** Page count from pdfinfo. Null when the file cannot be read. */
+export async function readPdfPageCount(path: string): Promise<number | null> {
+  const result = await run("pdfinfo", [path], 4000);
+  if (result.code !== 0) return null;
+  const match = result.stdout.match(/Pages:\s+(\d+)/);
+  if (!match) return null;
+  const count = Number(match[1]);
+  if (!Number.isInteger(count) || count < 1) return null;
+  return count;
+}
+
 export async function outputSize(): Promise<{ w: number; h: number }> {
   return screenSize();
 }

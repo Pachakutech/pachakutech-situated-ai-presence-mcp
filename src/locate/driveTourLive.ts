@@ -5,7 +5,7 @@ import { DaemonClient } from "../daemonClient.js";
 import { launchListed, locatePortOpen, navigateLocate, spawnListed } from "./openSource.js";
 import { followScroll, glassMarks, keepHeld, linesFromColumns, lociFromProject, onPage, type GlassLocus, type HandName, type OpenPage, type SourcedLocus, type Uv } from "./glass.js";
 import { noteOwnedScroll, releaseScroll as clearScrollHold, scrollDrifted } from "./scrollHold.js";
-import { listHyprClients, outputSize, readPageGeneration, readScrollTop, readViewerPage } from "./run.js";
+import { listHyprClients, outputSize, readPageGeneration, readPdfPageCount, readScrollMetrics, readScrollTop, readViewerPage } from "./run.js";
 import { runTour, type GlassHit, type TourItem, type TourView } from "./tour.js";
 import { driveUntilStop, type DriveIo, type OpenRequest } from "./driveTour.js";
 import { frameAfterSettle, glassPhraseBox, settleLine, settleRule, uvPixels, type GlassFrame } from "./core.js";
@@ -72,6 +72,7 @@ function liveIo(client: DaemonClient, presenceId: string | undefined, stopping: 
   let projectIdHeld: string | null = null;
   let openSourceId: string | null = null;
   let projectLoci: SourcedLocus[] = [];
+  const pdfPages = new Map<string, number>();
 
   async function paint(phraseId: string, box: Uv, description: string, aim = false): Promise<void> {
     if (!presenceId) return;
@@ -358,6 +359,50 @@ function liveIo(client: DaemonClient, presenceId: string | undefined, stopping: 
       if (next === "drop") await drop(id);
       else await paint(id, next, id);
     }
+    await noteDocEdge();
+  }
+
+  async function pageCount(path: string): Promise<number | null> {
+    const cached = pdfPages.get(path);
+    if (cached != null) return cached;
+    const count = await readPdfPageCount(path);
+    if (count != null) pdfPages.set(path, count);
+    return count;
+  }
+
+  /** The open document's ends. The daemon decides which bubbles that is. */
+  async function noteDocEdge(): Promise<void> {
+    try {
+      if (viewerKind === "pdf") {
+        if (!reference) {
+          await client.call("reportDocEdge", { surface: "unread" });
+          return;
+        }
+        const page = await readViewerPage(reference);
+        if (page == null) {
+          await client.call("reportDocEdge", { surface: "unread" });
+          return;
+        }
+        const pages = await pageCount(reference);
+        const fields: Record<string, unknown> = { surface: "pdf", page };
+        if (pages != null) fields.pages = pages;
+        await client.call("reportDocEdge", fields);
+        return;
+      }
+      const metrics = await readScrollMetrics();
+      if (!metrics) {
+        await client.call("reportDocEdge", { surface: "unread" });
+        return;
+      }
+      await client.call("reportDocEdge", {
+        surface: "web",
+        scrollTop: metrics.scrollTop,
+        scrollHeight: metrics.scrollHeight,
+        clientHeight: metrics.clientHeight,
+      });
+    } catch {
+      // The next reading sends the ends again.
+    }
   }
 
   /** The page moved under a mark. Follow the ink, and drop it when the phrase leaves or the page is replaced. */
@@ -381,6 +426,7 @@ function liveIo(client: DaemonClient, presenceId: string | undefined, stopping: 
     if (generation != null && origin != null && origin !== generation) {
       generation = origin;
       await dropAll();
+      await noteDocEdge();
       return;
     }
     if (origin != null) generation = origin;
@@ -390,6 +436,7 @@ function liveIo(client: DaemonClient, presenceId: string | undefined, stopping: 
       if (paintedTop != null && top !== paintedTop) await shiftAll(top - paintedTop);
       paintedTop = top;
     }
+    await noteDocEdge();
     const text = await client.call("queryScreenText", {});
     const seq = typeof text.seq === "number" ? text.seq : -1;
     if (text.fresh !== true || seq === glassSeq) return;
@@ -552,6 +599,7 @@ function liveIo(client: DaemonClient, presenceId: string | undefined, stopping: 
         }
       }
       await rememberViewer();
+      await noteDocEdge();
     },
     async conceal() {
       await concealMarks();

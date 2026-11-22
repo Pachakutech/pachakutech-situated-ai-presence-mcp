@@ -229,6 +229,12 @@ pub enum Proposal {
     /// T1 tombstone for one note.
     #[serde(rename = "deleteNote")]
     DeleteNote(DeleteNoteBody),
+    /// The driver read the ends of the open document. This does not move the page.
+    #[serde(rename = "reportDocEdge")]
+    ReportDocEdge(ReportDocEdgeBody),
+    /// A bubble click is T0. No socket tier may post it.
+    #[serde(rename = "documentArrow")]
+    DocumentArrow(DocumentArrowBody),
 }
 
 /// Applied on the overlay thread after the socket pump. Not a GPU command.
@@ -286,6 +292,8 @@ impl Proposal {
             Proposal::ConfirmTour(body) => &body.proposal_id,
             Proposal::AddNote(body) => &body.proposal_id,
             Proposal::DeleteNote(body) => &body.proposal_id,
+            Proposal::ReportDocEdge(body) => &body.proposal_id,
+            Proposal::DocumentArrow(body) => &body.proposal_id,
         }
     }
 
@@ -329,6 +337,8 @@ impl Proposal {
             Proposal::ConfirmTour(_) => "confirmTour",
             Proposal::AddNote(_) => "addNote",
             Proposal::DeleteNote(_) => "deleteNote",
+            Proposal::ReportDocEdge(_) => "reportDocEdge",
+            Proposal::DocumentArrow(_) => "documentArrow",
         }
     }
 }
@@ -850,6 +860,35 @@ pub struct DeleteNoteBody {
     pub note_id: String,
     #[serde(default, rename = "kind")]
     pub wire_kind: Option<String>,
+}
+
+/// Scroll numbers, or a PDF page. `surface` is `web`, `pdf`, or `unread`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReportDocEdgeBody {
+    #[serde(rename = "proposalId")]
+    pub proposal_id: String,
+    pub surface: String,
+    #[serde(default, rename = "scrollTop")]
+    pub scroll_top: Option<f64>,
+    #[serde(default, rename = "scrollHeight")]
+    pub scroll_height: Option<f64>,
+    #[serde(default, rename = "clientHeight")]
+    pub client_height: Option<f64>,
+    #[serde(default)]
+    pub page: Option<u32>,
+    #[serde(default)]
+    pub pages: Option<u32>,
+}
+
+/// Present so a model socket can be refused by name. The overlay never sends it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DocumentArrowBody {
+    #[serde(rename = "proposalId")]
+    pub proposal_id: String,
+    #[serde(default)]
+    pub direction: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]

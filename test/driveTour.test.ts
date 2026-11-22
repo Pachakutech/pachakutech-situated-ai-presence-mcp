@@ -539,3 +539,15 @@ test("the driver does not start a project or read a user profile", async () => {
   }
   assert.equal(await tourDriveCommand([]), 1);
 });
+
+test("the driver reports the scroll ends and does not draw the arrows", () => {
+  const live = readFileSync(join(root, "src/locate/driveTourLive.ts"), "utf8");
+  const run = readFileSync(join(root, "src/locate/run.ts"), "utf8");
+  assert.equal(live.includes("reportDocEdge"), true);
+  assert.equal(live.includes("readScrollMetrics"), true);
+  assert.equal(live.includes("readPdfPageCount"), true);
+  assert.equal(run.includes("export async function readScrollMetrics"), true);
+  assert.equal(run.includes("export async function readPdfPageCount"), true);
+  assert.equal(live.includes("documentArrow"), false);
+  assert.equal(live.includes("EDGE_ALPHA"), false);
+});
