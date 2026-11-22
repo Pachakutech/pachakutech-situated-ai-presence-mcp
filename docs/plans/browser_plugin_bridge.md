@@ -1,6 +1,6 @@
 # Desktop Browser Plugin + Presence Runtime Bridge
 
-Status: BR1 landed 21 November 2026. BR2, BR3, and BR4 are still the briefs in `BR1_BR4_browser_bridge.md`.  
+Status: BR1 and BR2 landed 21 November 2026. BR3 and BR4 are still the briefs in `BR1_BR4_browser_bridge.md`.  
 Date: 13 November 2026. Revisited 20 November 2026.  
 Related: `research_tours.md`, `queryProject` (`register`, `pseq`), Native Messaging, `tour_confirm.md`
 

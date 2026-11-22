@@ -6,8 +6,9 @@ import type { MapWait, ProjectCaller } from "../projectTools.ts";
 import { awaitMappedSources } from "../projectTools.ts";
 import { jobsSocketPath, presenceSocketPath } from "../sidecar/config.ts";
 import { compileLine, planCapture, type CapturePlan } from "./capture.ts";
+import { buildCursor, CURSOR_LIMIT, CURSOR_MS, fitCursor, type SentCursor } from "./cursor.ts";
 import { BridgeError, messageOf, socketDown } from "./errors.ts";
-import { encodeFrame, readNativeFrames } from "./frames.ts";
+import { encodeFrame, framePump } from "./frames.ts";
 import { writeCompile } from "./jobs.ts";
 import { closeTourBody, compileWithBody, freshSession, type TourSession } from "./tourBody.ts";
 
@@ -32,19 +33,66 @@ export async function runBridge(
 ): Promise<number> {
   const session = freshSession(io.given);
   const held = io.held ?? [];
-  const wait = io.wait ?? { now: () => Date.now(), sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)) };
+  const wait = io.wait ?? hostWait();
   const log = io.log ?? ((line: string) => console.error(line));
   let client: ProjectCaller | undefined;
   const connect = async () => {
     if (!client) client = await io.connect();
     return client;
   };
+  let watched: { projectId: string; sourcePage?: string } | undefined;
+  let sent: SentCursor | undefined;
+  let inFlight = false;
+  let stored: Record<string, unknown> | undefined;
+  const offer = (frame: Record<string, unknown>) => {
+    if (inFlight) {
+      stored = frame;
+      return;
+    }
+    inFlight = true;
+    void emit(stdout, frame).then(
+      () => {
+        inFlight = false;
+        const next = stored;
+        stored = undefined;
+        if (next) offer(next);
+      },
+      (error: unknown) => {
+        inFlight = false;
+        log(messageOf(error));
+      },
+    );
+  };
+  const pump = framePump(stdin);
+  let upcoming = pump.next();
   try {
-    const ended = await readNativeFrames(stdin, async (message) => {
-      const reply = await handleCapture(message, { connect, compile: io.compile, wait, session, held });
+    for (;;) {
+      const step = watched
+        ? await Promise.race([
+            upcoming.then((frame) => ({ kind: "frame" as const, frame })),
+            wait.sleep(CURSOR_MS).then(() => ({ kind: "tick" as const })),
+          ])
+        : { kind: "frame" as const, frame: await upcoming };
+      if (step.kind === "tick") {
+        if (client && watched) sent = await pollCursor(client, watched, sent, offer, log);
+        continue;
+      }
+      if (step.frame === "eof") break;
+      if (step.frame === "oversize") break;
+      upcoming = pump.next();
+      const reply = await handleCapture(step.frame, { connect, compile: io.compile, wait, session, held });
       await emit(stdout, reply);
-    });
-    if (ended === "oversize") return 0;
+      if (reply.type === "captured" && typeof reply.projectId === "string") {
+        watched = {
+          projectId: reply.projectId,
+          sourcePage: typeof reply.sourcePage === "string" ? reply.sourcePage : undefined,
+        };
+        sent = undefined;
+      } else if (reply.type === "pending") {
+        watched = undefined;
+        sent = undefined;
+      }
+    }
   } finally {
     try {
       await closeTourBody(session, async (id) => {
@@ -193,6 +241,42 @@ function downOr(error: unknown, which: "daemon_down"): Record<string, unknown> {
   if (error instanceof BridgeError) return { type: "error", error: error.bridgeError };
   if (socketDown(error)) return { type: "error", error: which };
   return { type: "error", error: messageOf(error) };
+}
+
+function hostWait(): MapWait {
+  return {
+    now: () => Date.now(),
+    sleep: (ms) =>
+      new Promise((resolve) => {
+        const timer = setTimeout(resolve, ms);
+        if (typeof timer.unref === "function") timer.unref();
+      }),
+  };
+}
+
+async function pollCursor(
+  client: ProjectCaller,
+  watched: { projectId: string; sourcePage?: string },
+  sent: SentCursor | undefined,
+  offer: (frame: Record<string, unknown>) => void,
+  log: (line: string) => void,
+): Promise<SentCursor | undefined> {
+  let view: Record<string, unknown>;
+  try {
+    view = await client.call("queryProject", { projectId: watched.projectId, limit: CURSOR_LIMIT });
+  } catch (error) {
+    log(messageOf(error));
+    return sent;
+  }
+  const built = buildCursor(view, sent, watched.projectId, watched.sourcePage);
+  if (!built.send) return sent;
+  const fitted = fitCursor(built.frame);
+  if (!fitted.ok) {
+    log("bridge: cursor over 1 MiB");
+    return built.sent;
+  }
+  offer(fitted.frame);
+  return built.sent;
 }
 
 async function emit(stdout: FrameWriter, value: unknown): Promise<void> {

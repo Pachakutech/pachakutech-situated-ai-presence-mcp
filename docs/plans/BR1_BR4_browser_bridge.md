@@ -123,6 +123,8 @@ H1 through H13 pass. Commit title: `bridge: tabs and an optional phrase (BR1)`.
 
 ## BR2 — cursor
 
+Status: landed 21 November 2026. After a captured reply the host polls `queryProject` every 500 ms at limit 500. The same pseq sends nothing. The frame is the register, the host's diff, and the notes. A pending reply does not start the poll.
+
 ### Goal
 
 While the native port is open, the host sends the user-choice cursor back to the extension. The page's extension sees each new hand without a second daemon socket.

@@ -10,6 +10,44 @@ export function encodeFrame(value: unknown): Buffer {
   return Buffer.concat([head, body]);
 }
 
+export interface FramePump {
+  next(): Promise<unknown>;
+}
+
+/** `"eof"` when the stream ends. `"oversize"` when a declared length is over 1 MiB. */
+export function framePump(source: AsyncIterable<Buffer | Uint8Array | string>): FramePump {
+  const iterator = source[Symbol.asyncIterator]();
+  let buf = Buffer.alloc(0);
+  let done = false;
+  return {
+    async next() {
+      for (;;) {
+        while (buf.length >= 4) {
+          const length = buf.readUInt32LE(0);
+          if (length > MAX_FRAME_BYTES) return "oversize";
+          if (buf.length < 4 + length) break;
+          const body = buf.subarray(4, 4 + length);
+          buf = Buffer.from(buf.subarray(4 + length));
+          try {
+            return JSON.parse(body.toString("utf8")) as unknown;
+          } catch {
+            return undefined;
+          }
+        }
+        if (done) return "eof";
+        const step = await iterator.next();
+        if (step.done) {
+          done = true;
+          continue;
+        }
+        const chunk = step.value;
+        const part = typeof chunk === "string" ? Buffer.from(chunk) : Buffer.from(chunk);
+        buf = buf.length === 0 ? Buffer.from(part) : Buffer.concat([buf, part]);
+      }
+    },
+  };
+}
+
 export async function readNativeFrames(
   source: AsyncIterable<Buffer | Uint8Array | string>,
   onFrame: (value: unknown) => Promise<void>,
