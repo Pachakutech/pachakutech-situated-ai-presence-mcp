@@ -22,6 +22,8 @@ import { sendProposal, socketReachable, startDaemon, statusDaemon, stopDaemon } 
 import { cueFollowMain } from "./locate/cues.js";
 import { tourDriveCommand } from "./locate/driveTour.js";
 import { fuseCommand, locateCommand, screenTextCommand } from "./locate/run.js";
+import { bridgeCommand } from "./bridge/host.js";
+import { installBridge } from "./bridge/install.js";
 import { sidecarReport } from "./sidecar/doctor.js";
 import { sidecarCommand } from "./sidecar/run.js";
 
@@ -108,6 +110,9 @@ function usage(): never {
       "                       judge prints a judgement. draft and map print one reply per line.",
       "                       retrieve prints slices for passages the word score missed.",
       "                       listen binds sidecar-jobs.sock and answers one compile line.",
+      "  bridge               Native messaging host for the browser extension.",
+      "                       Stdout is frames. Logs go to stderr.",
+      "  bridge-install       Write the host wrapper and browser manifests.",
       "  stop <id>            Stop that presence's speech; face returns to neutral",
       "  retire <id>          End the presence, hide its avatar, free its slot",
       "                       The doubled form still works: presence presence speak <id> <text>",
@@ -498,6 +503,17 @@ switch (command) {
   case "sidecar": {
     const sidecarPath = sidecarSocketPath(socketPath(), process.env);
     process.exit(await sidecarCommand(process.argv.slice(3), { env: process.env, socketPath: sidecarPath }));
+    break;
+  }
+  case "bridge": {
+    process.exit(await bridgeCommand());
+    break;
+  }
+  case "bridge-install": {
+    const cliPath = fileURLToPath(new URL("./cli.js", import.meta.url));
+    const wrote = installBridge({ home: homedir(), execPath: process.execPath, cliPath });
+    for (const path of [wrote.wrapper, ...wrote.manifests]) console.log(path);
+    process.exit(0);
     break;
   }
   default:

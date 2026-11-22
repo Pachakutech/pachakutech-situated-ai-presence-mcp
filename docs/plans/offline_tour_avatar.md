@@ -1,6 +1,6 @@
 # The offline tour avatar
 
-Status: landed 21 November 2026. `src/bridge/tourBody.ts` is the bridge host's body. Before the compile line, no presence given means one spawn, and that id is kept for the session. A presence already given is not spawned and is not retired. The compile does not speak, paint, or write a hand. `presenceForDrive` is the id a later `tour-drive` uses. Nothing is stored. The tour is not started. The live daemon was not restarted.
+Status: landed 21 November 2026. `src/bridge/tourBody.ts` is the bridge host's body. `presence bridge` calls it before the compile line. Before that line, no presence given means one spawn, and that id is kept for the session. A presence already given is not spawned and is not retired. The compile does not speak, paint, or write a hand. `presenceForDrive` is the id a later `tour-drive` uses. Nothing is stored. The tour is not started. The live daemon was not restarted.
 
 21 November 2026. Note. This file does not spawn a presence.
 

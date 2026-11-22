@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "Pachakutech Presence",
+  "version": "0.1.0",
+  "description": "Send checked tabs to the presence runtime.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAynsoHscBYsP73YYODP2mbfdXxEHMczGeW20mRN4adwopoacxaafOHUaFA/cyA+1vM9M0juzzjhs3C6bjX8E74vWsjTqlP94cZihEfJH5vaeonGNpxuMR0rD6M4GhcvxO2Oaq769Wtbik8BKO+wewZUkrWSF+07umbCXcusZSblLf2hxr6vs2zLNNeloeQkyAgeCwtM5MzeOPnwkb9WZR3MhuL6Fudd/C+lJUgWwdzSrRDECtFLtqw3vWzTdEVdC22LJ3xUYv+SefbmQcpiJMwe89TTHZuMHhpDfqd1KPYSRq/UaogG0/3ElxHa1JX9iMZoLP9IB40gkYCXXBSkssQQIDAQAB",
+  "permissions": ["nativeMessaging", "tabs", "activeTab", "scripting", "contextMenus"],
+  "action": {
+    "default_title": "Send tabs",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  }
+}

@@ -30,6 +30,8 @@ Shared rules:
 
 ## BR1 — capture
 
+Status: landed 21 November 2026. `presence bridge` stores the checked tabs and writes one compile line. An empty phrase is non-directed. The tour body opens before that line. Proposals are held. The tour is not started.
+
 ### Goal
 
 The user can check tabs, optionally type an assertion phrase, and send them. The host stores the tabs as one project and asks the sidecar to compile a directed knowledge base when the phrase is present, and a non-directed knowledge base when it is empty. The window stays closed until `presence tour-start`, and that start waits until the loci are stored.

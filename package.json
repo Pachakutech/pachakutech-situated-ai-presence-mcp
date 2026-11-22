@@ -20,6 +20,7 @@
     "dist",
     "native",
     "skills",
+    "extension",
     "plugin.json"
   ],
   "repository": {

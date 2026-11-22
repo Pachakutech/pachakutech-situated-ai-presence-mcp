@@ -252,7 +252,7 @@ function readUv(rec: Record<string, unknown>): { ok: true; box: { u: number; v: 
   return { ok: true, box: { u: nums[0] as number, v: nums[1] as number, w: nums[2] as number, h: nums[3] as number } };
 }
 
-function publicHttpUrl(raw: string): boolean {
+export function publicHttpUrl(raw: string): boolean {
   if (raw.length === 0 || Array.from(raw).length > REF_CAP) return false;
   if (/[\s\p{Cc}]/u.test(raw)) return false;
   const split = raw.indexOf("://");
