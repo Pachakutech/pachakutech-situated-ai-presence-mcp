@@ -5,6 +5,7 @@
 use crate::actors::gpu_layout::to_gpu_splat;
 use crate::actors::{ControlActor, PresenceActor, SceneMemory};
 use crate::gate::Tier;
+use crate::control_row::{Paint, Px as RowPx, RowInput};
 use crate::highlight::{InterestBook, UvBox, MAX_SECS};
 use crate::docmap::DocMap;
 use crate::ledger::Ledger;
@@ -286,6 +287,48 @@ impl Registry {
         self.tasks.mark_colors()
     }
 
+    /// Pointer and key events for the hover row. An enter remembers the interest box.
+    pub fn apply_row_input(&mut self, input: Vec<RowInput>, screen_w: i32, screen_h: i32, now_ms: u64) {
+        self.tasks.set_row_screen(screen_w, screen_h);
+        for ev in input {
+            match ev {
+                RowInput::Enter { phrase_id, x, y, w, h } => {
+                    let uv = self.interests.get(&phrase_id);
+                    let (book, ledger) = self.task_and_ledger();
+                    book.row_enter(&phrase_id, RowPx { x, y, w, h }, uv, now_ms, ledger);
+                }
+                other => {
+                    let (book, ledger) = self.task_and_ledger();
+                    book.apply_row(other, ledger, now_ms);
+                }
+            }
+        }
+    }
+
+    pub fn note_row_scroll(&mut self) {
+        self.tasks.note_row_scroll();
+    }
+
+    pub fn row_paint(&self, screen_w: i32, screen_h: i32) -> Option<Paint> {
+        self.tasks.row_paint(screen_w, screen_h)
+    }
+
+    pub fn row_held_phrase(&self) -> Option<String> {
+        self.tasks.row_held_phrase()
+    }
+
+    pub fn row_hold_json(&self) -> Option<serde_json::Value> {
+        let phrase = self.tasks.row_held_phrase()?;
+        let uv = self.tasks.held_uv(&phrase)?;
+        Some(serde_json::json!({
+            "phraseId": phrase,
+            "u": uv.u,
+            "v": uv.v,
+            "w": uv.w,
+            "h": uv.h,
+        }))
+    }
+
     fn apply_finished_maps(&mut self) {
         let reports = self.map_inbox.drain();
         for report in reports {
@@ -333,6 +376,17 @@ impl Registry {
         let phrase = phrase_id.map(str::trim).filter(|id| !id.is_empty());
         let key = phrase.unwrap_or(presence_id);
         let secs = secs.clamp(1, MAX_SECS);
+        // A scroll already queued may move the box. Until that tick, a quiet row keeps the open box.
+        if !self.tasks.row_scroll_pending() {
+            if let Some(frozen) = self.tasks.held_uv(key) {
+                let got = self.interests.declare(key, frozen, secs, now)?;
+                println!(
+                    "[registry] highlight {presence_id} uv {:.3},{:.3} {:.3}x{:.3} for {secs}s — {description}",
+                    got.u, got.v, got.w, got.h
+                );
+                return Ok((got, secs));
+            }
+        }
         let got = self.interests.declare(key, raw, secs, now)?;
         if phrase.is_none() || aim {
             self.aim_of.insert(presence_id.to_string(), key.to_string());
@@ -1190,5 +1244,107 @@ mod tests {
         assert_eq!(aims.len(), 2);
         assert!(aims.iter().any(|id| id == "lc-4"), "{aims:?}");
         assert!(aims.iter().any(|id| id == "lc-2"), "{aims:?}");
+    }
+
+    fn hover_pair(reg: &mut Registry) -> String {
+        use crate::protocol::{TaskMode, TaskPace};
+        use crate::task::{TourSeed, TourSeedItem};
+        let (book, ledger) = reg.task_and_ledger();
+        let id = book
+            .insert_tour_chunk(
+                ledger,
+                TourSeed {
+                    origin_user: true,
+                    mode: TaskMode::Select,
+                    pace: TaskPace::Wait,
+                    doc_key: None,
+                    items: vec![
+                        TourSeedItem { query: "words a".into(), narration: String::new(), page: None },
+                        TourSeedItem { query: "words b".into(), narration: String::new(), page: None },
+                    ],
+                    locus_ids: vec!["lc-a".into(), "lc-b".into()],
+                    again: false,
+                },
+                1_000,
+            )
+            .unwrap();
+        book.admit().unwrap();
+        book.begin_task(&id, ledger, 2_000).unwrap();
+        id
+    }
+
+    #[test]
+    fn hover_holds_the_box_and_the_leave_moves_the_index() {
+        use crate::control_row::{Px, RowHit};
+        let mut reg = Registry::new();
+        reg.spawn_presence("p", "ctx", None, None);
+        let now = Instant::now();
+        let a = UvBox { u: 0.10, v: 0.20, w: 0.30, h: 0.04 };
+        let b = UvBox { u: 0.10, v: 0.50, w: 0.30, h: 0.04 };
+        let jumped = UvBox { u: 0.55, v: 0.60, w: 0.20, h: 0.08 };
+        let id = hover_pair(&mut reg);
+        reg.declare_interest("p", Some("lc-a"), "a", a, 360, now, true).unwrap();
+        reg.declare_interest("p", Some("lc-b"), "b", b, 360, now, false).unwrap();
+        assert_eq!(reg.visible_aim("p", now), Some(a));
+        let hands = reg.ledger().events().iter().filter(|ev| {
+            matches!(ev.kind, crate::ledger::LedgerKind::Accept | crate::ledger::LedgerKind::Deny | crate::ledger::LedgerKind::Skip)
+        }).count();
+        {
+            let (book, ledger) = reg.task_and_ledger();
+            book.row_enter("lc-a", Px { x: 100, y: 400, w: 200, h: 40 }, Some(a), 3_000, ledger);
+        }
+        assert_eq!(
+            reg.ledger().events().iter().filter(|ev| {
+                matches!(ev.kind, crate::ledger::LedgerKind::Accept | crate::ledger::LedgerKind::Deny | crate::ledger::LedgerKind::Skip)
+            }).count(),
+            hands
+        );
+        assert_eq!(reg.visible_aim("p", now), Some(a));
+        assert_eq!(reg.task_book().row_color("lc-a"), crate::highlight::MarkColor::Yellow);
+        let (got, _) = reg.declare_interest("p", Some("lc-a"), "jump", jumped, 360, now, true).unwrap();
+        assert_eq!(got, a);
+        assert_eq!(reg.visible_aim("p", now), Some(a));
+        let hold = reg.row_hold_json().unwrap();
+        assert_eq!(hold["phraseId"], "lc-a");
+        assert_eq!(hold["u"], a.u);
+        {
+            let (book, ledger) = reg.task_and_ledger();
+            let paint = book.row_paint(1920, 1080).unwrap();
+            let check = paint.squares.iter().find(|(hit, _)| *hit == RowHit::Check).unwrap().1;
+            book.row_press_at(check.x + 2, check.y + 2);
+            book.row_release_at(check.x + 2, check.y + 2, ledger, 3_100);
+        }
+        assert_eq!(reg.visible_aim("p", now), Some(a));
+        assert_eq!(reg.task_book().query_value(&id).unwrap()["index"], 0);
+        reg.tick_tasks(3_100);
+        assert_eq!(reg.task_book().query_value(&id).unwrap()["index"], 0);
+        reg.tick_tasks(5_100);
+        assert_eq!(reg.task_book().query_value(&id).unwrap()["index"], 1);
+        assert_eq!(reg.visible_aim("p", now), Some(a));
+        reg.declare_interest("p", Some("lc-b"), "next", b, 360, now, true).unwrap();
+        assert_eq!(reg.visible_aim("p", now), Some(b));
+    }
+
+    #[test]
+    fn a_scroll_lets_the_next_box_land_and_then_hides_the_row() {
+        use crate::control_row::Px;
+        let mut reg = Registry::new();
+        reg.spawn_presence("p", "ctx", None, None);
+        let now = Instant::now();
+        let a = UvBox { u: 0.10, v: 0.20, w: 0.30, h: 0.04 };
+        let moved = UvBox { u: 0.20, v: 0.25, w: 0.20, h: 0.04 };
+        hover_pair(&mut reg);
+        reg.declare_interest("p", Some("lc-a"), "a", a, 360, now, true).unwrap();
+        {
+            let (book, ledger) = reg.task_and_ledger();
+            book.row_enter("lc-a", Px { x: 100, y: 400, w: 200, h: 40 }, Some(a), 3_000, ledger);
+        }
+        reg.note_row_scroll();
+        let (got, _) = reg.declare_interest("p", Some("lc-a"), "scrolled", moved, 360, now, false).unwrap();
+        assert_eq!(got, moved);
+        assert!(reg.task_book().row_is_open());
+        reg.tick_tasks(3_050);
+        assert!(!reg.task_book().row_is_open());
+        assert!(reg.row_hold_json().is_none());
     }
 }

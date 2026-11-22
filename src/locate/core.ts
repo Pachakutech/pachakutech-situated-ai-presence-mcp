@@ -659,7 +659,7 @@ function unionUv(a: Uv, b: Uv): Uv {
   return { u, v, w: right - u, h: bottom - v };
 }
 
-export type SettleName = "track" | "top" | "line" | "end" | "wide" | "column" | "narrow" | "jump" | "union";
+export type SettleName = "track" | "top" | "line" | "end" | "wide" | "column" | "narrow" | "jump" | "union" | "hold";
 
 const PANEL_H = 1080;
 
@@ -728,7 +728,9 @@ export function settleRule(
   measured: Uv,
   screen: { w: number; h: number } = { w: 1920, h: 1080 },
   prior: Uv | null = null,
+  hold = false,
 ): { name: SettleName; box: Uv } {
+  if (hold) return { name: "hold", box: copyBox(shown) };
   const screenH = screen.h > 0 ? screen.h : PANEL_H;
   const tracks =
     withinTrack(measured.u - shown.u, shown.w) &&
@@ -804,9 +806,15 @@ export function uvPixels(box: Uv, screenW: number, screenH: number): Box {
   };
 }
 
-/** A reading that sees the phrase moves its mark. A miss leaves the placed box. */
-export function keepHeld(held: HeldMark[], seen: (Uv & { phraseId: string })[]): HeldMark[] {
+/** A reading that sees the phrase moves its mark. A miss leaves the placed box.
+ * `frozen` keeps the box from the moment the hover row opened. */
+export function keepHeld(
+  held: HeldMark[],
+  seen: (Uv & { phraseId: string })[],
+  frozen: ReadonlySet<string> = new Set(),
+): HeldMark[] {
   const next = held.map((mark) => {
+    if (frozen.has(mark.phraseId)) return mark;
     const hit = seen.find((row) => row.phraseId === mark.phraseId);
     if (!hit) return mark;
     return { phraseId: mark.phraseId, box: { u: hit.u, v: hit.v, w: hit.w, h: hit.h } };

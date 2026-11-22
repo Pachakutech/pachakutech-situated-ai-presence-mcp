@@ -55,6 +55,8 @@ use wayland_protocols_wlr::screencopy::v1::client::{
     zwlr_screencopy_frame_v1, zwlr_screencopy_manager_v1,
 };
 
+mod row_surface;
+
 const OVERLAY_VERT_SPV: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/overlay_quad.vert.spv"));
 const OVERLAY_FRAG_SPV: &[u8] =
@@ -122,6 +124,13 @@ pub struct OverlayState {
     dirty: bool,
     /// Highlight layers. Their configure must not write `width` or `dirty`.
     marks: Vec<Mark>,
+    /// The hover row. Its input region is the squares, in `row_surface`.
+    row: Option<row_surface::RowSlot>,
+    row_input: Vec<crate::control_row::RowInput>,
+    on_row: bool,
+    pointer_xy: (f64, f64),
+    pointer_origin: (i32, i32),
+    row_shift: u8,
 }
 
 struct PointerOn {
@@ -248,6 +257,12 @@ impl Overlay {
             closed: false,
             dirty: false,
             marks: Vec::new(),
+            row: None,
+            row_input: Vec::new(),
+            on_row: false,
+            pointer_xy: (0.0, 0.0),
+            pointer_origin: (0, 0),
+            row_shift: 0,
         };
         event_queue
             .roundtrip(&mut state)
@@ -558,6 +573,27 @@ impl Overlay {
         std::mem::take(&mut self.state.tint_samples)
     }
 
+    fn take_row_input(&mut self) -> Vec<crate::control_row::RowInput> {
+        std::mem::take(&mut self.state.row_input)
+    }
+
+    fn sync_row(&mut self, paint: Option<crate::control_row::Paint>) {
+        let qh = self.event_queue.handle();
+        row_surface::sync(&mut self.state, &qh, paint.as_ref());
+        let waiting = self.state.row.as_ref().is_some_and(|row| !row.configured);
+        if waiting {
+            if let Err(e) = self.event_queue.roundtrip(&mut self.state) {
+                eprintln!("[highlight] row configure: {e}");
+            }
+        }
+        if let Some(paint) = paint.as_ref() {
+            if self.state.row.as_ref().is_some_and(|row| row.configured) {
+                let qh = self.event_queue.handle();
+                row_surface::paint_now(&mut self.state, &qh, paint);
+            }
+        }
+    }
+
     /// One Top-layer surface per visible box. An empty list removes them.
     /// The surface is the measured box plus the paint pad. The returned rects
     /// are the aim marks only, in measured pixels, for the heat mask.
@@ -568,6 +604,7 @@ impl Overlay {
         boxes: &[(String, UvBox)],
         colors: &[(String, MarkColor)],
         aim_ids: &[String],
+        held: Option<&str>,
     ) -> [[f32; 4]; 3] {
         let (sw, sh) = (self.state.output_width, self.state.output_height);
         let measured: Vec<(String, i32, i32, i32, i32)> = boxes
@@ -577,13 +614,23 @@ impl Overlay {
                 (id.clone(), x, y, w, h)
             })
             .collect();
-        let desired: Vec<(String, i32, i32, i32, i32)> = measured
+        let mut desired: Vec<(String, i32, i32, i32, i32)> = measured
             .iter()
             .map(|(id, x, y, w, h)| {
                 let (px, py, pw, ph) = expand_paint_rect(*x, *y, *w, *h, sw, sh);
                 (id.clone(), px, py, pw, ph)
             })
             .collect();
+
+        // The open row keeps the surface it opened on, so the X stays on that edge.
+        if let Some(id) = held {
+            if let Some(mark) = self.state.marks.iter().find(|mark| !mark.dying && mark.id == id) {
+                let frozen = (mark.id.clone(), mark.x, mark.y, mark.w, mark.h);
+                if let Some(slot) = desired.iter_mut().find(|(want, _, _, _, _)| want == id) {
+                    *slot = frozen;
+                }
+            }
+        }
 
         // Same phrase and a shared pixel: this surface. A new width used to
         // destroy it, and the press died with the generation.
@@ -1056,19 +1103,66 @@ impl Dispatch<wl_pointer::WlPointer, ()> for OverlayState {
         _qh: &QueueHandle<Self>,
     ) {
         match event {
-            wl_pointer::Event::Enter { surface, .. } => {
-                state.pointer_on = state.marks.iter().find(|mark| !mark.dying && mark.surface.as_ref() == Some(&surface)).map(|mark| {
-                    PointerOn { id: mark.id.clone(), generation: mark.generation }
-                });
+            wl_pointer::Event::Enter { surface, surface_x, surface_y, .. } => {
+                state.pointer_xy = (surface_x, surface_y);
+                if row_surface::is_row(state, &surface) {
+                    state.pointer_on = None;
+                    state.on_row = true;
+                    if let Some(row) = state.row.as_ref() {
+                        state.pointer_origin = (row.origin_x, row.origin_y);
+                    }
+                    state.row_input.push(crate::control_row::RowInput::Pointer { inside: true });
+                } else if let Some(mark) = state.marks.iter().find(|mark| !mark.dying && mark.surface.as_ref() == Some(&surface)) {
+                    state.on_row = false;
+                    state.pointer_on = Some(PointerOn { id: mark.id.clone(), generation: mark.generation });
+                    state.pointer_origin = (mark.x, mark.y);
+                    state.row_input.push(crate::control_row::RowInput::Enter {
+                        phrase_id: mark.id.clone(),
+                        x: mark.x,
+                        y: mark.y,
+                        w: mark.w,
+                        h: mark.h,
+                    });
+                } else {
+                    state.on_row = false;
+                    state.pointer_on = None;
+                }
             }
             wl_pointer::Event::Leave { .. } => {
                 state.pointer_on = None;
+                state.on_row = false;
+                state.row_input.push(crate::control_row::RowInput::Pointer { inside: false });
+            }
+            wl_pointer::Event::Motion { surface_x, surface_y, .. } => {
+                state.pointer_xy = (surface_x, surface_y);
+                if state.pointer_on.is_some() || state.on_row {
+                    state.row_input.push(crate::control_row::RowInput::Motion);
+                }
             }
             wl_pointer::Event::Button { button, state: button_state, .. } => {
                 let down = matches!(button_state, WEnum::Value(wl_pointer::ButtonState::Pressed));
                 let up = matches!(button_state, WEnum::Value(wl_pointer::ButtonState::Released));
                 if !down && !up {
                     return;
+                }
+                let x = state.pointer_origin.0 + state.pointer_xy.0 as i32;
+                let y = state.pointer_origin.1 + state.pointer_xy.1 as i32;
+                // A press on the row is that square. It is not also a tint sample.
+                if state.on_row {
+                    if button != crate::task::BTN_LEFT {
+                        return;
+                    }
+                    if down {
+                        state.row_input.push(crate::control_row::RowInput::Press { x, y });
+                    } else {
+                        state.row_input.push(crate::control_row::RowInput::Release { x, y });
+                    }
+                    return;
+                }
+                if down && state.pointer_on.is_some() {
+                    state.row_input.push(crate::control_row::RowInput::Press { x, y });
+                } else if up {
+                    state.row_input.push(crate::control_row::RowInput::Release { x, y });
                 }
                 let mark = state.pointer_on.as_ref().map(|on| TintMark { id: on.id.clone(), generation: on.generation });
                 state.tint_samples.push(TintSample {
@@ -1077,6 +1171,12 @@ impl Dispatch<wl_pointer::WlPointer, ()> for OverlayState {
                     ts_ms: crate::socket::now_ms(),
                     mark,
                 });
+            }
+            wl_pointer::Event::Axis { axis, value, .. } => {
+                let vertical = matches!(axis, WEnum::Value(wl_pointer::Axis::VerticalScroll));
+                if vertical && value.abs() > f64::EPSILON && (state.pointer_on.is_some() || state.on_row) {
+                    state.row_input.push(crate::control_row::RowInput::Scroll);
+                }
             }
             _ => {}
         }
@@ -3210,6 +3310,8 @@ pub fn run(
         overlay.flush_and_dispatch()?;
         let samples = overlay.take_tint_samples();
         server.apply_tint_samples(samples);
+        let (screen_w, screen_h) = overlay.output_size();
+        server.apply_row_input(overlay.take_row_input(), screen_w as i32, screen_h as i32);
         if overlay.take_dirty() {
             let extent = overlay.extent();
             if extent.width != gpu.extent.width || extent.height != gpu.extent.height {
@@ -3238,14 +3340,21 @@ pub fn run(
             locked.load(Ordering::Relaxed) || screensaver.load(Ordering::Relaxed),
             sleeping.load(Ordering::Relaxed),
         );
+        let held = server.row_held_phrase();
         let mark_rects = if hide {
-            overlay.sync_marks(&[], &[], &[])
+            overlay.sync_marks(&[], &[], &[], None)
         } else {
             let boxes = server.visible_interests();
             let colors = server.mark_colors();
             let aims = server.visible_aim_ids();
-            overlay.sync_marks(&boxes, &colors, &aims)
+            overlay.sync_marks(&boxes, &colors, &aims, held.as_deref())
         };
+        if hide {
+            overlay.sync_row(None);
+        } else {
+            let (screen_w, screen_h) = overlay.output_size();
+            overlay.sync_row(server.row_paint(screen_w as i32, screen_h as i32));
+        }
         gpu.set_heat_marks(mark_rects);
 
         // --- Session ingress power policy (L1 + L2 + L3) ---

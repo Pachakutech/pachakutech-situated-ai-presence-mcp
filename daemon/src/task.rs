@@ -1,11 +1,12 @@
 //! Task book for one daemon run. In memory, empty at start, not kept across
 //! a restart. The highlight is the control. The squares beside the words stay
-//! unpainted.
+//! unpainted. The hover row is painted by the frame loop.
 //!
 //! Clicks and hotkeys enter the ledger only through [`crate::ui_input::apply_ui_event`].
 
+use crate::control_row::{button_hand, ControlRow, NoteFlush, Paint, Px as RowPx, Release, RowButton, RowHit, RowInput};
 use crate::gate::Tier;
-use crate::highlight::MarkColor;
+use crate::highlight::{MarkColor, UvBox};
 use crate::ledger::{Ledger, LedgerError, LedgerKind, ObservedAppend, PHRASE_CAP};
 use crate::protocol::{
     ClientControls, CreateTaskBody, ListPhraseFlagsBody, MatchInfo, MatchStatus, ObservedViewed, Proposal, ProposalResult,
@@ -294,6 +295,12 @@ pub struct TaskBook {
     tints: HashMap<String, MarkColor>,
     /// Locus marks to take down after a re-entry tap.
     dropped: Vec<String>,
+    /// One hover row. The frame loop paints it. `tick` hides it.
+    row: ControlRow,
+    /// A scroll arrived. `tick` hides the row. This is not the tour nudge.
+    row_scroll: bool,
+    row_w: i32,
+    row_h: i32,
 }
 
 impl TaskBook {
@@ -312,6 +319,10 @@ impl TaskBook {
             tint_press: None,
             tints: HashMap::new(),
             dropped: Vec::new(),
+            row: ControlRow::new(),
+            row_scroll: false,
+            row_w: 1920,
+            row_h: 1080,
         }
     }
 
@@ -589,6 +600,186 @@ impl TaskBook {
         self.tints.iter().map(|(id, color)| (id.clone(), *color)).collect()
     }
 
+    pub fn set_row_screen(&mut self, w: i32, h: i32) {
+        if w > 0 && h > 0 {
+            self.row_w = w;
+            self.row_h = h;
+        }
+    }
+
+    pub fn row_scroll_pending(&self) -> bool {
+        self.row_scroll
+    }
+
+    /// The page moved. `tick` flushes the field and hides the row.
+    pub fn note_row_scroll(&mut self) {
+        self.row_scroll = true;
+    }
+
+    pub fn row_is_open(&self) -> bool {
+        self.row.is_open()
+    }
+
+    pub fn row_editor_open(&self) -> bool {
+        self.row.editor_open()
+    }
+
+    pub fn row_held_phrase(&self) -> Option<String> {
+        self.row.phrase().map(str::to_string)
+    }
+
+    pub fn held_uv(&self, phrase_id: &str) -> Option<UvBox> {
+        self.row.held_uv(phrase_id)
+    }
+
+    pub fn row_color(&self, phrase_id: &str) -> MarkColor {
+        self.tints.get(phrase_id).copied().unwrap_or(MarkColor::Yellow)
+    }
+
+    pub fn row_paint(&self, screen_w: i32, screen_h: i32) -> Option<Paint> {
+        let phrase = self.row.phrase()?;
+        let color = self.tints.get(phrase).copied().unwrap_or(MarkColor::Yellow);
+        self.row.paint(color, screen_w, screen_h)
+    }
+
+    /// Pointer entered a tint. Remembers that box. Writes no hand.
+    /// A different phrase flushes the open field first.
+    pub fn row_enter(&mut self, phrase_id: &str, px: RowPx, uv: Option<UvBox>, now_ms: u64, ledger: &mut Ledger) {
+        if phrase_id.is_empty() {
+            return;
+        }
+        if self.row.phrase().is_some_and(|open| open != phrase_id) {
+            if let Some(flush) = self.row.scroll() {
+                self.store_flush(ledger, flush, now_ms);
+            }
+        }
+        self.row.enter(phrase_id, px, uv, now_ms);
+        if !self.tints.contains_key(phrase_id) {
+            self.remember_tint(phrase_id, ledger, phrase_id);
+        }
+    }
+
+    /// A phone tap with the row down. Same second, no hand.
+    pub fn row_touch(&mut self, phrase_id: &str, px: RowPx, uv: Option<UvBox>, now_ms: u64, ledger: &Ledger) -> bool {
+        let revealed = self.row.touch_reveal(phrase_id, px, uv, now_ms);
+        if revealed && !phrase_id.is_empty() && !self.tints.contains_key(phrase_id) {
+            self.remember_tint(phrase_id, ledger, phrase_id);
+        }
+        revealed
+    }
+
+    pub fn apply_row(&mut self, input: RowInput, ledger: &mut Ledger, now_ms: u64) {
+        match input {
+            RowInput::Enter { phrase_id, x, y, w, h } => {
+                self.row_enter(&phrase_id, RowPx { x, y, w, h }, None, now_ms, ledger);
+            }
+            RowInput::Pointer { inside } => self.row.pointer(inside, now_ms),
+            RowInput::Motion => self.row.motion(now_ms),
+            RowInput::Press { x, y } => self.row_press_at(x, y),
+            RowInput::Release { x, y } => self.row_release_at(x, y, ledger, now_ms),
+            RowInput::Scroll => self.note_row_scroll(),
+            RowInput::Text(text) => self.row_type(&text, ledger, now_ms),
+            RowInput::Backspace => self.row_backspace(ledger, now_ms),
+        }
+    }
+
+    pub fn row_press_at(&mut self, x: i32, y: i32) {
+        let hit = self.row.hit(x, y, self.row_w, self.row_h);
+        self.row.press(hit);
+    }
+
+    pub fn row_release_at(&mut self, x: i32, y: i32, ledger: &mut Ledger, now_ms: u64) {
+        let hit = self.row.hit(x, y, self.row_w, self.row_h);
+        self.finish_row_release(hit, ledger, now_ms);
+    }
+
+    pub fn row_type(&mut self, text: &str, ledger: &mut Ledger, now_ms: u64) {
+        if !self.row.editor_open() {
+            return;
+        }
+        match self.row.push_text(text) {
+            Some(flush) => self.store_flush(ledger, flush, now_ms),
+            None => self.row.note_rejected(),
+        }
+    }
+
+    pub fn row_backspace(&mut self, ledger: &mut Ledger, now_ms: u64) {
+        if !self.row.editor_open() {
+            return;
+        }
+        match self.row.backspace() {
+            Some(flush) => self.store_flush(ledger, flush, now_ms),
+            None => self.row.note_rejected(),
+        }
+    }
+
+    pub fn row_back(&mut self, ledger: &mut Ledger, now_ms: u64) {
+        match self.row.back() {
+            Some(flush) => self.store_flush(ledger, flush, now_ms),
+            None => self.row.note_rejected(),
+        }
+    }
+
+    fn finish_row_release(&mut self, hit: RowHit, ledger: &mut Ledger, now_ms: u64) {
+        match self.row.release(hit) {
+            Release::None | Release::Tint => {}
+            Release::Hand(button) => self.write_row_hand(button, ledger, now_ms),
+            Release::OpenNote => self.open_row_note(ledger, now_ms),
+            Release::Back => self.row_back(ledger, now_ms),
+        }
+    }
+
+    /// Check and X write one T0 row when this phrase is in the live twelve.
+    /// They do not call `reenter` and they do not set the aim.
+    fn write_row_hand(&mut self, button: RowButton, ledger: &mut Ledger, now_ms: u64) {
+        let Some(phrase) = self.row.phrase().map(str::to_string) else { return };
+        if !self.hand_reachable(&phrase) { return; }
+        let (color, kind) = button_hand(self.row_color(&phrase), button);
+        let event = match kind {
+            "accept" => UiEvent::Accept { phrase_id: phrase.clone() },
+            "deny" => UiEvent::Deny { phrase_id: phrase.clone() },
+            "skip" => UiEvent::Skip { phrase_id: phrase.clone() },
+            _ => return,
+        };
+        if apply_ui_event(ledger, event, now_ms).is_err() { return; }
+        self.tints.insert(phrase.clone(), color);
+        self.arm_leave(&phrase, now_ms);
+    }
+
+    fn hand_reachable(&self, phrase_id: &str) -> bool {
+        self.tasks.iter().any(|task| live(task.state) && task.items.iter().any(|item| item.phrase_id == phrase_id))
+    }
+
+    fn open_row_note(&mut self, ledger: &mut Ledger, now_ms: u64) {
+        let Some(phrase) = self.row.phrase().map(str::to_string) else { return };
+        let _ = apply_ui_event(ledger, UiEvent::ArmNote { phrase_id: phrase.clone() }, now_ms);
+        let (text, id) = match ledger.latest_revision(&phrase) {
+            Some((id, text)) => (text, Some(id)),
+            None => (String::new(), None),
+        };
+        self.row.open_editor(&text, id);
+    }
+
+    fn store_flush(&mut self, ledger: &mut Ledger, flush: NoteFlush, now_ms: u64) {
+        match ledger.commit_typed(&flush.phrase_id, &flush.text, flush.replaces.as_deref(), now_ms) {
+            Ok((id, text)) => self.row.note_stored(&id, &text),
+            Err(LedgerError::Rejected("rate_limited")) => self.row.note_pending(flush),
+            Err(_) => self.row.note_rejected(),
+        }
+    }
+
+    fn drive_row(&mut self, ledger: &mut Ledger, now_ms: u64) {
+        if self.row_scroll {
+            self.row_scroll = false;
+            if let Some(flush) = self.row.scroll() {
+                self.store_flush(ledger, flush, now_ms);
+            }
+        }
+        if let Some(flush) = self.row.tick(now_ms) {
+            self.store_flush(ledger, flush, now_ms);
+        }
+    }
+
     /// Pointer samples already stamped. A finished gesture appends one hand row.
     pub fn apply_tint_samples(&mut self, ledger: &mut Ledger, samples: Vec<TintSample>) -> Vec<String> {
         for sample in samples {
@@ -862,6 +1053,7 @@ impl TaskBook {
     }
 
     pub fn tick(&mut self, ledger: &mut Ledger, now_ms: u64) {
+        self.drive_row(ledger, now_ms);
         let due = self.shown.as_ref().and_then(|mark| {
             if !mark.dwelled && now_ms.saturating_sub(mark.at_ms) >= DWELL_MS {
                 Some((mark.phrase_id.clone(), mark.at_ms))
@@ -3916,5 +4108,264 @@ mod tests {
         assert_eq!(book_query(&settled, &settled_id)["passOnly"], false);
         assert!(book_query(&settled, &settled_id)["say"].is_null());
         assert_eq!(hand_kinds(&settled_ledger), before);
+    }
+
+    fn hover_book(loci: &[&str]) -> (TaskBook, Ledger, String) {
+        let mut book = TaskBook::new();
+        let mut ledger = Ledger::new();
+        let locus_ids: Vec<String> = loci.iter().copied().map(str::to_string).collect();
+        let items = locus_ids
+            .iter()
+            .map(|id| TourSeedItem { query: format!("words {id}"), narration: String::new(), page: None })
+            .collect();
+        let id = book
+            .insert_tour_chunk(
+                &mut ledger,
+                TourSeed {
+                    origin_user: true,
+                    mode: crate::protocol::TaskMode::Select,
+                    pace: crate::protocol::TaskPace::Wait,
+                    doc_key: None,
+                    items,
+                    locus_ids,
+                    again: false,
+                },
+                1_000,
+            )
+            .unwrap();
+        book.admit().unwrap();
+        book.begin_task(&id, &mut ledger, 2_000).unwrap();
+        (book, ledger, id)
+    }
+
+    fn row_px() -> crate::control_row::Px {
+        crate::control_row::Px { x: 400, y: 300, w: 200, h: 40 }
+    }
+
+    fn click_row(book: &mut TaskBook, ledger: &mut Ledger, hit: crate::control_row::RowHit, now: u64) {
+        let paint = book.row_paint(1920, 1080).expect("row");
+        let rect = paint.squares.iter().find(|(kind, _)| *kind == hit).unwrap_or_else(|| panic!("missing {hit:?}")).1;
+        book.row_press_at(rect.x + 2, rect.y + 2);
+        book.row_release_at(rect.x + 2, rect.y + 2, ledger, now);
+    }
+
+    fn hand_rows(ledger: &Ledger) -> Vec<(LedgerKind, Tier)> {
+        ledger
+            .events()
+            .iter()
+            .filter(|ev| matches!(ev.kind, LedgerKind::Accept | LedgerKind::Deny | LedgerKind::Skip))
+            .map(|ev| (ev.kind, ev.by))
+            .collect()
+    }
+
+    fn note_rows(ledger: &Ledger, phrase: &str) -> Vec<(String, Option<String>, String)> {
+        ledger
+            .events()
+            .iter()
+            .filter(|ev| ev.phrase_id == phrase && ev.kind == LedgerKind::Note)
+            .map(|ev| {
+                let note = ev.note.as_ref().expect("note");
+                (note.note_id.clone(), note.replaces.clone(), note.text.clone().unwrap_or_default())
+            })
+            .collect()
+    }
+
+    fn short_tap(book: &mut TaskBook, ledger: &mut Ledger, phrase: &str, down: u64, up: u64) {
+        book.apply_tint_samples(
+            ledger,
+            vec![
+                TintSample {
+                    down: true,
+                    button: BTN_LEFT,
+                    ts_ms: down,
+                    mark: Some(TintMark { id: phrase.into(), generation: 7 }),
+                },
+                TintSample {
+                    down: false,
+                    button: BTN_LEFT,
+                    ts_ms: up,
+                    mark: Some(TintMark { id: phrase.into(), generation: 7 }),
+                },
+            ],
+        );
+    }
+
+    #[test]
+    fn a_revealing_touch_and_a_hover_append_no_hand() {
+        let (mut book, mut ledger, _) = hover_book(&["lc-a", "lc-b"]);
+        let before = hand_rows(&ledger);
+        assert!(book.row_touch("lc-a", row_px(), None, 3_000, &ledger));
+        assert!(book.row_is_open());
+        assert_eq!(hand_rows(&ledger), before);
+        assert_eq!(book.row_color("lc-a"), MarkColor::Yellow);
+        assert!(!book.row_touch("lc-a", row_px(), None, 3_100, &ledger));
+        book.apply_row(crate::control_row::RowInput::Pointer { inside: false }, &mut ledger, 3_100);
+        book.tick(&mut ledger, 3_100 + crate::control_row::CONTROL_ROW_MS);
+        assert!(!book.row_is_open());
+    }
+
+    #[test]
+    fn the_tint_still_switches_and_a_square_press_is_not_a_tint() {
+        let (mut book, mut ledger, _) = hover_book(&["lc-a"]);
+        book.note_phrase_mark("lc-a", &mut ledger, 2_100);
+        book.row_enter("lc-a", row_px(), None, 2_500, &mut ledger);
+        short_tap(&mut book, &mut ledger, "lc-a", 3_000, 3_100);
+        short_tap(&mut book, &mut ledger, "lc-a", 3_200, 3_280);
+        assert!(3_200 - 3_100 < DOUBLE_CLICK_MS);
+        let paint = book.row_paint(1920, 1080).unwrap();
+        let check = paint.squares.iter().find(|(hit, _)| *hit == crate::control_row::RowHit::Check).unwrap().1;
+        book.row_press_at(check.x + 2, check.y + 2);
+        book.row_release_at(0, 0, &mut ledger, 3_400);
+        assert_eq!(
+            hand_rows(&ledger),
+            vec![(LedgerKind::Accept, Tier::T0Physical), (LedgerKind::Skip, Tier::T0Physical)]
+        );
+        click_row(&mut book, &mut ledger, crate::control_row::RowHit::Check, 3_500);
+        assert_eq!(hand_rows(&ledger).len(), 3);
+        assert_eq!(hand_rows(&ledger)[2].0, LedgerKind::Accept);
+        assert_eq!(book.row_color("lc-a"), MarkColor::Green);
+    }
+
+    #[test]
+    fn the_check_and_the_x_append_one_t0_row_and_no_keep() {
+        let (mut book, mut ledger, _) = hover_book(&["lc-a"]);
+        book.row_enter("lc-a", row_px(), None, 3_000, &mut ledger);
+        click_row(&mut book, &mut ledger, crate::control_row::RowHit::Check, 3_100);
+        assert_eq!(book.row_color("lc-a"), MarkColor::Green);
+        click_row(&mut book, &mut ledger, crate::control_row::RowHit::Check, 3_200);
+        assert_eq!(book.row_color("lc-a"), MarkColor::Yellow);
+        click_row(&mut book, &mut ledger, crate::control_row::RowHit::Deny, 3_300);
+        assert_eq!(book.row_color("lc-a"), MarkColor::Red);
+        click_row(&mut book, &mut ledger, crate::control_row::RowHit::Deny, 3_400);
+        assert_eq!(book.row_color("lc-a"), MarkColor::Yellow);
+        click_row(&mut book, &mut ledger, crate::control_row::RowHit::Deny, 3_500);
+        assert_eq!(book.row_color("lc-a"), MarkColor::Red);
+        let hands = hand_rows(&ledger);
+        assert_eq!(
+            hands,
+            vec![
+                (LedgerKind::Accept, Tier::T0Physical),
+                (LedgerKind::Skip, Tier::T0Physical),
+                (LedgerKind::Deny, Tier::T0Physical),
+                (LedgerKind::Skip, Tier::T0Physical),
+                (LedgerKind::Deny, Tier::T0Physical),
+            ]
+        );
+        let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/task.rs")).unwrap();
+        let start = src.find("fn write_row_hand").unwrap();
+        let body = &src[start..start + 700];
+        assert!(body.contains("apply_ui_event"));
+        assert!(!body.contains("reenter"));
+        assert!(!body.contains("Proposal::"));
+    }
+
+    #[test]
+    fn a_locus_outside_the_twelve_takes_no_hand_and_a_companion_does() {
+        let (mut book, mut ledger, id) = hover_book(&["lc-a", "lc-b"]);
+        book.row_enter("outside", row_px(), None, 3_000, &mut ledger);
+        click_row(&mut book, &mut ledger, crate::control_row::RowHit::Check, 3_100);
+        click_row(&mut book, &mut ledger, crate::control_row::RowHit::Deny, 3_200);
+        assert!(hand_rows(&ledger).is_empty());
+        book.row_enter("lc-b", row_px(), None, 3_300, &mut ledger);
+        click_row(&mut book, &mut ledger, crate::control_row::RowHit::Check, 3_400);
+        assert_eq!(hand_rows(&ledger), vec![(LedgerKind::Accept, Tier::T0Physical)]);
+        assert_eq!(book.row_color("lc-b"), MarkColor::Green);
+        assert_eq!(book_query(&book, &id)["index"], 0);
+    }
+
+    #[test]
+    fn the_note_field_revises_at_the_cadence_and_drops_a_suspect_string() {
+        let (mut book, mut ledger, _) = hover_book(&["lc-a", "lc-b"]);
+        book.row_enter("lc-a", row_px(), None, 10_000, &mut ledger);
+        let hands = hand_rows(&ledger);
+        click_row(&mut book, &mut ledger, crate::control_row::RowHit::Note, 10_000);
+        assert!(book.row_editor_open());
+        assert_eq!(hand_rows(&ledger), hands);
+        let paint = book.row_paint(1920, 1080).unwrap();
+        assert!(paint.editor);
+        assert!(paint.squares.iter().all(|(hit, _)| !matches!(hit, crate::control_row::RowHit::Check | crate::control_row::RowHit::Deny)));
+        book.row_type("hello", &mut ledger, 10_000);
+        assert_eq!(note_rows(&ledger, "lc-a"), vec![("nt-0000000000000000".into(), None, "hello".into())]);
+        book.row_type(" there", &mut ledger, 10_100);
+        assert_eq!(note_rows(&ledger, "lc-a").len(), 1);
+        book.tick(&mut ledger, 12_000);
+        let revised = note_rows(&ledger, "lc-a");
+        assert_eq!(revised.len(), 2);
+        assert_eq!(revised[1].1.as_deref(), Some(revised[0].0.as_str()));
+        assert_eq!(revised[1].2, "hello there");
+        book.row_type("!", &mut ledger, 12_100);
+        book.row_back(&mut ledger, 12_150);
+        assert!(!book.row_editor_open());
+        assert_eq!(note_rows(&ledger, "lc-a").len(), 2);
+        book.tick(&mut ledger, 14_150);
+        let flushed = note_rows(&ledger, "lc-a");
+        assert_eq!(flushed.len(), 3);
+        assert_eq!(flushed[2].2, "hello there!");
+        assert_eq!(flushed[2].1.as_deref(), Some(flushed[1].0.as_str()));
+
+        book.row_enter("lc-a", row_px(), None, 16_000, &mut ledger);
+        click_row(&mut book, &mut ledger, crate::control_row::RowHit::Note, 16_000);
+        let loaded = book.row_paint(1920, 1080).unwrap().text;
+        assert_eq!(loaded, "hello there!");
+        for _ in 0..loaded.chars().count() {
+            book.row_backspace(&mut ledger, 16_050);
+        }
+        book.row_back(&mut ledger, 16_100);
+        assert_eq!(note_rows(&ledger, "lc-a").len(), 3);
+
+        book.row_enter("lc-b", row_px(), None, 20_000, &mut ledger);
+        click_row(&mut book, &mut ledger, crate::control_row::RowHit::Note, 20_000);
+        book.row_type("one", &mut ledger, 20_000);
+        book.row_type(" two", &mut ledger, 20_100);
+        book.note_row_scroll();
+        book.tick(&mut ledger, 20_100);
+        assert!(!book.row_is_open());
+        assert_eq!(note_rows(&ledger, "lc-b").len(), 1);
+        book.tick(&mut ledger, 22_100);
+        let scrolled = note_rows(&ledger, "lc-b");
+        assert_eq!(scrolled.len(), 2);
+        assert_eq!(scrolled[1].2, "one two");
+        assert_eq!(scrolled[1].1.as_deref(), Some(scrolled[0].0.as_str()));
+
+        book.row_enter("lc-a", row_px(), None, 24_000, &mut ledger);
+        click_row(&mut book, &mut ledger, crate::control_row::RowHit::Note, 24_000);
+        book.row_type("aaaaaaaaaaaa", &mut ledger, 24_000);
+        assert_eq!(note_rows(&ledger, "lc-a").len(), 3);
+        book.tick(&mut ledger, 30_000);
+        assert_eq!(note_rows(&ledger, "lc-a").len(), 3);
+        let editor = book.row_paint(1920, 1080).unwrap();
+        assert!(editor.squares.iter().all(|(hit, _)| !matches!(hit, crate::control_row::RowHit::Check | crate::control_row::RowHit::Deny)));
+
+        let overlay = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/overlay.rs")).unwrap();
+        assert!(!overlay.contains("get_keyboard"));
+        assert!(!keyboard_grab_installed());
+        let row = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/overlay/row_surface.rs")).unwrap();
+        assert!(row.contains("get_keyboard"));
+        assert!(row.contains("KeyboardInteractivity::Exclusive"));
+        assert!(row.contains("KeyboardInteractivity::None"));
+        assert!(row.contains("keyboard.release()"));
+    }
+
+    #[test]
+    fn a_socket_cannot_write_the_hover_row() {
+        use crate::ledger::route_note;
+        use crate::protocol::{AddNoteBody, NoteVia, Proposal};
+        let proposal = Proposal::AddNote(AddNoteBody {
+            proposal_id: "n".into(),
+            text: "hello".into(),
+            via: NoteVia::Typed,
+            phrase_id: Some("lc-a".into()),
+            replaces: None,
+            burst: false,
+            wire_kind: None,
+        });
+        let mut ledger = Ledger::new();
+        let t2 = route_note(&proposal, Tier::T2Client, &mut ledger, 1).unwrap();
+        assert_eq!(t2.error.as_deref(), Some("not_allowed_for_tier:addNote"));
+        let t3 = route_note(&proposal, Tier::T3Sidecar, &mut ledger, 1).unwrap();
+        assert_eq!(t3.error.as_deref(), Some("not_allowed_for_tier:addNote"));
+        assert!(ledger.events().is_empty());
+        let denied = crate::gate::check(Tier::T2Client, &proposal).unwrap_err();
+        assert!(denied.error.unwrap().contains("not_allowed_for_tier"));
     }
 }

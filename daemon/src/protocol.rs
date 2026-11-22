@@ -36,6 +36,9 @@ pub enum Proposal {
         /// A declare with no phrase id is the aim either way.
         #[serde(default, rename = "aim")]
         aim: bool,
+        /// The page moved. Hide the hover row. No box is declared.
+        #[serde(default, rename = "rowScroll")]
+        row_scroll: bool,
     },
     #[serde(rename = "spawnPresence")]
     SpawnPresence {

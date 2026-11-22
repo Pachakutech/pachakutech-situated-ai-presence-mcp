@@ -87,6 +87,48 @@ pub fn clean(raw: &str) -> Result<CleanText, &'static str> {
     Ok(CleanText { text, normalized, truncated })
 }
 
+/// A note the editor will not store. The field draws no second check and no second X.
+/// Checked on cleaned text: a character repeated 12 or more times, more than 40
+/// characters with fewer than 6 distinct, a token of 25 or more characters with
+/// no vowel, or more than 60 percent of characters neither letters nor spaces.
+pub fn suspect(text: &str) -> bool {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.is_empty() {
+        return false;
+    }
+    let mut run = 1usize;
+    for pair in chars.windows(2) {
+        if pair[0] == pair[1] {
+            run += 1;
+            if run >= 12 {
+                return true;
+            }
+        } else {
+            run = 1;
+        }
+    }
+    if chars.len() > 40 {
+        let mut distinct = HashSet::new();
+        for ch in &chars {
+            distinct.insert(*ch);
+            if distinct.len() >= 6 {
+                break;
+            }
+        }
+        if distinct.len() < 6 {
+            return true;
+        }
+    }
+    for token in text.split_whitespace() {
+        let count = token.chars().count();
+        if count >= 25 && !token.chars().any(|ch| matches!(ch.to_ascii_lowercase(), 'a' | 'e' | 'i' | 'o' | 'u' | 'y')) {
+            return true;
+        }
+    }
+    let other = chars.iter().filter(|ch| !ch.is_alphabetic() && !ch.is_whitespace()).count();
+    other * 5 > chars.len() * 3
+}
+
 /// Plain overlay text. Control characters only. Markup stays as characters.
 pub fn overlay_plain(text: &str) -> String {
     strip_controls(text).0
@@ -485,5 +527,15 @@ mod tests {
             }
         }
         depth == 0
+    }
+
+    #[test]
+    fn suspect_notes_are_the_four_shapes() {
+        assert!(!suspect("a short note"));
+        assert!(suspect("aaaaaaaaaaaa"));
+        assert!(suspect(&"ab".repeat(21)));
+        assert!(suspect("bcdfghjklmnpqrstvwxzbcdfg"));
+        assert!(suspect("!!!! #### $$$$ %%%% ^^^^ &&&& ****"));
+        assert!(!suspect("a real sentence about the passage"));
     }
 }

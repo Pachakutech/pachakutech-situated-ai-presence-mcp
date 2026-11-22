@@ -283,6 +283,63 @@ impl Ledger {
         }
     }
 
+    /// Latest live note on this phrase, newest `ts` first. A deleted note is skipped.
+    /// The id is what the next edit's `replaces` points at.
+    pub fn latest_revision(&self, phrase_id: &str) -> Option<(String, String)> {
+        let phrase_id = cut(phrase_id.to_string());
+        let mut best: Option<(u64, usize, String, String)> = None;
+        for (index, ev) in self.events.iter().enumerate() {
+            if ev.phrase_id != phrase_id || ev.kind != LedgerKind::Note {
+                continue;
+            }
+            let Some(note) = ev.note.as_ref() else { continue };
+            let Some(text) = note.text.clone() else { continue };
+            let deleted = self.events.iter().any(|other| {
+                other.kind == LedgerKind::NoteDeleted && other.note.as_ref().is_some_and(|gone| gone.note_id == note.note_id)
+            });
+            if deleted {
+                continue;
+            }
+            if best.as_ref().is_none_or(|prev| (ev.ts_ms, index) >= (prev.0, prev.1)) {
+                best = Some((ev.ts_ms, index, note.note_id.clone(), text));
+            }
+        }
+        best.map(|(_, _, id, text)| (id, text))
+    }
+
+    /// One typed revision from the hover field. Same cadence and tier as `add_note`.
+    /// A suspect string is refused and is not retried by the caller.
+    /// A task item is reserved before its first event. The field may still write.
+    pub fn commit_typed(
+        &mut self,
+        phrase_id: &str,
+        text: &str,
+        replaces: Option<&str>,
+        now_ms: u64,
+    ) -> Result<(String, String), LedgerError> {
+        let phrase_id = cut(phrase_id.to_string());
+        if phrase_id.is_empty() || !self.holds(&phrase_id) {
+            return Err(LedgerError::Rejected("no_such_phrase"));
+        }
+        let cleaned = note_text::clean(text).map_err(LedgerError::Rejected)?;
+        if note_text::suspect(&cleaned.text) {
+            return Err(LedgerError::Rejected("suspect"));
+        }
+        let replaces = match replaces.map(str::trim).filter(|id| !id.is_empty()) {
+            Some(id) if self.live_note(&phrase_id, id) => Some(id.to_string()),
+            Some(_) => return Err(LedgerError::Rejected("no_such_note")),
+            None => None,
+        };
+        let stored = cleaned.text.clone();
+        let flags = NoteFlags {
+            transcribed: false,
+            truncated: cleaned.truncated,
+            normalized: cleaned.normalized,
+        };
+        let (_, note_id) = self.commit_note(phrase_id, cleaned.text, NoteVia::Typed, flags, replaces, now_ms)?;
+        Ok((note_id, stored))
+    }
+
     fn latest_task_id(&self, phrase_id: &str) -> Option<String> {
         let phrase_id = cut(phrase_id.to_string());
         self.events.iter().rev().find(|ev| ev.phrase_id == phrase_id && ev.task_id.is_some()).and_then(|ev| ev.task_id.clone())

@@ -1,6 +1,7 @@
 mod actors;
 mod avatar;
 mod highlight;
+mod control_row;
 mod overlay;
 mod placement;
 mod screen_heat;

@@ -1,6 +1,6 @@
 # The control row on a highlight
 
-21 November 2026. Spec. This file does not draw the row.
+Status: landed 21 November 2026. This file does not draw the row. The overlay frame loop paints it. A pointer scroll, or the driver's page move, hides it. The eighty-pixel nudge does not. Tests 1–10 passed. The live hover was not run. The daemon was not restarted.
 
 On this laptop a long press arrives as a double-click. Deny and the note need a control that a single click can reach. Hovering a highlight on the laptop, and a tap on that highlight on a phone, shows three buttons for about a second. The tint's own short tap and long tap stay, and they still change the color while those buttons are up.
 
@@ -35,7 +35,7 @@ Each square carries one icon, left to right: a pad and pencil, a green check, a 
 
 `CONTROL_ROW_MS` is 1000. The daemon clock already used for the gesture measures it. Pointer enter on a tint reveals the row and holds that tint's box. While the pointer remains on that tint or on the row, the second restarts. When the second elapses with the pointer on neither, the row hides and fitting may move the box again. A press that has started on a square holds the row until that press ends. The open note field holds the row until the field closes.
 
-A scroll hides the row at once, editor included. The user's scroll and the tour's nudge both count. The box is no longer held. The browser keeps its own scrolling. The deadline and the scroll are noticed by the tick, the way the tour's leave is a deadline. The gesture path does not sleep. The frame loop paints the row. It does not map, fetch, export, or open the store to choose a color.
+A scroll hides the row at once, editor included. The box is no longer held. The browser keeps its own scrolling. The presence's eighty-pixel nudge is the scroll `drop_the_nudge.md` removes. The deadline and the scroll are noticed by the tick, the way the tour's leave is a deadline. The gesture path does not sleep. The frame loop paints the row. It does not map, fetch, export, or open the store to choose a color.
 
 On a phone, a tap on the tint reveals the same row for the same second and writes no hand. That tap is the reveal. A later tap or long tap on the tint, while the row is up, is the switch below. The phone path is the same row. This spec records it with the laptop hover.
 
@@ -104,7 +104,7 @@ What already happens stays available to the tour. Accept or deny on the yellow l
 1. Pointer enter on a yellow tint shows the row and appends no hand. `visible_interest` is unchanged. A hover that never clicks leaves the tint yellow.
 2. The right edge of the red X meets the right edge of the highlight. The three squares are equal and run left from that edge, on the side with the larger gap to the screen edge. Equal gaps put the row above. The squares stay clear of the tint.
 3. While the row is up, a new OCR reading that would union or jump the box leaves the highlight on the box from the open. The X stays justified to that right edge. After the row hides, a later reading may fit the box.
-4. The row hides `CONTROL_ROW_MS` after the pointer leaves the tint and the row. Pointer motion inside that union restarts the second. A scroll hides the row at once, and the tour's nudge does too. A phone's revealing tap, in the touch test, writes no hand and uses the same second.
+4. The row hides `CONTROL_ROW_MS` after the pointer leaves the tint and the row. Pointer motion inside that union restarts the second. A scroll hides the row at once. A phone's revealing tap, in the touch test, writes no hand and uses the same second.
 5. While the row is up, the tint follows the switch table, including a second short tap inside 250 ms. A press that starts on the check does not also count as a tap on the tint. A slide off appends nothing.
 6. Check on yellow appends `accept` and paints green, with the check selected. Check on green appends `skip` and paints yellow. X on yellow or green appends `deny` and paints red, with the X selected. X on red appends `skip`. Each click is one T0 row. The project gains no keep.
 7. Check and X on a painted locus outside the twelve append no hand. The same clicks on a locus the task has entered append the row in test 6.
@@ -128,6 +128,7 @@ Drawing the row in this note. Holding the browser scroll still while the editor 
 - `docs/plans/complete/highlight_switch.md`
 - `docs/plans/complete/hand_and_phrase.md`
 - `docs/plans/tour_page_marks.md`
+- `docs/plans/drop_the_nudge.md`
 - `docs/plans/complete/C7b_locus_notes.md`
 - `docs/plans/research_tours.md` section 2a
 - `src/locate/core.ts`, `keepHeld`, `settleRule`

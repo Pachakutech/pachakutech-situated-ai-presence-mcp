@@ -271,6 +271,35 @@ test("the settle log names the rule and the scroll beside the widths", () => {
   );
 });
 
+test("an open row keeps the box it opened on", () => {
+  const shown = { u: 0.2, v: 0.3, w: 0.2, h: 0.04 };
+  const jumped = { u: 0.6, v: 0.7, w: 0.3, h: 0.08 };
+  const ruled = settleRule(shown, jumped, { w: 1920, h: 1080 }, null, true);
+  assert.equal(ruled.name, "hold");
+  assert.deepEqual(ruled.box, shown);
+  const held = keepHeld(
+    [
+      { phraseId: "lc-a", box: shown },
+      { phraseId: "lc-b", box: shown },
+    ],
+    [
+      { phraseId: "lc-a", u: jumped.u, v: jumped.v, w: jumped.w, h: jumped.h },
+      { phraseId: "lc-b", u: 0.1, v: 0.1, w: 0.1, h: 0.02 },
+    ],
+    new Set(["lc-a"]),
+  );
+  assert.deepEqual(held.find((mark) => mark.phraseId === "lc-a")?.box, shown);
+  assert.deepEqual(held.find((mark) => mark.phraseId === "lc-b")?.box, { u: 0.1, v: 0.1, w: 0.1, h: 0.02 });
+  const later = settleRule(
+    shown,
+    { u: shown.u, v: shown.v + 0.2, w: shown.w, h: shown.h * 2 },
+    { w: 1920, h: 1080 },
+    null,
+    false,
+  );
+  assert.equal(later.name, "jump");
+});
+
 test("a nudge log shows the scroll before and after", () => {
   assert.equal(nudgeLine(80, 100, 180, false), "[glass] nudge dy=80 scroll 100->180 center=no");
   assert.equal(nudgeLine(-80, null, 20, true), "[glass] nudge dy=-80 scroll ?->20 center=yes");

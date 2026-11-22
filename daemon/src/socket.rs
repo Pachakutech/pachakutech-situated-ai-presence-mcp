@@ -167,6 +167,22 @@ impl SocketServer {
         self.registry.lock().expect("registry mutex poisoned").tick_tasks(now_ms());
     }
 
+    /// Hover-row samples already carry screen pixels. Applied before `tick_tasks`.
+    pub fn apply_row_input(&self, input: Vec<crate::control_row::RowInput>, screen_w: i32, screen_h: i32) {
+        if input.is_empty() {
+            return;
+        }
+        self.registry.lock().expect("registry mutex poisoned").apply_row_input(input, screen_w, screen_h, now_ms());
+    }
+
+    pub fn row_paint(&self, screen_w: i32, screen_h: i32) -> Option<crate::control_row::Paint> {
+        self.registry.lock().expect("registry mutex poisoned").row_paint(screen_w, screen_h)
+    }
+
+    pub fn row_held_phrase(&self) -> Option<String> {
+        self.registry.lock().expect("registry mutex poisoned").row_held_phrase()
+    }
+
     /// Tint samples already carry the daemon clock from dispatch.
     pub fn apply_tint_samples(&self, samples: Vec<crate::task::TintSample>) {
         if samples.is_empty() {
@@ -513,7 +529,13 @@ fn dispatch(
             return (ProposalResult::ok(&proposal_id, None), false);
         }
         Proposal::QueryScreenText { .. } => {
-            return (ProposalResult::ok(&proposal_id, Some(text.snapshot_json(Instant::now()))), false);
+            let mut snap = text.snapshot_json(Instant::now());
+            if let Some(hold) = registry.lock().expect("registry mutex poisoned").row_hold_json() {
+                if let Some(map) = snap.as_object_mut() {
+                    map.insert("rowHold".to_string(), hold);
+                }
+            }
+            return (ProposalResult::ok(&proposal_id, Some(snap)), false);
         }
         Proposal::QuerySpeech { .. } => {
             return (ProposalResult::ok(&proposal_id, Some(speech.json())), false);
@@ -570,8 +592,11 @@ fn dispatch(
                 ProposalResult::ok(&proposal_id, Some(json!({ "concealed": concealed })))
             }
         }
-        Proposal::HighlightRegion { presence_id, description, u, v, w, h, duration_seconds, until_speech, until_conceal, phrase_id, aim, .. } => {
-            match reg.declare_interest(
+        Proposal::HighlightRegion { presence_id, description, u, v, w, h, duration_seconds, until_speech, until_conceal, phrase_id, aim, row_scroll, .. } => {
+            if row_scroll {
+                reg.note_row_scroll();
+                ProposalResult::ok(&proposal_id, None)
+            } else { match reg.declare_interest(
                 &presence_id,
                 phrase_id.as_deref(),
                 &description,
@@ -603,6 +628,7 @@ fn dispatch(
                     )
                 }
                 Err(e) => ProposalResult::err(&proposal_id, e),
+            }
             }
         }
         Proposal::AddArtifact { artifact_id, description, source_uri, .. } => {
@@ -792,6 +818,25 @@ mod tests {
             Proposal::HighlightRegion { aim, phrase_id, .. } => {
                 assert!(aim);
                 assert_eq!(phrase_id.as_deref(), Some("lc-1"));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn highlight_row_scroll_defaults_off() {
+        match p(
+            r#"{"kind":"highlightRegion","proposalId":"9","presenceId":"p-a","description":"the banner","u":0.1,"v":0.2,"w":0.3,"h":0.4,"durationSeconds":12}"#,
+        ) {
+            Proposal::HighlightRegion { row_scroll, .. } => assert!(!row_scroll),
+            other => panic!("unexpected {other:?}"),
+        }
+        match p(
+            r#"{"kind":"highlightRegion","proposalId":"9","presenceId":"p-a","description":"scroll","u":0,"v":0,"w":0.01,"h":0.01,"durationSeconds":1,"rowScroll":true}"#,
+        ) {
+            Proposal::HighlightRegion { row_scroll, aim, .. } => {
+                assert!(row_scroll);
+                assert!(!aim);
             }
             other => panic!("unexpected {other:?}"),
         }

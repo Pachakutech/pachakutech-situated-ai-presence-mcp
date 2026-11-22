@@ -43,6 +43,14 @@ function asGlassFrame(detail: Record<string, unknown>): GlassFrame {
   };
 }
 
+function frozenPhrases(rowHold: unknown): Set<string> {
+  const frozen = new Set<string>();
+  if (!rowHold || typeof rowHold !== "object") return frozen;
+  const phraseId = (rowHold as { phraseId?: unknown }).phraseId;
+  if (typeof phraseId === "string" && phraseId.length > 0) frozen.add(phraseId);
+  return frozen;
+}
+
 function handName(value: string | undefined): HandName {
   if (value === "accept" || value === "deny") return value;
   return "skip";
@@ -323,8 +331,27 @@ function liveIo(client: DaemonClient, presenceId: string | undefined, stopping: 
     }
   }
 
+  async function noteRowScroll(): Promise<void> {
+    if (!presenceId) return;
+    try {
+      await client.call("highlightRegion", {
+        presenceId,
+        description: "scroll",
+        u: 0,
+        v: 0,
+        w: 0.01,
+        h: 0.01,
+        durationSeconds: 1,
+        rowScroll: true,
+      });
+    } catch {
+      // A pointer axis on the highlight still hides the row.
+    }
+  }
+
   async function shiftAll(dy: number): Promise<void> {
     if (dy === 0 || boxes.size === 0) return;
+    await noteRowScroll();
     const height = await screenH();
     for (const [id, box] of [...boxes.entries()]) {
       const next = followScroll(box, dy, height);
@@ -382,19 +409,20 @@ function liveIo(client: DaemonClient, presenceId: string | undefined, stopping: 
         if (!(height > 0)) height = 1080;
       }
     }
+    const frozen = frozenPhrases(text.rowHold);
     const settled = marks.map((mark) => {
       const shown = boxes.get(mark.phraseId);
       const prior = measuredPrior.get(mark.phraseId) ?? null;
       measuredPrior.set(mark.phraseId, { u: mark.u, v: mark.v, w: mark.w, h: mark.h });
       if (!shown) return mark;
-      const ruled = settleRule(shown, mark, { w: width, h: height }, prior);
+      const ruled = settleRule(shown, mark, { w: width, h: height }, prior, frozen.has(mark.phraseId));
       console.error(settleLine(ruled.name, uvPixels(shown, width, height), uvPixels(mark, width, height), top));
       return { ...mark, ...ruled.box };
     });
     for (const id of measuredPrior.keys()) {
       if (!marks.some((mark) => mark.phraseId === id)) measuredPrior.delete(id);
     }
-    const next = keepHeld(held, settled);
+    const next = keepHeld(held, settled, frozen);
     for (const mark of next) {
       const prev = boxes.get(mark.phraseId);
       const same =
