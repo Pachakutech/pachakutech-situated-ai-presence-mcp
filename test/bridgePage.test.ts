@@ -54,8 +54,8 @@ test("P4 the content script posts the cursor and answers collect", () => {
   assert.match(content, /message\.type === "collect"/);
   assert.match(content, /getRangeAt\(0\)\.commonAncestorContainer/);
   assert.match(content, /querySelectorAll\("a\[href\]"\)/);
-  assert.match(content, /url\.protocol !== "http:"/);
-  assert.match(content, /url\.protocol !== "https:"/);
+  assert.match(content, /article,\s*\[role=article\]/);
+  assert.match(content, /inArticle/);
   assert.doesNotMatch(content, /type:\s*"capture"/);
   assert.deepEqual(manifest.content_scripts, [
     { matches: ["http://*/*", "https://*/*"], js: ["content.js"] },

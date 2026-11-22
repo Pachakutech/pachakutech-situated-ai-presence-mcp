@@ -17,20 +17,23 @@ function selectionRoot() {
   return node;
 }
 
-function httpHrefs(root) {
-  if (!root || typeof root.querySelectorAll !== "function") return [];
-  const hrefs = [];
-  for (const anchor of root.querySelectorAll("a[href]")) {
-    let url;
-    try {
-      url = new URL(anchor.href);
-    } catch {
-      continue;
-    }
-    if (url.protocol !== "http:" && url.protocol !== "https:") continue;
-    hrefs.push(url.href);
+function inSelection(anchor, root) {
+  if (!root || !anchor) return false;
+  if (anchor === root) return true;
+  return typeof root.contains === "function" && root.contains(anchor);
+}
+
+function collectAnchors() {
+  const root = selectionRoot();
+  const anchors = [];
+  for (const anchor of document.querySelectorAll("a[href]")) {
+    const href = anchor.getAttribute("href");
+    if (typeof href !== "string" || href.length === 0) continue;
+    const item = { href, inSelection: inSelection(anchor, root) };
+    if (typeof anchor.closest === "function" && anchor.closest("article, [role=article]")) item.inArticle = true;
+    anchors.push(item);
   }
-  return hrefs;
+  return anchors;
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -39,7 +42,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     const selection = document.getSelection();
     sendResponse({
       selection: selection ? selection.toString() : "",
-      hrefs: httpHrefs(selectionRoot()),
+      anchors: collectAnchors(),
     });
     return;
   }

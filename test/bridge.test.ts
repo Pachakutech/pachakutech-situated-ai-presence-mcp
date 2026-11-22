@@ -364,7 +364,7 @@ test("H13 a refused job socket returns sidecar_down and does not call selectLoci
     log: () => {},
   });
   assert.equal(code, 0);
-  assert.deepEqual(decode(Buffer.concat(chunks))[0], { type: "error", error: "sidecar_down" });
+  assert.deepEqual(decode(Buffer.concat(chunks))[0], { type: "error", error: "sidecar_down", projectId: "pj-1" });
   assert.equal(rec.calls.some((call) => call.kind === "createProject"), true);
   assert.equal(rec.calls.some((call) => call.kind === "selectLoci" || call.kind === "startProjectTour"), false);
   assert.equal(held.length, 0);

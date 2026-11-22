@@ -234,6 +234,8 @@ P1 through P6 pass. Commit title: `bridge: inject the cursor into the page (BR3)
 
 ## BR4 — collector, status, reconnect
 
+Status: landed 21 November 2026. The collector offers the selection and the selected links, or the article links when none are selected. The popup shows the host reply. A dropped port connects again at 0.5 s, 1 s, 2 s, 4 s, and 8 s while that reply is still outstanding.
+
 ### Goal
 
 The list the popup opens with is the tabs the user checked. A page collector can add links from the current page: the selection, the links that belong with it, duplicates gone, the page's own URL gone, forty at most. The selection text may fill the assertion field, and the user can clear it. An empty field stays the non-directed send. The popup shows the host's state. A dropped port retries while a send is unfinished.

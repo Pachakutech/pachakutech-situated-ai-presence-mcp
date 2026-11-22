@@ -174,13 +174,19 @@ export async function handleCapture(message: unknown, deps: HandleDeps): Promise
       compileLine(projectId, plan),
     );
     const kept = heldProposals(reply);
-    if (!kept.ok) return { type: "error", error: kept.error };
+    if (!kept.ok) return errorReply(kept.error, projectId);
     deps.held.push(...kept.proposals);
   } catch (error) {
-    if (error instanceof BridgeError) return { type: "error", error: error.bridgeError };
+    if (error instanceof BridgeError) return errorReply(error.bridgeError, projectId);
     return { type: "error", error: messageOf(error) };
   }
   return capturedReply(projectId, plan);
+}
+
+function errorReply(error: string, projectId: string): Record<string, unknown> {
+  const reply: Record<string, unknown> = { type: "error", error };
+  if (error === "sidecar_down") reply.projectId = projectId;
+  return reply;
 }
 
 function capturedReply(projectId: string, plan: CapturePlan): Record<string, unknown> {
