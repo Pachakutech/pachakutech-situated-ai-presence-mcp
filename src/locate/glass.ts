@@ -11,8 +11,6 @@ export {
   keepHeld,
   settleBox,
   followScroll,
-  inOuterBand,
-  centerWithMark,
   linesFromColumns,
 } from "./core.js";
 export type { HandName, GlassLocus, Uv, GlassMark, HeldMark, OpenPage, SourcedLocus } from "./core.js";

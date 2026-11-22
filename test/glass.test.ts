@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  centerWithMark,
   followScroll,
   glassDeclareLine,
   glassMarks,
@@ -9,14 +8,13 @@ import {
   onPage,
   keepHeld,
   linesFromColumns,
-  nudgeLine,
   settleBox,
   settleLine,
   settleRule,
   uvPixels,
   type GlassLocus,
 } from "../src/locate/core.ts";
-import { holdNudge, nudgeHeld, releaseScroll, resetScrollHold, scrollDrifted, scrollTaken, takeScroll } from "../src/locate/scrollHold.ts";
+import { noteOwnedScroll, releaseScroll, resetScrollHold, scrollDrifted } from "../src/locate/scrollHold.ts";
 import type { Line } from "../src/locate/core.ts";
 
 function line(y: number, text: string): Line {
@@ -197,18 +195,13 @@ test("a miss leaves a placed mark and a hit moves it", () => {
   assert.deepEqual(added.map((mark) => mark.phraseId), ["lc-a", "lc-b"]);
 });
 
-test("a scroll into the outer band drops the mark and a centering nudge moves it with the page", () => {
+test("a scroll into the outer band drops the mark", () => {
   const inside = followScroll({ u: 0.1, v: 0.4, w: 0.2, h: 0.04 }, 0, 1000);
   assert.equal(inside, inside);
   const shifted = followScroll({ u: 0.1, v: 0.4, w: 0.2, h: 0.04 }, 100, 1000);
   assert.notEqual(shifted, "drop");
   if (shifted !== "drop") assert.ok(Math.abs(shifted.v - 0.3) < 1e-9);
   assert.equal(followScroll({ u: 0.1, v: 0.08, w: 0.2, h: 0.04 }, 40, 1000), "drop");
-  const centered = centerWithMark({ u: 0.1, v: 0.96, w: 0.2, h: 0.03 }, 1000, 80);
-  assert.ok(centered);
-  assert.equal(centered?.dy, 80);
-  assert.ok(centered && Math.abs(centered.mark.v - (0.96 - 0.08)) < 1e-9);
-  assert.equal(centerWithMark({ u: 0.1, v: 0.4, w: 0.2, h: 0.04 }, 1000, 80), null);
 });
 
 test("screen-text columns become lines", () => {
@@ -300,33 +293,21 @@ test("an open row keeps the box it opened on", () => {
   assert.equal(later.name, "jump");
 });
 
-test("a nudge log shows the scroll before and after", () => {
-  assert.equal(nudgeLine(80, 100, 180, false), "[glass] nudge dy=80 scroll 100->180 center=no");
-  assert.equal(nudgeLine(-80, null, 20, true), "[glass] nudge dy=-80 scroll ?->20 center=yes");
-  assert.equal(nudgeLine(80, 10.2, 90.6, false), "[glass] nudge dy=80 scroll 10->91 center=no");
-});
-
-test("their scroll stays taken and a pointer holds one nudge", () => {
+test("a scroll the driver did not issue is a drift", () => {
   resetScrollHold();
   assert.equal(scrollDrifted(10), false);
   assert.equal(scrollDrifted(12), false);
   assert.equal(scrollDrifted(20), true);
-  takeScroll();
-  assert.equal(scrollTaken(), true);
-  holdNudge();
-  assert.equal(nudgeHeld(), true);
-  assert.equal(nudgeHeld(), false);
+  noteOwnedScroll(20);
+  assert.equal(scrollDrifted(21), false);
   resetScrollHold();
 });
 
 test("the next document's offset is not the page that was left", () => {
   resetScrollHold();
   assert.equal(scrollDrifted(400), false);
-  takeScroll();
-  holdNudge();
+  noteOwnedScroll(400);
   releaseScroll();
-  assert.equal(scrollTaken(), false);
-  assert.equal(nudgeHeld(), false);
   assert.equal(scrollDrifted(12), false);
   assert.equal(scrollDrifted(14), false);
   assert.equal(scrollDrifted(40), true);

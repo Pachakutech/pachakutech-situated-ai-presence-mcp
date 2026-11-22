@@ -121,6 +121,24 @@ test("a mark already up stays located when the find misses", async () => {
   assert.deepEqual(tinted.calls.resolve, ["located"]);
 });
 
+test("a first mark in the outer band is the reading", async () => {
+  const items: TourItem[] = [{ phraseId: "ph-1", query: "the line", narration: "", scroll: false }];
+  const { deps } = scripted(items, false);
+  const painted: LocateHit[] = [];
+  deps.locate = async () => ({ ok: true, u: 0.1, v: 0.96, w: 0.2, h: 0.03 });
+  deps.highlight = async (hit) => {
+    painted.push(hit);
+  };
+  await runTour("tk-1", deps);
+  assert.equal(painted.length, 1);
+  assert.equal(painted[0].ok, true);
+  if (!painted[0].ok) return;
+  assert.equal(painted[0].v, 0.96);
+  assert.equal(painted[0].u, 0.1);
+  assert.equal(painted[0].w, 0.2);
+  assert.equal(painted[0].h, 0.03);
+});
+
 test("a permitted find is located once, and a miss is not nudged", async () => {
   const items: TourItem[] = [{ phraseId: "ph-1", query: "below", narration: "Below.", scroll: true }];
   const missed = scripted(items, true, false);

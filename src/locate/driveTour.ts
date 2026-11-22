@@ -58,7 +58,6 @@ export type DriveIo = {
   conceal?(): Promise<void>;
   pointerHold?(): Promise<boolean>;
   glass?(task: TourView): Promise<GlassHit[]>;
-  center?(hit: LocateHit): Promise<LocateHit | null>;
   releaseScroll?(): void;
   holdPhrase?(): Promise<void>;
   markShown?(phraseId: string): Promise<boolean>;
@@ -114,7 +113,6 @@ function tourDeps(io: DriveIo, taskId: string): TourDeps {
     conceal: io.conceal,
     pointerHold: io.pointerHold,
     glass: io.glass,
-    center: io.center,
     releaseScroll: io.releaseScroll,
     holdPhrase: io.holdPhrase,
     markShown: io.markShown,

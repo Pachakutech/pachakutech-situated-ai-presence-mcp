@@ -307,6 +307,10 @@ test("the tour driver does not photograph", () => {
   assert.equal(placePdf.includes("deps.ocr"), false);
   assert.equal(placePdf.includes("locateStill"), false);
   assert.equal(placePdf.includes("recall"), false);
+  assert.equal(placePdf.includes("scrollBy"), false);
+  assert.equal(placePdf.includes("nudge"), false);
+  assert.equal(pdf.includes("scrollBy"), false);
+  assert.equal(pdf.includes("NUDGE_PX"), false);
 });
 
 const browser = {
@@ -323,12 +327,13 @@ const browser = {
   focusHistoryID: 1,
 };
 
-test("placeWeb scrolls from the find and does not photograph", async () => {
+test("placeWeb returns a high find and a low find without scrolling", async () => {
   const { placeWeb } = await import("../dist/locate/web.js");
   let shots = 0;
   let finds = 0;
-  const scrolls: number[] = [];
-  const placed = await placeWeb(
+  let sleeps = 0;
+  const logs: string[] = [];
+  const high = await placeWeb(
     { query: "allyl group", pad: 0, timeoutMs: 10_000, noOpen: true, verify: true },
     {
       async clients() {
@@ -341,36 +346,29 @@ test("placeWeb scrolls from the find and does not photograph", async () => {
         shots += 1;
         return [];
       },
-      async scrollBy(_address: string, dy: number) {
-        scrolls.push(dy);
-        return true;
-      },
       async open() {},
       async findInPage() {
         finds += 1;
         return { found: true, rect: { x: 97, y: 20, w: 200, h: 18 } };
       },
-      async scrollEnds() {
-        return { atTop: false, atBottom: false };
+      async sleep() {
+        sleeps += 1;
       },
-      async sleep() {},
       now: () => 1_000,
-      log() {},
+      log(line: string) {
+        logs.push(line);
+      },
     },
   );
-  assert.equal(placed.ok, true);
+  assert.equal(high.ok, true);
+  if (!high.ok) return;
+  assert.equal(high.nudgePx, 0);
   assert.equal(finds, 1);
   assert.equal(shots, 0);
-  assert.deepEqual(scrolls, [-80]);
-});
+  assert.equal(sleeps, 1);
+  assert.equal(logs.some((line) => line.includes("viewer find high")), true);
 
-test("a low find still scrolls when the page was taken", async () => {
-  const { placeWeb } = await import("../dist/locate/web.js");
-  const { resetScrollHold, takeScroll } = await import("../dist/locate/scrollHold.js");
-  resetScrollHold();
-  takeScroll();
-  const scrolls: number[] = [];
-  const placed = await placeWeb(
+  const low = await placeWeb(
     { query: "the inductive effect", pad: 0, timeoutMs: 10_000, noOpen: true, verify: true },
     {
       async clients() {
@@ -382,25 +380,27 @@ test("a low find still scrolls when the page was taken", async () => {
       async ocr() {
         return [];
       },
-      async scrollBy(_address: string, dy: number) {
-        scrolls.push(dy);
-        return true;
-      },
       async open() {},
       async findInPage() {
+        finds += 1;
         return { found: true, rect: { x: 24, y: 891, w: 992, h: 44 } };
       },
-      async scrollEnds() {
-        return { atTop: false, atBottom: false };
+      async sleep() {
+        sleeps += 1;
       },
-      async sleep() {},
       now: () => 1_000,
-      log() {},
+      log(line: string) {
+        logs.push(line);
+      },
     },
   );
-  assert.equal(placed.ok, true);
-  assert.deepEqual(scrolls, [80]);
-  resetScrollHold();
+  assert.equal(low.ok, true);
+  if (!low.ok) return;
+  assert.equal(low.nudgePx, 0);
+  assert.equal(finds, 2);
+  assert.equal(sleeps, 2);
+  assert.equal(logs.some((line) => line.includes("viewer find low")), true);
+  assert.equal(logs.some((line) => line.includes("[glass] nudge") || line.startsWith("locate: scroll")), false);
 });
 
 test("a find that misses is not yet found and is not photographed", async () => {
@@ -419,15 +419,9 @@ test("a find that misses is not yet found and is not photographed", async () => 
         shots += 1;
         return [];
       },
-      async scrollBy() {
-        return true;
-      },
       async open() {},
       async findInPage() {
         return { found: false, rect: null };
-      },
-      async scrollEnds() {
-        return { atTop: false, atBottom: false };
       },
       async sleep() {},
       now: () => 1_000,
@@ -457,9 +451,6 @@ test("a navigated window waits for the find and does not launch a browser", asyn
         shots += 1;
         return [];
       },
-      async scrollBy() {
-        return true;
-      },
       async open() {
         opened += 1;
       },
@@ -467,9 +458,6 @@ test("a navigated window waits for the find and does not launch a browser", asyn
         finds += 1;
         if (finds < 3) return { found: false, rect: null };
         return { found: true, rect: { x: 40, y: 400, w: 240, h: 18 } };
-      },
-      async scrollEnds() {
-        return { atTop: false, atBottom: false };
       },
       async sleep(ms: number) {
         now += ms;
@@ -502,16 +490,10 @@ test("a navigated find that stays absent waits out the paint and does not photog
         shots += 1;
         return [];
       },
-      async scrollBy() {
-        return true;
-      },
       async open() {},
       async findInPage() {
         finds += 1;
         return { found: false, rect: null };
-      },
-      async scrollEnds() {
-        return { atTop: false, atBottom: false };
       },
       async sleep(ms: number) {
         now += ms;
@@ -526,7 +508,7 @@ test("a navigated find that stays absent waits out the paint and does not photog
   assert.equal(shots, 0);
 });
 
-test("placePdf turns the page and does not photograph", async () => {
+test("placePdf turns the page and does not scroll by eighty pixels", async () => {
   const { placePdf } = await import("../dist/locate/pdf.js");
   const actions: string[] = [];
   let shots = 0;

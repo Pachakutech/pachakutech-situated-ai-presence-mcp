@@ -12,7 +12,6 @@ import { cueGroups, resolveCues, speechHoldSeconds, splitSentences, type CueIn }
 import { WINDOW_PATH, locatePdf, placePdf } from "./pdf.js";
 import { locateStill, type StillDeps } from "./surface.js";
 import { LOCATE_PORT, locatePortPath, publishLocatePort, resolveLocatePort, webArgs } from "./openSource.js";
-import { noteOwnedScroll } from "./scrollHold.js";
 import { locateWeb, placeWeb, type Client, type LocateErr, type LocateOk, type LocateResult, type WebOpts } from "./web.js";
 
 const MAX_SECONDS = 360;
@@ -339,10 +338,6 @@ async function cdpCall(expression: string): Promise<{ ok: true; value: unknown }
   }
 }
 
-async function cdpEval(expression: string): Promise<boolean> {
-  return (await cdpCall(expression)).ok;
-}
-
 function asRect(value: unknown): Box | null {
   if (!value || typeof value !== "object") return null;
   const row = value as { x?: unknown; y?: unknown; w?: unknown; h?: unknown };
@@ -352,24 +347,6 @@ function asRect(value: unknown): Box | null {
   const h = Number(row.h);
   if (![x, y, w, h].every((n) => Number.isFinite(n))) return null;
   return { x, y, w, h };
-}
-
-async function focus(address: string): Promise<boolean> {
-  const dispatched = await run("hyprctl", ["dispatch", `hl.dsp.focus({ window = "address:${address}" })`]);
-  if (dispatched.code !== 0) return false;
-  try {
-    const active = (await hyprJson(["activewindow", "-j"])) as { address?: string };
-    return active.address === address;
-  } catch {
-    return false;
-  }
-}
-
-async function press(key: string, times: number): Promise<void> {
-  const args = ["-d", "25"];
-  for (let i = 0; i < times; i++) args.push("-k", key);
-  const result = await run("wtype", args);
-  if (result.code !== 0) throw new Error(result.stderr.trim() || "wtype failed");
 }
 
 /** The port file is a copy. A missing copy still uses LOCATE_PORT when that port is listening. */
@@ -406,23 +383,6 @@ async function findInPage(phrase: string): Promise<{ found: boolean; rect: Box |
   return { found: row.found === true, rect: asRect(row.rect) };
 }
 
-/** True when the document cannot move further that way. Null when the debugger is down. */
-async function scrollEnds(): Promise<{ atTop: boolean; atBottom: boolean } | null> {
-  await ensureCdpPort();
-  if (!cdpPort) return null;
-  const reply = await cdpCall(`(() => {
-    const el = document.scrollingElement || document.documentElement;
-    if (!el) return null;
-    const top = el.scrollTop;
-    const roomBelow = el.scrollHeight - el.clientHeight - top;
-    return { atTop: top <= 2, atBottom: roomBelow <= 2 };
-  })()`);
-  if (!reply.ok || !reply.value || typeof reply.value !== "object") return null;
-  const row = reply.value as { atTop?: unknown; atBottom?: unknown };
-  if (typeof row.atTop !== "boolean" || typeof row.atBottom !== "boolean") return null;
-  return { atTop: row.atTop, atBottom: row.atBottom };
-}
-
 async function findPdfPage(path: string, query: string): Promise<number | null> {
   const result = await run("pdftotext", ["-q", "-layout", path, "-"]);
   if (result.code !== 0) {
@@ -449,10 +409,6 @@ export async function readScrollTop(): Promise<number | null> {
   return reply.ok && typeof reply.value === "number" ? reply.value : null;
 }
 
-export async function nudgePage(dy: number): Promise<boolean> {
-  return scrollBy("", dy);
-}
-
 export async function outputSize(): Promise<{ w: number; h: number }> {
   return screenSize();
 }
@@ -474,21 +430,6 @@ export async function pointerOverChromium(): Promise<boolean> {
   } catch {
     return false;
   }
-}
-
-async function scrollBy(address: string, dy: number): Promise<boolean> {
-  if (dy === 0) return true;
-  await ensureCdpPort();
-  if (cdpPort && (await cdpEval(`window.scrollBy(0, ${Math.round(dy)}); document.scrollingElement && document.scrollingElement.scrollTop`))) {
-    const top = await readScrollTop();
-    if (top != null) noteOwnedScroll(top);
-    return true;
-  }
-  if (!(await focus(address))) return false;
-  const key = dy > 0 ? "Down" : "Up";
-  const times = Math.min(24, Math.max(1, Math.round(Math.abs(dy) / 40)));
-  await press(key, times);
-  return true;
 }
 
 async function openBrowser(uri: string): Promise<void> {
@@ -649,14 +590,11 @@ export async function placeForTour(flags: PlaceFlags): Promise<{ ok: true } | Lo
         clients: async () => asClients(await hyprJson(["clients", "-j"])),
         screen: screenSize,
         ocr: refuseShot,
-        scrollBy,
         open: openBrowser,
         findInPage,
-        scrollEnds: () => scrollEnds(),
         sleep,
         now: () => Date.now(),
         log,
-        scrollTop: readScrollTop,
       },
     );
     if (!placed.ok) return placed;
@@ -741,14 +679,11 @@ export async function locateRegion(flags: Flags): Promise<LocateResult | LocateE
         clients: async () => asClients(await hyprJson(["clients", "-j"])),
         screen: screenSize,
         ocr: ocrRect,
-        scrollBy,
         open: openBrowser,
         findInPage,
-        scrollEnds: () => scrollEnds(),
         sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
         now: () => Date.now(),
         log,
-        scrollTop: readScrollTop,
       });
     } else if (flags.source === "pdf") {
       result = await locatePdf(

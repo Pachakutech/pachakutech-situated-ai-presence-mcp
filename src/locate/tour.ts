@@ -66,12 +66,10 @@ export type TourDeps = {
   sleep(ms: number): Promise<void>;
   /** Not used to travel. The mark stays until the phrase leaves or the page is replaced. */
   conceal?(): Promise<void>;
-  /** True when the pointer is in the target window during this hop. One nudge is then withheld. */
+  /** True when the pointer is in the target window during this hop. */
   pointerHold?(): Promise<boolean>;
   /** Latest screen-text reading. A miss leaves a mark already placed. */
   glass?(task: TourView): Promise<GlassHit[]>;
-  /** One centering nudge, with the mark already shifted by that delta. */
-  center?(hit: LocateHit): Promise<LocateHit | null>;
   /** Their scroll is over and the next hop is ours. */
   releaseScroll?(): void;
   /** Blocks on the phrase just shown. Returns when the daemon leaves it, or the viewer window does. */
@@ -110,7 +108,7 @@ async function reportMiss(deps: TourDeps, taskId: string, item: TourItem, placed
 /**
  * Begin the task, then locate, mark, and speak each item the daemon still
  * calls current. The find finishes before the mark. A narrated phrase stays
- * until a hand. Their scroll moves the mark and does not lock the nudge. It does not start the next cue.
+ * until a hand. Their scroll moves the mark. It does not start the next cue.
  */
 export async function runTour(taskId: string, deps: TourDeps): Promise<void> {
   await deps.tourSignal({ taskId, signal: "begin" });
@@ -168,8 +166,7 @@ export async function runTour(taskId: string, deps: TourDeps): Promise<void> {
     if (withheld) {
       await reportMiss(deps, taskId, item, placed);
     } else {
-      const found = await deps.locate(item);
-      const hit = found.ok && deps.center ? (await deps.center(found)) ?? found : found;
+      const hit = await deps.locate(item);
       if (!hit.ok) {
         await reportMiss(deps, taskId, item, placed);
       } else {

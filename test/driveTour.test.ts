@@ -442,14 +442,38 @@ test("a fresh reading of a marked phrase settles before it is declared", () => {
   assert.ok(watch.indexOf("settleLine") < watch.indexOf("keepHeld"));
 });
 
-test("a nudge logs the scroll it asked for and the scroll that happened", () => {
+test("the tour paints the reading and does not nudge the page", () => {
   const live = readFileSync(join(root, "src/locate/driveTourLive.ts"), "utf8");
-  const center = live.slice(live.indexOf("async center(hit)"), live.indexOf("glass: readGlass"));
-  assert.equal(center.includes("nudgeLine(step.dy, before, after, true)"), true);
+  const tour = readFileSync(join(root, "src/locate/tour.ts"), "utf8");
   const web = readFileSync(join(root, "src/locate/web.ts"), "utf8");
-  const nudge = web.slice(web.indexOf("async function ownedNudge"), web.indexOf("function sameWindow"));
-  assert.equal(nudge.includes("nudgeLine(dy, before, after, false)"), true);
-  assert.ok(nudge.indexOf("scrollTop") < nudge.indexOf("scrollBy"));
+  const core = readFileSync(join(root, "src/locate/core.ts"), "utf8");
+  const run = readFileSync(join(root, "src/locate/run.ts"), "utf8");
+  for (const [name, text] of [
+    ["driveTourLive", live],
+    ["tour", tour],
+    ["web", web],
+    ["core", core],
+    ["run", run],
+  ] as const) {
+    assert.equal(text.includes("nudgePage"), false, name);
+    assert.equal(text.includes("centerWithMark"), false, name);
+    assert.equal(text.includes("nudgeLine"), false, name);
+    assert.equal(text.includes("ownedNudge"), false, name);
+    assert.equal(text.includes("NUDGE_PX"), false, name);
+  }
+  assert.equal(tour.includes("deps.center"), false);
+  assert.equal(live.includes("followScroll"), true);
+  assert.equal(live.includes("async function shiftAll"), true);
+  assert.equal(run.includes("export async function readScrollTop"), true);
+  assert.equal(run.includes("function scrollBy"), false);
+  assert.equal(run.includes("window.scrollBy"), false);
+  const highlight = live.slice(live.indexOf("async highlight(hit, item)"), live.indexOf("async conceal()"));
+  assert.equal(highlight.includes("for (const mark of marks)"), true);
+  assert.equal(highlight.includes('paint(item.phraseId, box, item.query ?? "passage", true)'), true);
+  const placeWeb = web.slice(web.indexOf("export async function placeWeb"), web.indexOf("export async function locateWeb"));
+  assert.equal(placeWeb.includes("edgeScroll"), false);
+  assert.equal(placeWeb.includes("scrollBy"), false);
+  assert.ok(placeWeb.indexOf("findInPage") < placeWeb.lastIndexOf("WINDOW_SETTLE_MS"));
 });
 
 test("a finished list keeps the bars until the latched window closes", () => {

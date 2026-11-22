@@ -16,25 +16,13 @@ export type Box = { x: number; y: number; w: number; h: number };
 
 export type Run = { start: number; end: number };
 
-export type SeekState = {
-  /** Pixels already spent centering a phrase that is on the glass. */
-  nudgePx: number;
-};
-
-export type SeekAction =
-  | { type: "scroll"; dy: number }
-  | { type: "accept" }
-  | { type: "fail"; error: "quote_not_found" };
+export type SeekAction = { type: "accept" } | { type: "fail"; error: "quote_not_found" };
 
 const TOKEN_CAP = 40;
 const LINE_SLACK = 10;
 const COLUMN_GAP = 80;
-export const NUDGE_PX = 80;
 /** The highlight is the matched ink. Callers add pixels only by passing a pad. */
 export const BOX_PAD = 0;
-const NUDGE_CAP = 400;
-/** Short downward steps when the opening of a passage is on the glass and the end is not. */
-export const END_NUDGE_MAX = NUDGE_CAP / NUDGE_PX;
 const BAND_LOW = 0.82;
 const BAND_HIGH = 0.62;
 /** One text line. The seat tolerates this much, and a margin mark needs a gap at least this wide. */
@@ -295,15 +283,6 @@ export function pageContaining(text: string, query: string): number | null {
     if (pages[i].replace(/\s+/g, " ").toLowerCase().includes(phrase)) return i + 1;
   }
   return null;
-}
-
-/**
- * Downward steps still allowed when a passage's opening is on the glass and the end is not.
- * The passage itself, a missing opening, or a spent cap is a stop.
- */
-export function endStep(passageFound: boolean, openingFound: boolean, used: number): "nudge" | "stop" {
-  if (passageFound || !openingFound || used >= END_NUDGE_MAX) return "stop";
-  return "nudge";
 }
 
 /**
@@ -791,11 +770,6 @@ export function settleLine(name: SettleName, shown: Box, measured: Box, scrollTo
   return `[glass] settle ${name} shown ${shown.w}x${shown.h} at ${shown.x},${shown.y} measured ${measured.w}x${measured.h} at ${measured.x},${measured.y} scroll ${scroll}`;
 }
 
-export function nudgeLine(dy: number, before: number | null, after: number | null, center: boolean): string {
-  const end = (value: number | null) => (value == null || !Number.isFinite(value) ? "?" : String(Math.round(value)));
-  return `[glass] nudge dy=${dy} scroll ${end(before)}->${end(after)} center=${center ? "yes" : "no"}`;
-}
-
 /** Screen pixels for a UV box. The glass log prints these, not the fractions. */
 export function uvPixels(box: Uv, screenW: number, screenH: number): Box {
   return {
@@ -832,18 +806,6 @@ export function followScroll(mark: Uv, dyPx: number, screenH: number): Uv | "dro
   const next = { ...mark, v: mark.v - dyPx / screenH };
   if (next.v < EDGE_BAND || next.v + next.h > 1 - EDGE_BAND) return "drop";
   return next;
-}
-
-export function inOuterBand(mark: Uv): boolean {
-  return mark.v < EDGE_BAND || mark.v + mark.h > 1 - EDGE_BAND;
-}
-
-/** One centering nudge while we own the scroll. Null when the mark already sits inside the seat. */
-export function centerWithMark(mark: Uv, screenH: number, nudgePx: number): { dy: number; mark: Uv } | null {
-  if (!inOuterBand(mark) || !(screenH > 0) || nudgePx === 0) return null;
-  const low = mark.v + mark.h > 1 - EDGE_BAND;
-  const dy = low ? Math.abs(nudgePx) : -Math.abs(nudgePx);
-  return { dy, mark: { ...mark, v: mark.v - dy / screenH } };
 }
 
 /** Columns from one screen-text message, grouped into lines for findRun. */
@@ -956,26 +918,11 @@ export function glassPhraseBox(phraseId: string, opening: string, frame: GlassFr
 
 /**
  * What to do after one photograph of a view the viewer has already placed.
- * A missing phrase stops. A phrase in the band is the box. A phrase high or
- * low moves eighty pixels. A nudge that does not move the picture, or 400
- * pixels of nudging, accepts the box where it sits. Positive `dy` moves the
- * document down, so the words rise on the screen.
+ * A missing phrase stops. A phrase on the glass is the box, high or low.
  */
-export function seek(
-  placement: { band: "ok" | "low" | "high" } | null,
-  pictureMoved: boolean,
-  state: SeekState,
-): { action: SeekAction; state: SeekState } {
-  if (!placement) return { action: { type: "fail", error: "quote_not_found" }, state };
-  if (placement.band === "ok") return { action: { type: "accept" }, state };
-  if ((!pictureMoved && state.nudgePx > 0) || state.nudgePx >= NUDGE_CAP) {
-    return { action: { type: "accept" }, state };
-  }
-  const dy = placement.band === "low" ? NUDGE_PX : -NUDGE_PX;
-  return {
-    action: { type: "scroll", dy },
-    state: { ...state, nudgePx: state.nudgePx + NUDGE_PX },
-  };
+export function seek(placement: { band: "ok" | "low" | "high" } | null): SeekAction {
+  if (!placement) return { type: "fail", error: "quote_not_found" };
+  return { type: "accept" };
 }
 
 export function fingerprint(lines: Line[]): string {

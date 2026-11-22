@@ -3,12 +3,12 @@
 
 import { DaemonClient } from "../daemonClient.js";
 import { launchListed, locatePortOpen, navigateLocate, spawnListed } from "./openSource.js";
-import { centerWithMark, followScroll, glassMarks, keepHeld, linesFromColumns, lociFromProject, onPage, type GlassLocus, type HandName, type OpenPage, type SourcedLocus, type Uv } from "./glass.js";
+import { followScroll, glassMarks, keepHeld, linesFromColumns, lociFromProject, onPage, type GlassLocus, type HandName, type OpenPage, type SourcedLocus, type Uv } from "./glass.js";
 import { noteOwnedScroll, releaseScroll as clearScrollHold, scrollDrifted } from "./scrollHold.js";
-import { listHyprClients, nudgePage, outputSize, readPageGeneration, readScrollTop, readViewerPage } from "./run.js";
+import { listHyprClients, outputSize, readPageGeneration, readScrollTop, readViewerPage } from "./run.js";
 import { runTour, type GlassHit, type TourItem, type TourView } from "./tour.js";
 import { driveUntilStop, type DriveIo, type OpenRequest } from "./driveTour.js";
-import { NUDGE_PX, frameAfterSettle, glassPhraseBox, nudgeLine, settleLine, settleRule, uvPixels, type GlassFrame } from "./core.js";
+import { frameAfterSettle, glassPhraseBox, settleLine, settleRule, uvPixels, type GlassFrame } from "./core.js";
 import { latchedWindowClosed, viewerStillMapped, type ViewerKind } from "./viewer.js";
 
 function asTourView(detail: Record<string, unknown>, taskId: string): TourView {
@@ -564,18 +564,6 @@ function liveIo(client: DaemonClient, presenceId: string | undefined, stopping: 
     },
     releaseScroll() {
       clearScrollHold();
-    },
-    async center(hit) {
-      if (boxes.size > 0 || hit.u === undefined || hit.v === undefined || hit.w === undefined || hit.h === undefined) {
-        return null;
-      }
-      const step = centerWithMark({ u: hit.u, v: hit.v, w: hit.w, h: hit.h }, await screenH(), NUDGE_PX);
-      if (!step) return null;
-      const before = await readScrollTop();
-      if (!(await nudgePage(step.dy))) return null;
-      const after = await readScrollTop();
-      console.error(nudgeLine(step.dy, before, after, true));
-      return { ...hit, ...step.mark };
     },
     glass: readGlass,
     async speak(text) {

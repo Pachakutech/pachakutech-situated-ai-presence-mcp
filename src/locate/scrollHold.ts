@@ -1,32 +1,9 @@
-/** An offset remembered for one document. The tour does not lock a nudge on it. */
+/** An offset remembered for one document. The next document starts clean. */
 
-let taken = false;
-let nudge = false;
 let owned: number | null = null;
 
-export function takeScroll(): void {
-  taken = true;
-}
-
 export function releaseScroll(): void {
-  taken = false;
-  nudge = false;
   owned = null;
-}
-
-export function scrollTaken(): boolean {
-  return taken;
-}
-
-/** The next nudge check returns true once, then the hold is gone. */
-export function holdNudge(): void {
-  nudge = true;
-}
-
-export function nudgeHeld(): boolean {
-  if (!nudge) return false;
-  nudge = false;
-  return true;
 }
 
 /** The first reading is ours. A later reading more than two pixels away is theirs. */
@@ -43,7 +20,5 @@ export function noteOwnedScroll(top: number): void {
 }
 
 export function resetScrollHold(): void {
-  taken = false;
-  nudge = false;
   owned = null;
 }
