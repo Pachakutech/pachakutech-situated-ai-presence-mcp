@@ -35,6 +35,7 @@ send.addEventListener("click", async () => {
     .filter((line) => line.length > 0);
   if (keepUrls(raw).urls.length === 0) return;
   const active = rows.find((tab) => tab.active);
+  const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
   const frame = {
     type: "capture",
     assertion: assertion.value,
@@ -42,5 +43,5 @@ send.addEventListener("click", async () => {
     pageTitle: active?.title ?? "",
     sourcePage: active?.url,
   };
-  await chrome.runtime.sendMessage({ type: "capture", frame });
+  await chrome.runtime.sendMessage({ type: "capture", frame, tabId: activeTab?.id });
 });

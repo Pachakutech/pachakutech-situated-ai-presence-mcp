@@ -188,6 +188,8 @@ R1 through R8 pass. Commit title: `bridge: cursor back to the extension (BR2)`.
 
 ## BR3 — page
 
+Status: landed 21 November 2026. The content script on the capture tab posts the cursor and dispatches `pachakutech-presence`. The badge for that tab reads `on` after the first cursor and clears when the native port disconnects.
+
 ### Goal
 
 The tab that sent the capture can read the cursor. Other tabs receive nothing. The toolbar shows that this tab is receiving tour choices.
