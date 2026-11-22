@@ -48,6 +48,7 @@ Status: cleaned 3 November 2026. The 31 October record described code through C7
 | Terminal watch of the register | The file moves. The command is still unnamed. | The ticket that writes the command. |
 | `GLB lacks viseme_aa` | One failing daemon test, left in place. | Not this list. |
 | Section 4a | Recorded, not adopted. The default judge keeps every shortlisted span. | A ticket that adopts 4a. |
+| The presence nudges eighty pixels | `viewer_find.md`, `scroll_highlight.md`, and `next_locus_unmarked.md` keep the lift. The page painter now paints every locus the reading finds, and the lift moves that whole page. | `drop_the_nudge.md`. The find and the PDF page turn stay. |
 
 ## Plan against plan
 
@@ -57,5 +58,6 @@ Status: cleaned 3 November 2026. The 31 October record described code through C7
 | Embeddings | `research_tours.md` section 4 says "later." C6 and C10 say out of scope. `presence_command_layer.md` still offers them as the shortlist. | The retrieval that is in scope is full-text over the directory snapshot or the URL list the user named. Do not add an embedding index inside the remaining tickets. |
 | Discourse tree, a joint ask score, bbox coordinates | `index_and_loci.md` records them as a reading of the landed index. | That file schedules nothing. `B1b_retrieval.md` records the empty shortlist and picks no method. |
 | The sidecar drops spans | `research_tours.md` section 4 and C10: a yes/no may drop a shortlisted span. The default judge keeps every span. | Section 4a is the recorded expansion: a contrary pass, and the drop stays off. C10's U tests change only when a ticket adopts 4a. |
+| The presence only nudges | `research_tours.md` section 5, `presence_command_layer.md`, and `local_multimodal_reflex.md` still give the presence the eighty-pixel nudge after the find. | `drop_the_nudge.md` is the order. Those sentences stay until a ticket rewrites them. The find stays. |
 
 The design sentence in `local_multimodal_reflex.md` stays as it is: accept a phrase id the project already chose, mint `ph-n` only when an `observePhrase` arrives without one, and the research locus id and the ledger phrase id are the same string when a tour shows that locus.
