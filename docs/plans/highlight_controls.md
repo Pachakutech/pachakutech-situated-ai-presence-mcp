@@ -81,7 +81,7 @@ A locus outside the twelve can show the row in the stored color. Check and X on 
 
 The pad-and-pencil square opens the locus note on that highlight. A click arms the phrase and writes no hand. The square expands, on the same side of the highlight, into a text field, still right-aligned with the highlight and clear of the tint.
 
-The pad-and-pencil icon becomes a back icon in that same square, the way one SVG replaces another. The check and the X leave for as long as the field is open. The editor has the back button and the field.
+The pad-and-pencil icon becomes a back icon in that same square, the way one SVG replaces another. The check and the X leave for as long as the field is open. The editor has the back button and the field. That back icon closes the note. The arrows that change the document are `document_arrows.md`.
 
 The field writes the text into the note log as the user edits. Each stored change is a new note with `replaces`, so the log is the history of the edit. Writes use the cadence C7b already has, one committed note per phrase per 2 seconds. Back closes the field and writes the latest text when it differs from the last stored revision. An empty field stores nothing new and leaves the last revision in place. The sanitation and the quotas stay that pipeline. A suspect string is not stored. The editor draws no second check and no second X for the note.
 
@@ -129,6 +129,7 @@ Drawing the row in this note. Holding the browser scroll still while the editor 
 - `docs/plans/complete/hand_and_phrase.md`
 - `docs/plans/tour_page_marks.md`
 - `docs/plans/drop_the_nudge.md`
+- `docs/plans/document_arrows.md`, the previous and next document. The note's back icon stays the field.
 - `docs/plans/complete/C7b_locus_notes.md`
 - `docs/plans/research_tours.md` section 2a
 - `src/locate/core.ts`, `keepHeld`, `settleRule`

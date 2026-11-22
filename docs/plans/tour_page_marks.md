@@ -80,3 +80,4 @@ The three-presence cap is a different limit. It stays.
 - `docs/plans/research_tours.md`
 - `docs/plans/highlight_controls.md`, the hover row of note, accept, and deny. It does not move the aim.
 - `docs/plans/drop_the_nudge.md`, the eighty-pixel nudge. The find and the page turn stay.
+- `docs/plans/document_arrows.md`, the previous and next document at the ends of the scroll.

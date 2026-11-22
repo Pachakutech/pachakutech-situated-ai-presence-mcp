@@ -48,7 +48,8 @@ Status: cleaned 3 November 2026. The 31 October record described code through C7
 | Terminal watch of the register | The file moves. The command is still unnamed. | The ticket that writes the command. |
 | `GLB lacks viseme_aa` | One failing daemon test, left in place. | Not this list. |
 | Section 4a | Recorded, not adopted. The default judge keeps every shortlisted span. | A ticket that adopts 4a. |
-| The presence nudges eighty pixels | `viewer_find.md`, `scroll_highlight.md`, and `next_locus_unmarked.md` keep the lift. The page painter now paints every locus the reading finds, and the lift moves that whole page. | `drop_the_nudge.md`. The find and the PDF page turn stay. |
+| The presence nudges eighty pixels | `viewer_find.md`, `scroll_highlight.md`, and `next_locus_unmarked.md` keep the lift. The page painter now paints every locus the reading finds, and the lift moves that whole page. | Landed as `drop_the_nudge.md`. The find and the PDF page turn stay. |
+| Back and forward on the glass | Next and previous source are hotkeys. No bubble was specified. A selected top or bottom locus was the old trigger, and every locus on the page is now painted. | `document_arrows.md`. The arrows show at the top and bottom of the scroll. |
 
 ## Plan against plan
 
