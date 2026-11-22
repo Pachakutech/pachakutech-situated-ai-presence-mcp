@@ -75,3 +75,4 @@ The hold, the slide-off, the green and the red, and the three names are in `hand
 - `docs/plans/command_layer_protocol.md` section 6, the skill lines that still offer `controls: check`
 - `docs/plans/review_demo.md`, the register of skip, accept, and deny
 - `docs/plans/hand_and_phrase.md`
+- `docs/plans/highlight_controls.md`, the hover row. The short tap and the long tap stay.

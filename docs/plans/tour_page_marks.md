@@ -78,3 +78,4 @@ The three-presence cap is a different limit. It stays.
 - `docs/plans/complete/tour_box_for_the_aim.md`
 - `docs/plans/complete/scroll_release_delta.md`
 - `docs/plans/research_tours.md`
+- `docs/plans/highlight_controls.md`, the hover row of note, accept, and deny. It does not move the aim.
