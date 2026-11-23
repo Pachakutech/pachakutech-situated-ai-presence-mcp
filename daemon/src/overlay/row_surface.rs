@@ -1,5 +1,6 @@
 //! The hover row is its own layer-shell surface, outside the tint.
 //! Keyboard focus exists only while the note field is open, and only on this surface.
+//! Escape closes that field. Enter stays a newline.
 //! `get_keyboard` stays in this file so `overlay.rs` does not take the keyboard.
 
 use std::os::fd::{AsFd, OwnedFd};
@@ -338,6 +339,21 @@ fn key_char(key: u32, shift: bool) -> Option<char> {
     })
 }
 
+/// Evdev key-down while the note field holds the keyboard.
+/// Escape is 1 and closes the field. Enter is 28 and keypad enter is 96, and both stay a newline.
+fn key_down(key: u32, shift: bool) -> Option<RowInput> {
+    if key == 1 {
+        return Some(RowInput::Escape);
+    }
+    if key == 14 {
+        return Some(RowInput::Backspace);
+    }
+    if key == 28 || key == 96 {
+        return Some(RowInput::Text("\n".into()));
+    }
+    key_char(key, shift).map(|ch| RowInput::Text(ch.to_string()))
+}
+
 impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, RowToken> for OverlayState {
     fn event(
         state: &mut Self,
@@ -413,17 +429,33 @@ impl Dispatch<wl_keyboard::WlKeyboard, RowToken> for OverlayState {
         if !down {
             return;
         }
-        if key == 14 {
-            state.row_input.push(RowInput::Backspace);
-            return;
+        if let Some(input) = key_down(key, state.row_shift > 0) {
+            state.row_input.push(input);
         }
-        if key == 28 || key == 96 {
-            state.row_input.push(RowInput::Text("\n".into()));
-            return;
-        }
-        if let Some(ch) = key_char(key, state.row_shift > 0) {
-            state.row_input.push(RowInput::Text(ch.to_string()));
-        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::key_down;
+    use crate::control_row::RowInput;
+
+    #[test]
+    fn enter_pushes_a_newline_and_escape_pushes_none() {
+        assert_eq!(key_down(28, false), Some(RowInput::Text("\n".into())));
+        assert_eq!(key_down(96, false), Some(RowInput::Text("\n".into())));
+        assert_eq!(key_down(28, true), Some(RowInput::Text("\n".into())));
+        assert_eq!(key_down(1, false), Some(RowInput::Escape));
+        assert_eq!(key_down(1, true), Some(RowInput::Escape));
+        assert_eq!(key_down(30, false), Some(RowInput::Text("a".into())));
+        assert_eq!(key_down(14, false), Some(RowInput::Backspace));
+
+        let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/overlay/row_surface.rs")).unwrap();
+        let dispatch = src.find("impl Dispatch<wl_keyboard::WlKeyboard").expect("keyboard");
+        let end = src[dispatch..].find("\n#[cfg(test)]").expect("tests");
+        let body = &src[dispatch..dispatch + end];
+        assert!(body.contains("key_down("));
+        assert!(!body.contains("RowInput::Text"));
     }
 }
 

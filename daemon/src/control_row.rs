@@ -86,6 +86,8 @@ pub enum RowInput {
     Scroll,
     Text(String),
     Backspace,
+    /// Escape while the field is open. The same close as the back square.
+    Escape,
 }
 
 /// What the frame loop draws. Screen pixels. Absent when the row is hidden.

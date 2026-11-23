@@ -688,6 +688,7 @@ impl TaskBook {
             RowInput::Scroll => self.note_row_scroll(),
             RowInput::Text(text) => self.row_type(&text, ledger, now_ms),
             RowInput::Backspace => self.row_backspace(ledger, now_ms),
+            RowInput::Escape => self.row_escape(ledger, now_ms),
         }
     }
 
@@ -726,6 +727,14 @@ impl TaskBook {
             Some(flush) => self.store_flush(ledger, flush, now_ms),
             None => self.row.note_rejected(),
         }
+    }
+
+    /// Escape is the back square while the field is open. A closed field is left alone.
+    pub fn row_escape(&mut self, ledger: &mut Ledger, now_ms: u64) {
+        if !self.row.editor_open() {
+            return;
+        }
+        self.row_back(ledger, now_ms);
     }
 
     fn finish_row_release(&mut self, hit: RowHit, ledger: &mut Ledger, now_ms: u64) {
@@ -4390,6 +4399,83 @@ mod tests {
         assert!(!book.row_editor_open());
         assert_eq!(note_rows(&ledger, "lc-a").len(), 1);
         assert_eq!(note_rows(&ledger, "lc-a")[0].2, "ab\ncd");
+    }
+
+    #[test]
+    fn escape_on_a_changed_draft_stores_it_and_closes_the_field() {
+        let (mut book, mut ledger, _) = hover_book(&["lc-a"]);
+        book.row_enter("lc-a", row_px(), None, 50_000, &mut ledger);
+        click_row(&mut book, &mut ledger, crate::control_row::RowHit::Note, 50_000);
+        book.row_type("kept", &mut ledger, 50_000);
+        book.row_type(" more", &mut ledger, 50_050);
+        assert_eq!(note_rows(&ledger, "lc-a").len(), 1);
+        book.apply_row(crate::control_row::RowInput::Escape, &mut ledger, 52_000);
+        assert!(!book.row_editor_open());
+        assert!(book.row_is_open());
+        let notes = note_rows(&ledger, "lc-a");
+        assert_eq!(notes.len(), 2);
+        assert_eq!(notes[1].2, "kept more");
+        assert_eq!(notes[1].1.as_deref(), Some(notes[0].0.as_str()));
+        let paint = book.row_paint(1920, 1080).unwrap();
+        assert!(!paint.editor);
+
+        let row = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/overlay/row_surface.rs")).unwrap();
+        let arm_at = row.find("fn arm_keys").expect("arm_keys");
+        let destroy_at = row[arm_at..].find("\nfn destroy").expect("destroy");
+        let arm = &row[arm_at..arm_at + destroy_at];
+        assert!(arm.contains("if editor {"));
+        assert!(arm.contains("KeyboardInteractivity::Exclusive"));
+        assert!(arm.contains("get_keyboard"));
+        assert!(arm.contains("KeyboardInteractivity::None"));
+        assert!(arm.contains("keyboard.release()"));
+        let exclusive = arm.find("KeyboardInteractivity::Exclusive").unwrap();
+        let grab = arm.find("get_keyboard").unwrap();
+        let none = arm.find("KeyboardInteractivity::None").unwrap();
+        assert!(exclusive < grab && grab < none);
+        assert!(row.contains("arm_keys(state, qh, paint.editor)"));
+    }
+
+    #[test]
+    fn escape_on_an_unchanged_draft_closes_and_stores_nothing() {
+        let (mut book, mut ledger, _) = hover_book(&["lc-a"]);
+        book.row_enter("lc-a", row_px(), None, 10_000, &mut ledger);
+        click_row(&mut book, &mut ledger, crate::control_row::RowHit::Note, 10_000);
+        book.apply_row(crate::control_row::RowInput::Escape, &mut ledger, 10_050);
+        assert!(!book.row_editor_open());
+        assert!(note_rows(&ledger, "lc-a").is_empty());
+
+        click_row(&mut book, &mut ledger, crate::control_row::RowHit::Note, 10_100);
+        book.row_type("same", &mut ledger, 10_100);
+        book.apply_row(crate::control_row::RowInput::Escape, &mut ledger, 10_150);
+        assert!(!book.row_editor_open());
+        let notes = note_rows(&ledger, "lc-a");
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].2, "same");
+
+        click_row(&mut book, &mut ledger, crate::control_row::RowHit::Note, 12_200);
+        assert_eq!(book.row_paint(1920, 1080).unwrap().text, "same");
+        book.apply_row(crate::control_row::RowInput::Escape, &mut ledger, 12_250);
+        assert!(!book.row_editor_open());
+        assert_eq!(note_rows(&ledger, "lc-a").len(), 1);
+        assert_eq!(note_rows(&ledger, "lc-a")[0].2, "same");
+    }
+
+    #[test]
+    fn escape_with_the_field_closed_appends_no_note() {
+        let (mut book, mut ledger, _) = hover_book(&["lc-a"]);
+        book.apply_row(crate::control_row::RowInput::Escape, &mut ledger, 10_000);
+        assert!(note_rows(&ledger, "lc-a").is_empty());
+        assert!(!book.row_editor_open());
+        assert!(!book.row_is_open());
+
+        book.row_enter("lc-a", row_px(), None, 10_100, &mut ledger);
+        book.apply_row(crate::control_row::RowInput::Escape, &mut ledger, 10_200);
+        assert!(book.row_is_open());
+        assert!(!book.row_editor_open());
+        assert!(note_rows(&ledger, "lc-a").is_empty());
+        let paint = book.row_paint(1920, 1080).unwrap();
+        assert!(!paint.editor);
+        assert!(paint.squares.iter().any(|(hit, _)| *hit == crate::control_row::RowHit::Check));
     }
 
     #[test]
