@@ -169,6 +169,14 @@ test("a frame that already holds the sentence does not wait for another sample",
   assert.equal(frame?.seq, 1);
 });
 
+test("the closed beat is not the tour opening", () => {
+  const src = readFileSync(new URL("./glassRead.test.ts", import.meta.url), "utf8");
+  const retired = "two painted readings that miss" + " are the beat";
+  assert.equal(src.includes(retired), false);
+  assert.equal(src.includes("a closed wait still ends on two painted misses"), true);
+  assert.equal(src.includes("two painted samples that miss do not end the tour opening"), true);
+});
+
 test("a closed wait still ends on two painted misses", async () => {
   let step = 0;
   const frame = await frameAfterSettle(

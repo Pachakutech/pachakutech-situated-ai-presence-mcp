@@ -109,6 +109,8 @@ async function reportMiss(deps: TourDeps, taskId: string, item: TourItem, placed
  * Begin the task, then locate, mark, and speak each item the daemon still
  * calls current. The find finishes before the mark. A narrated phrase stays
  * until a hand. Their scroll moves the mark. It does not start the next cue.
+ * A locate with no phrase has been abandoned. The miss is recorded then.
+ * narrationDone follows the speech, and that return does not send it.
  */
 export async function runTour(taskId: string, deps: TourDeps): Promise<void> {
   await deps.tourSignal({ taskId, signal: "begin" });
@@ -169,6 +171,11 @@ export async function runTour(taskId: string, deps: TourDeps): Promise<void> {
       const hit = await deps.locate(item);
       if (!hit.ok) {
         await reportMiss(deps, taskId, item, placed);
+        if (deps.halted?.()) return;
+        const again = await deps.queryTask(taskId);
+        const moved = again.state === "active" && again.items[again.index]?.phraseId !== item.phraseId;
+        if (moved) continue;
+        return;
       } else {
         await deps.highlight(hit, item);
         await deps.resolveItem({

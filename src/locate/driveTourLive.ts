@@ -609,7 +609,8 @@ function liveIo(client: DaemonClient, presenceId: string | undefined, stopping: 
         page: item.page ?? undefined,
       });
       await trackTravel(beforeTop, beforeGen);
-      if (!placed.ok) return { ok: false };
+      // The find's clock does not finish the item. A later sample that contains the phrase is the resume.
+      if (!placed.ok) console.error("tour: the find has not answered");
       await rememberViewer();
       const settle = Date.now();
       const frame = await frameAfterSettle(

@@ -288,17 +288,120 @@ test("leaving the opening records the miss and does not speak", async () => {
   ];
   const spoken: string[] = [];
   const resolved: string[] = [];
+  const signals: string[] = [];
+  let locates = 0;
   const { deps } = scripted(items, false);
-  deps.locate = async () => ({ ok: false });
+  deps.locate = async () => {
+    locates += 1;
+    return { ok: false };
+  };
   deps.speak = async (text) => {
     spoken.push(text);
   };
   deps.resolveItem = async (body) => {
     resolved.push(body.match);
   };
+  deps.tourSignal = async (body) => {
+    signals.push(body.signal);
+  };
+  deps.holdPhrase = async () => {
+    signals.push("hold");
+  };
   await runTour("tk-1", deps);
+  assert.equal(locates, 1);
   assert.deepEqual(spoken, []);
   assert.deepEqual(resolved, ["notYetFound"]);
+  assert.deepEqual(signals, ["begin"]);
+});
+
+test("the window closing or the driver stopping abandons the opening", async () => {
+  const items: TourItem[] = [
+    { phraseId: "ph-1", query: "We are the hollow men", narration: "We are the hollow men.", scroll: false },
+  ];
+  for (const cause of ["window", "driver"]) {
+    const spoken: string[] = [];
+    const resolved: string[] = [];
+    const signals: string[] = [];
+    let locates = 0;
+    let open = true;
+    const { deps } = scripted(items, false);
+    deps.locate = async () => {
+      locates += 1;
+      open = false;
+      return { ok: false };
+    };
+    deps.halted = () => !open;
+    deps.speak = async (text) => {
+      spoken.push(text);
+    };
+    deps.resolveItem = async (body) => {
+      resolved.push(body.match);
+    };
+    deps.tourSignal = async (body) => {
+      signals.push(body.signal);
+    };
+    deps.holdPhrase = async () => {
+      signals.push("hold");
+    };
+    await runTour("tk-1", deps);
+    assert.equal(locates, 1, cause);
+    assert.deepEqual(spoken, []);
+    assert.deepEqual(resolved, ["notYetFound"]);
+    assert.deepEqual(signals, ["begin"]);
+  }
+});
+
+test("the task leaving the item records the miss and does not send narrationDone", async () => {
+  const items: TourItem[] = [
+    { phraseId: "ph-1", query: "We are the hollow men", narration: "We are the hollow men.", scroll: false },
+    { phraseId: "ph-2", query: "Headpiece filled with straw", narration: "Headpiece filled with straw.", scroll: false },
+  ];
+  const signals: string[] = [];
+  const resolved: { id: string; match: string }[] = [];
+  const spoken: string[] = [];
+  let reads = 0;
+  const deps: TourDeps = {
+    movesEnabled: true,
+    async queryTask(taskId) {
+      reads += 1;
+      const index = reads === 1 ? 0 : 1;
+      return { taskId, state: "active", index, items };
+    },
+    async locate(item) {
+      if (item.phraseId === "ph-1") return { ok: false };
+      return { ok: true, u: 0.2, v: 0.4, w: 0.3, h: 0.02 };
+    },
+    async highlight() {},
+    async speak(text) {
+      spoken.push(text);
+    },
+    async waitSpeech() {
+      return "done";
+    },
+    async resolveItem(body) {
+      resolved.push({ id: body.phraseId, match: body.match });
+    },
+    async tourSignal(body) {
+      signals.push(body.signal);
+    },
+    async stopSpeech() {},
+    async preempted() {
+      return false;
+    },
+    now: () => 0,
+    async sleep() {},
+    async holdPhrase() {
+      signals.push("hold");
+    },
+    halted: () => signals.includes("hold"),
+  };
+  await runTour("tk-1", deps);
+  assert.deepEqual(resolved, [
+    { id: "ph-1", match: "notYetFound" },
+    { id: "ph-2", match: "located" },
+  ]);
+  assert.deepEqual(spoken, ["Headpiece filled with straw."]);
+  assert.deepEqual(signals, ["begin", "narrationDone", "hold"]);
 });
 
 test("a scroll while the opening is still reading does not report a miss", async () => {
@@ -307,11 +410,16 @@ test("a scroll while the opening is still reading does not report a miss", async
   ];
   const signals: string[] = [];
   const resolved: string[] = [];
+  const spoken: string[] = [];
   const { deps } = scripted(items, false);
   deps.locate = async () => {
     assert.deepEqual(signals, ["begin"]);
     assert.deepEqual(resolved, []);
+    assert.deepEqual(spoken, []);
     return { ok: true, u: 0.2, v: 0.4, w: 0.3, h: 0.02 };
+  };
+  deps.speak = async (text) => {
+    spoken.push(text);
   };
   deps.resolveItem = async (body) => {
     resolved.push(body.match);
@@ -321,7 +429,8 @@ test("a scroll while the opening is still reading does not report a miss", async
   };
   await runTour("tk-1", deps);
   assert.deepEqual(resolved, ["located"]);
-  assert.ok(signals.indexOf("narrationDone") > signals.indexOf("begin"));
+  assert.deepEqual(spoken, ["We are the hollow men."]);
+  assert.deepEqual(signals, ["begin", "narrationDone"]);
 });
 
 test("locate does not read a project store or a doc map", () => {
