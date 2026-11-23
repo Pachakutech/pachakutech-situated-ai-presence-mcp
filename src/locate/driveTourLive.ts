@@ -69,6 +69,7 @@ function liveIo(client: DaemonClient, presenceId: string | undefined, stopping: 
   let viewerAddress: string | null = null;
   let ended = false;
   let aimPhrase: string | null = null;
+  let openingView: TourView | null = null;
   let projectIdHeld: string | null = null;
   let openSourceId: string | null = null;
   let projectLoci: SourcedLocus[] = [];
@@ -420,14 +421,15 @@ function liveIo(client: DaemonClient, presenceId: string | undefined, stopping: 
     paintedTop = after;
   }
 
-  async function watchGlass(view: TourView): Promise<void> {
-    if (await viewerClosed()) return;
+  /** The scroll under marks already held. A closed window or a replaced page does not read the glass. */
+  async function followHeld(): Promise<{ kind: "closed" | "replaced" | "held"; top: number | null }> {
+    if (await viewerClosed()) return { kind: "closed", top: null };
     const origin = await readPageGeneration();
     if (generation != null && origin != null && origin !== generation) {
       generation = origin;
       await dropAll();
       await noteDocEdge();
-      return;
+      return { kind: "replaced", top: null };
     }
     if (origin != null) generation = origin;
     const top = await readScrollTop();
@@ -437,6 +439,12 @@ function liveIo(client: DaemonClient, presenceId: string | undefined, stopping: 
       paintedTop = top;
     }
     await noteDocEdge();
+    return { kind: "held", top };
+  }
+
+  async function watchGlass(view: TourView): Promise<void> {
+    const followed = await followHeld();
+    if (followed.kind !== "held") return;
     const text = await client.call("queryScreenText", {});
     const seq = typeof text.seq === "number" ? text.seq : -1;
     if (text.fresh !== true || seq === glassSeq) return;
@@ -456,6 +464,7 @@ function liveIo(client: DaemonClient, presenceId: string | undefined, stopping: 
         if (!(height > 0)) height = 1080;
       }
     }
+    const top = followed.top;
     const frozen = frozenPhrases(text.rowHold);
     const settled = marks.map((mark) => {
       const shown = boxes.get(mark.phraseId);
@@ -499,6 +508,49 @@ function liveIo(client: DaemonClient, presenceId: string | undefined, stopping: 
     const height = typeof detail.height === "number" && detail.height > 0 ? detail.height : 1;
     const loci = await candidates(task, await pageNow(task));
     return glassMarks(loci, linesFromColumns(text, x, y, w, h), { w: width, h: height });
+  }
+
+  /** Other loci of this sample, in the hand they already have. The current phrase waits for the aim. */
+  async function paintOpening(view: TourView, frame: GlassFrame): Promise<void> {
+    const text = frame.text ?? [];
+    const x = frame.x ?? [];
+    const y = frame.y ?? [];
+    const w = frame.w ?? [];
+    const h = frame.h ?? [];
+    const width = frame.width && frame.width > 0 ? frame.width : 1;
+    const height = frame.height && frame.height > 0 ? frame.height : 1;
+    const current = view.items[view.index]?.phraseId;
+    const loci = await candidates(view, await pageNow(view));
+    const marks = glassMarks(loci, linesFromColumns(text, x, y, w, h), { w: width, h: height });
+    for (const mark of marks) {
+      if (mark.phraseId === current) continue;
+      await paint(mark.phraseId, { u: mark.u, v: mark.v, w: mark.w, h: mark.h }, mark.phraseId);
+    }
+  }
+
+  /** True while this phrase is still the one the task is on. A closed window, a left item, or a stop is false. */
+  async function openingStill(item: TourItem): Promise<boolean> {
+    if (stopping() || ended) return false;
+    if (!taskSeen) {
+      openingView = null;
+      return (await followHeld()).kind !== "closed";
+    }
+    let view: TourView;
+    try {
+      view = asTourView(await client.call("queryTask", { taskId: taskSeen }), taskSeen);
+    } catch {
+      return true;
+    }
+    if (view.state === "dismissed") {
+      await noteDismissed();
+      return false;
+    }
+    if (view.state !== "active") return false;
+    const current = view.items[view.index];
+    if (!current || current.phraseId !== item.phraseId) return false;
+    openingView = view;
+    if ((await followHeld()).kind === "closed") return false;
+    return !stopping() && !ended;
   }
 
   return {
@@ -568,6 +620,10 @@ function liveIo(client: DaemonClient, presenceId: string | undefined, stopping: 
         undefined,
         undefined,
         (candidate) => glassPhraseBox(item.phraseId, item.query ?? "", candidate) != null,
+        () => openingStill(item),
+        async (sample) => {
+          if (openingView) await paintOpening(openingView, sample);
+        },
       );
       if (!frame) return { ok: false };
       const box = glassPhraseBox(item.phraseId, item.query ?? "", frame);

@@ -242,6 +242,88 @@ test("a hand during the hold takes the next phrase", async () => {
   assert.equal(holds, 2);
 });
 
+test("a phrase read on the opening speaks, and narrationDone follows that speech", async () => {
+  const items: TourItem[] = [
+    { phraseId: "ph-1", query: "We are the hollow men", narration: "We are the hollow men.", scroll: false },
+    { phraseId: "ph-2", query: "Headpiece filled with straw", narration: "Headpiece filled with straw.", scroll: false },
+  ];
+  const order: string[] = [];
+  const { deps } = scripted(items, false);
+  deps.locate = async () => {
+    order.push("locate");
+    return { ok: true, u: 0.2, v: 0.4, w: 0.3, h: 0.02 };
+  };
+  deps.highlight = async (_hit, item) => {
+    order.push(`highlight:${item.phraseId}`);
+  };
+  deps.speak = async (text) => {
+    order.push(`speak:${text}`);
+  };
+  deps.waitSpeech = async () => {
+    order.push("wait");
+    return "done";
+  };
+  deps.tourSignal = async (body) => {
+    order.push(body.signal);
+  };
+  deps.holdPhrase = async () => {
+    order.push("hold");
+  };
+  deps.halted = () => order.includes("hold");
+  await runTour("tk-1", deps);
+  assert.deepEqual(order, [
+    "begin",
+    "locate",
+    "highlight:ph-1",
+    "speak:We are the hollow men.",
+    "wait",
+    "narrationDone",
+    "hold",
+  ]);
+});
+
+test("leaving the opening records the miss and does not speak", async () => {
+  const items: TourItem[] = [
+    { phraseId: "ph-1", query: "We are the hollow men", narration: "We are the hollow men.", scroll: false },
+  ];
+  const spoken: string[] = [];
+  const resolved: string[] = [];
+  const { deps } = scripted(items, false);
+  deps.locate = async () => ({ ok: false });
+  deps.speak = async (text) => {
+    spoken.push(text);
+  };
+  deps.resolveItem = async (body) => {
+    resolved.push(body.match);
+  };
+  await runTour("tk-1", deps);
+  assert.deepEqual(spoken, []);
+  assert.deepEqual(resolved, ["notYetFound"]);
+});
+
+test("a scroll while the opening is still reading does not report a miss", async () => {
+  const items: TourItem[] = [
+    { phraseId: "ph-1", query: "We are the hollow men", narration: "We are the hollow men.", scroll: false },
+  ];
+  const signals: string[] = [];
+  const resolved: string[] = [];
+  const { deps } = scripted(items, false);
+  deps.locate = async () => {
+    assert.deepEqual(signals, ["begin"]);
+    assert.deepEqual(resolved, []);
+    return { ok: true, u: 0.2, v: 0.4, w: 0.3, h: 0.02 };
+  };
+  deps.resolveItem = async (body) => {
+    resolved.push(body.match);
+  };
+  deps.tourSignal = async (body) => {
+    signals.push(body.signal);
+  };
+  await runTour("tk-1", deps);
+  assert.deepEqual(resolved, ["located"]);
+  assert.ok(signals.indexOf("narrationDone") > signals.indexOf("begin"));
+});
+
 test("locate does not read a project store or a doc map", () => {
   const root = new URL("../src/locate/", import.meta.url);
   const names = readdirSync(root).filter((name) => name.endsWith(".ts"));

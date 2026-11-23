@@ -413,6 +413,43 @@ test("stopping the driver conceals, and a conceal failure still returns", async 
   });
 });
 
+test("the tour opening stays open through the scroll", () => {
+  const live = readFileSync(join(root, "src/locate/driveTourLive.ts"), "utf8");
+  const locateAt = live.indexOf("async locate(item)");
+  const locate = live.slice(locateAt, live.indexOf("async highlight(hit", locateAt));
+  const stillAt = live.indexOf("async function openingStill");
+  const still = live.slice(stillAt, live.indexOf("return {", stillAt));
+  const followAt = live.indexOf("async function followHeld");
+  const follow = live.slice(followAt, live.indexOf("async function watchGlass", followAt));
+  const paintAt = live.indexOf("async function paintOpening");
+  const paint = live.slice(paintAt, live.indexOf("async function openingStill", paintAt));
+  const highlight = live.slice(live.indexOf("async highlight(hit, item)"), live.indexOf("async conceal()"));
+  const companions = highlight.slice(highlight.indexOf("for (const mark of marks)"));
+  assert.equal(locate.includes("frameAfterSettle"), true);
+  assert.equal(locate.includes("openingStill"), true);
+  assert.equal(locate.includes("paintOpening"), true);
+  assert.equal(locate.includes("reportMiss"), false);
+  assert.equal(locate.includes("narrationDone"), false);
+  assert.equal(locate.split("await placeForTour").length, 2);
+  assert.equal(still.includes("stopping()"), true);
+  assert.equal(still.includes("noteDismissed"), true);
+  assert.equal(still.includes("phraseId !== item.phraseId"), true);
+  assert.equal(still.includes("followHeld"), true);
+  assert.equal(still.includes('state !== "active"'), true);
+  assert.equal(follow.includes("viewerClosed"), true);
+  assert.equal(follow.includes("shiftAll"), true);
+  const shift = live.slice(live.indexOf("async function shiftAll"), live.indexOf("async function trackTravel"));
+  assert.equal(shift.includes("followScroll"), true);
+  assert.equal(paint.includes(", true"), false);
+  assert.equal(paint.includes("mark.phraseId === current"), true);
+  assert.equal(highlight.includes('paint(item.phraseId, box, item.query ?? "passage", true)'), true);
+  assert.equal(companions.includes(", true"), false);
+  const run = readFileSync(join(root, "src/locate/run.ts"), "utf8");
+  const place = run.slice(run.indexOf("export async function placeForTour"), run.indexOf("export async function locateRegion"));
+  assert.equal(place.includes("ocrRect"), false);
+  assert.equal(place.includes("scrollBy"), false);
+});
+
 test("a phrase from another page is concealed before the next find", () => {
   const live = readFileSync(join(root, "src/locate/driveTourLive.ts"), "utf8");
   const locate = live.slice(live.indexOf("async locate(item)"), live.indexOf("async highlight(hit"));

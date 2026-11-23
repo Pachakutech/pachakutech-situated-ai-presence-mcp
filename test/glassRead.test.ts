@@ -169,7 +169,7 @@ test("a frame that already holds the sentence does not wait for another sample",
   assert.equal(frame?.seq, 1);
 });
 
-test("two painted readings that miss are the beat", async () => {
+test("a closed wait still ends on two painted misses", async () => {
   let step = 0;
   const frame = await frameAfterSettle(
     1_000,
@@ -185,6 +185,107 @@ test("two painted readings that miss are the beat", async () => {
   );
   assert.equal(step, 2);
   assert.equal(frame?.seq, 2);
+});
+
+test("two painted samples that miss do not end the tour opening", async () => {
+  let step = 0;
+  const seen: number[] = [];
+  const frame = await frameAfterSettle(
+    1_000,
+    async () => {
+      step += 1;
+      if (step < 3) return painted(step, ["other", "words", "on", "the", "painted", "page"]);
+      return painted(step, ["hollow", "men"]);
+    },
+    () => 2_000,
+    async () => {},
+    8_000,
+    100,
+    (candidate) => (candidate.text ?? []).includes("hollow"),
+    async () => true,
+    async (sample) => {
+      seen.push(sample.seq ?? 0);
+    },
+  );
+  assert.equal(step, 3);
+  assert.equal(frame?.seq, 3);
+  assert.deepEqual(seen, [1, 2, 3]);
+});
+
+test("a sample after eight seconds is still the opening", async () => {
+  let now = 1_000;
+  let step = 0;
+  const frame = await frameAfterSettle(
+    1_000,
+    async () => {
+      step += 1;
+      if (now < 1_000 + GLASS_READ_MS) return painted(step, ["other", "words", "on", "the", "painted", "page"]);
+      return painted(step, ["hollow", "men"]);
+    },
+    () => now,
+    async (ms) => {
+      now += ms;
+    },
+    GLASS_READ_MS,
+    100,
+    (candidate) => (candidate.text ?? []).includes("hollow"),
+    async () => true,
+  );
+  assert.ok(frame);
+  assert.equal((frame.text ?? []).includes("hollow"), true);
+  assert.ok(now >= 1_000 + GLASS_READ_MS);
+});
+
+test("a blank sheet and a frame from before the settle are unused while the opening is open", async () => {
+  let now = 1_000;
+  let step = 0;
+  const seen: number[] = [];
+  const frame = await frameAfterSettle(
+    1_000,
+    async () => {
+      step += 1;
+      if (step === 1) return { ...painted(1, []), ageMs: 10, workedMs: 20 };
+      if (step === 2) {
+        return { ...painted(2, ["other", "words", "on", "the", "painted", "page"]), ageMs: 500, workedMs: 500 };
+      }
+      return painted(3, ["hollow", "men"]);
+    },
+    () => now,
+    async (ms) => {
+      now += ms;
+    },
+    GLASS_READ_MS,
+    100,
+    (candidate) => (candidate.text ?? []).includes("hollow"),
+    async () => true,
+    async (sample) => {
+      seen.push(sample.seq ?? 0);
+    },
+  );
+  assert.equal(frame?.seq, 3);
+  assert.deepEqual(seen, [3]);
+  assert.equal(step, 3);
+});
+
+test("the opening ends when the reader leaves", async () => {
+  let open = true;
+  let step = 0;
+  const frame = await frameAfterSettle(
+    1_000,
+    async () => {
+      step += 1;
+      if (step >= 2) open = false;
+      return painted(step, ["other", "words", "on", "the", "painted", "page"]);
+    },
+    () => 2_000,
+    async () => {},
+    GLASS_READ_MS,
+    100,
+    () => false,
+    async () => open,
+  );
+  assert.equal(frame, null);
+  assert.equal(step, 2);
 });
 
 test("the same posting is not a second beat", async () => {
