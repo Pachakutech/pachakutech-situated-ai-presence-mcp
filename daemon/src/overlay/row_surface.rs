@@ -152,6 +152,11 @@ fn place(state: &mut OverlayState, qh: &QueueHandle<OverlayState>, paint: &Paint
         }
         row.surface.clone()
     };
+    // The pointer's screen origin moves with the layer. A field that grows
+    // does not leave the click on the pad's old x.
+    if state.on_row {
+        state.pointer_origin = (paint.origin_x, paint.origin_y);
+    }
     if let Some(compositor) = compositor.as_ref() {
         set_row_input(compositor, qh, &surface, paint);
     }

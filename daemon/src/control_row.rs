@@ -9,6 +9,14 @@ pub const CONTROL_ROW_MS: u64 = 1000;
 pub const ROW_PX: i32 = 28;
 /// Even gap, smaller than the square.
 pub const ROW_GAP: i32 = 8;
+/// Horizontal step of one glyph. A new line starts one square lower.
+const GLYPH_STEP: i32 = 6;
+const FIELD_INSET: i32 = 6;
+const GLYPH_BASELINE: i32 = 8;
+/// Lines the field shows. The caret is the end of the draft, so a longer note shows its last lines.
+const FIELD_LINES: i32 = 4;
+/// Glyphs kept when half the highlight cannot hold the back square and a short run.
+const SHORT_RUN: i32 = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Px {
@@ -313,10 +321,11 @@ impl ControlRow {
     pub fn paint(&self, color: MarkColor, screen_w: i32, screen_h: i32) -> Option<Paint> {
         let row = self.open.as_ref()?;
         if row.editor {
-            let editor = place_editor(row.px, screen_w, screen_h);
-            let origin_x = editor.back.x;
-            let origin_y = editor.back.y;
-            let right = editor.field.x + editor.field.w;
+            let editor = place_editor(row.px, screen_w, screen_h, &row.draft);
+            let origin_x = editor.back.x.min(editor.field.x);
+            let origin_y = editor.back.y.min(editor.field.y);
+            let right = (editor.back.x + editor.back.w).max(editor.field.x + editor.field.w);
+            let bottom = (editor.back.y + editor.back.h).max(editor.field.y + editor.field.h);
             return Some(Paint {
                 phrase_id: row.phrase_id.clone(),
                 above: editor.above,
@@ -325,7 +334,7 @@ impl ControlRow {
                 origin_x,
                 origin_y,
                 width: (right - origin_x).max(1),
-                height: ROW_PX,
+                height: (bottom - origin_y).max(1),
                 squares: vec![(RowHit::Note, editor.back), (RowHit::Field, editor.field)],
                 text: row.draft.clone(),
             });
@@ -403,19 +412,66 @@ pub fn place_row(mark: Px, screen_w: i32, screen_h: i32) -> RowLayout {
     RowLayout { above, note: square(note_x), check: square(check_x), deny: square(deny_x) }
 }
 
-/// The pad square grows into the field. Check and X are gone. The field's
-/// right edge is the highlight's right edge.
-pub fn place_editor(mark: Px, screen_w: i32, screen_h: i32) -> EditorLayout {
+/// The pad square becomes the back square. Check and X are gone. The field's
+/// right edge stays on the highlight. Width and height follow the lines the
+/// painter draws, up to four lines and half the highlight. A highlight so
+/// narrow that half of it cannot hold the back square and a short run of
+/// glyphs keeps that wider minimum.
+pub fn place_editor(mark: Px, screen_w: i32, screen_h: i32, text: &str) -> EditorLayout {
     let row = place_row(mark, screen_w, screen_h);
+    let (text_w, text_h) = field_box(mark.w, text);
     let right = mark.x.saturating_add(mark.w);
-    let span = ROW_PX * 3 + ROW_GAP * 2;
-    let width = span.max(240).min(screen_w.max(ROW_PX));
-    let left = (right - width).max(0);
-    let y = row.note.y;
-    let back = Px { x: left, y, w: ROW_PX, h: ROW_PX };
+    let editor_w = ROW_PX + ROW_GAP + text_w;
+    let left = (right - editor_w).max(0);
     let field_x = left + ROW_PX + ROW_GAP;
-    let field_w = (right - field_x).max(1);
-    EditorLayout { above: row.above, back, field: Px { x: field_x, y, w: field_w, h: ROW_PX } }
+    let field_w = text_w.min(screen_w.saturating_sub(field_x).max(1));
+    let (field_y, back_y) = if row.above {
+        let bottom = row.note.y + ROW_PX;
+        let y = (bottom - text_h).max(0);
+        (y, (y + text_h - ROW_PX).max(0))
+    } else {
+        let y = row.note.y.max(0).min(screen_h.saturating_sub(text_h).max(0));
+        (y, y)
+    };
+    let back = Px { x: left, y: back_y, w: ROW_PX, h: ROW_PX };
+    EditorLayout { above: row.above, back, field: Px { x: field_x, y: field_y, w: field_w, h: text_h } }
+}
+
+/// Screen point of a click on the row layer. The layer origin is the square
+/// that is drawn. A pointer origin latched on the pad is stale once the field
+/// moves that layer, and it is not added.
+pub fn row_screen_point(pointer_origin: (i32, i32), layer_origin: (i32, i32), surface_x: i32, surface_y: i32) -> (i32, i32) {
+    let _stale = pointer_origin;
+    (layer_origin.0.saturating_add(surface_x), layer_origin.1.saturating_add(surface_y))
+}
+
+fn field_box(mark_w: i32, text: &str) -> (i32, i32) {
+    let lines = visible_lines(text);
+    let widest = lines.iter().map(|line| line.chars().count()).max().unwrap_or(0) as i32;
+    let natural = line_width(widest);
+    let half = mark_w.max(0) / 2;
+    let minimum = ROW_PX + ROW_GAP + line_width(SHORT_RUN);
+    let cap = half.max(minimum);
+    let max_text = (cap - ROW_PX - ROW_GAP).max(line_width(0));
+    let min_text = if half < minimum { line_width(SHORT_RUN) } else { line_width(0) };
+    let text_w = natural.clamp(min_text, max_text);
+    let text_h = (lines.len() as i32).max(1) * ROW_PX;
+    (text_w, text_h)
+}
+
+fn visible_lines(text: &str) -> Vec<&str> {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let start = lines.len().saturating_sub(FIELD_LINES as usize);
+    lines[start..].to_vec()
+}
+
+fn line_width(chars: i32) -> i32 {
+    FIELD_INSET * 2 + chars.max(0) * GLYPH_STEP
+}
+
+fn glyphs_that_fit(field_w: i32) -> usize {
+    let room = field_w.saturating_sub(FIELD_INSET + 1);
+    (room / GLYPH_STEP) as usize
 }
 
 pub fn overlaps(a: Px, b: Px) -> bool {
@@ -523,12 +579,15 @@ fn draw_x(buf: &mut [u8], stride: i32, x0: i32, y0: i32, selected: bool) {
 
 fn draw_field(buf: &mut [u8], stride: i32, x0: i32, y0: i32, w: i32, h: i32, text: &str) {
     fill_squircle(buf, 10_000, 10_000, stride, x0, y0, w, h, false);
-    let mut cursor = 6;
-    for ch in text.chars().take(48) {
-        draw_glyph(buf, stride, x0 + cursor, y0 + 8, ch);
-        cursor += 6;
-        if cursor + 6 >= w {
-            break;
+    let fit = glyphs_that_fit(w);
+    for (i, line) in visible_lines(text).iter().enumerate() {
+        let chars: Vec<char> = line.chars().filter(|ch| *ch != '\n').collect();
+        let start = chars.len().saturating_sub(fit);
+        let y = y0 + GLYPH_BASELINE + i as i32 * ROW_PX;
+        let mut cursor = FIELD_INSET;
+        for ch in chars.iter().skip(start).take(fit) {
+            draw_glyph(buf, stride, x0 + cursor, y, *ch);
+            cursor += GLYPH_STEP;
         }
     }
 }
@@ -570,7 +629,7 @@ fn glyph_bits(ch: char) -> u16 {
         'w' => 0b101_101_111_111_101,
         'x' => 0b101_101_010_101_101,
         'y' => 0b101_101_010_010_010,
-        ' ' => 0,
+        ' ' | '\n' | '\r' => 0,
         _ => 0b111_101_101_101_111,
     }
 }
@@ -677,7 +736,7 @@ mod tests {
         let mut row = ControlRow::new();
         row.enter("lc-a", mark(400, 300, 200, 40), None, 0);
         row.open_editor("", None);
-        let editor = place_editor(mark(400, 300, 200, 40), 1920, 1080);
+        let editor = place_editor(mark(400, 300, 200, 40), 1920, 1080, "");
         assert_eq!(editor.field.x + editor.field.w, 600);
         assert!(!overlaps(editor.back, mark(400, 300, 200, 40)));
         assert!(!overlaps(editor.field, mark(400, 300, 200, 40)));
@@ -716,5 +775,171 @@ mod tests {
         row.open_editor("", None);
         assert!(row.back().is_none());
         assert!(!row.editor_open());
+    }
+
+    fn glyph_ink(buf: &[u8], stride: i32, x: i32, y: i32) -> bool {
+        if x < 0 || y < 0 {
+            return false;
+        }
+        let i = (y * stride + x * 4) as usize;
+        i + 3 < buf.len() && buf[i] == 41 && buf[i + 1] == 31 && buf[i + 2] == 26 && buf[i + 3] == 255
+    }
+
+    fn glyph_drawn(buf: &[u8], stride: i32, x0: i32, y0: i32, ch: char) -> bool {
+        let bits = glyph_bits(ch);
+        if bits == 0 {
+            return false;
+        }
+        for row in 0..5 {
+            for col in 0..3 {
+                let on = bits & (1 << (row * 3 + col)) != 0;
+                if on != glyph_ink(buf, stride, x0 + col, y0 + row) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    fn ink_count(buf: &[u8]) -> usize {
+        buf.chunks(4).filter(|px| px.len() == 4 && px[0] == 41 && px[1] == 31 && px[2] == 26 && px[3] == 255).count()
+    }
+
+    fn bits_on(ch: char) -> usize {
+        let bits = glyph_bits(ch);
+        (0..15).filter(|bit| bits & (1 << bit) != 0).count()
+    }
+
+    fn paint_of(text: &str, highlight: Px) -> (Paint, Vec<u8>) {
+        let mut row = ControlRow::new();
+        row.enter("lc-a", highlight, None, 0);
+        row.open_editor(text, None);
+        let paint = row.paint(MarkColor::Yellow, 1920, 1080).unwrap();
+        let mut buf = vec![0u8; (paint.width * paint.height * 4) as usize];
+        paint_buffer(&mut buf, &paint);
+        (paint, buf)
+    }
+
+    #[test]
+    fn a_newline_paints_the_next_line_and_not_the_block() {
+        assert_eq!(glyph_bits('\n'), 0);
+        let highlight = mark(400, 300, 200, 40);
+        let (paint, buf) = paint_of("ab\ncd", highlight);
+        let field = paint.squares.iter().find(|(hit, _)| *hit == RowHit::Field).unwrap().1;
+        assert_eq!(field.h, ROW_PX * 2);
+        let stride = paint.width * 4;
+        let x0 = field.x - paint.origin_x + FIELD_INSET;
+        let y0 = field.y - paint.origin_y + GLYPH_BASELINE;
+        assert!(glyph_drawn(&buf, stride, x0, y0, 'a'));
+        assert!(glyph_drawn(&buf, stride, x0 + GLYPH_STEP, y0, 'b'));
+        assert!(glyph_drawn(&buf, stride, x0, y0 + ROW_PX, 'c'));
+        assert!(glyph_drawn(&buf, stride, x0 + GLYPH_STEP, y0 + ROW_PX, 'd'));
+        assert_eq!(ink_count(&buf), bits_on('a') + bits_on('b') + bits_on('c') + bits_on('d'));
+    }
+
+    #[test]
+    fn the_field_grows_to_the_caret_and_stops_at_four_lines() {
+        let highlight = mark(400, 300, 200, 40);
+        let short = place_editor(highlight, 1920, 1080, "ab");
+        assert_eq!(short.field.w, line_width(2));
+        assert!(short.field.w < highlight.w / 2);
+        assert_eq!(short.field.h, ROW_PX);
+        assert_eq!(short.field.x + short.field.w, highlight.x + highlight.w);
+
+        let long_text = "a".repeat(40) + "b";
+        let long = place_editor(highlight, 1920, 1080, &long_text);
+        let cap = (highlight.w / 2).max(ROW_PX + ROW_GAP + line_width(SHORT_RUN));
+        assert!(long.field.w + ROW_PX + ROW_GAP <= cap);
+        assert!(long.field.w > short.field.w);
+        let (paint, buf) = paint_of(&long_text, highlight);
+        let field = paint.squares.iter().find(|(hit, _)| *hit == RowHit::Field).unwrap().1;
+        let stride = paint.width * 4;
+        let fit = glyphs_that_fit(field.w);
+        assert!(fit < long_text.chars().count());
+        let x0 = field.x - paint.origin_x + FIELD_INSET;
+        let y0 = field.y - paint.origin_y + GLYPH_BASELINE;
+        let last_x = x0 + (fit as i32 - 1) * GLYPH_STEP;
+        assert!(last_x + 3 < field.x - paint.origin_x + field.w);
+        assert!(glyph_drawn(&buf, stride, x0, y0, 'a'));
+        assert!(glyph_drawn(&buf, stride, last_x, y0, 'b'));
+        assert_eq!(ink_count(&buf), bits_on('a') * (fit - 1) + bits_on('b'));
+
+        let five = "a\nb\nc\nd\ne";
+        let mut row = ControlRow::new();
+        row.enter("lc-a", highlight, None, 0);
+        row.open_editor(five, None);
+        assert_eq!(row.draft(), five);
+        let paint = row.paint(MarkColor::Yellow, 1920, 1080).unwrap();
+        let field = paint.squares.iter().find(|(hit, _)| *hit == RowHit::Field).unwrap().1;
+        assert_eq!(field.h, FIELD_LINES * ROW_PX);
+        let mut buf = vec![0u8; (paint.width * paint.height * 4) as usize];
+        paint_buffer(&mut buf, &paint);
+        let stride = paint.width * 4;
+        let x0 = field.x - paint.origin_x + FIELD_INSET;
+        let y0 = field.y - paint.origin_y + GLYPH_BASELINE;
+        assert!(glyph_drawn(&buf, stride, x0, y0, 'b'));
+        assert!(!glyph_drawn(&buf, stride, x0, y0, 'a'));
+        assert!(glyph_drawn(&buf, stride, x0, y0 + 3 * ROW_PX, 'e'));
+
+        let more = "a\nb\nc\nd\ne\n";
+        row.open_editor(more, None);
+        assert_eq!(row.draft(), more);
+        let grown = place_editor(highlight, 1920, 1080, more);
+        assert_eq!(grown.field.h, FIELD_LINES * ROW_PX);
+        let (paint, buf) = paint_of(more, highlight);
+        let field = paint.squares.iter().find(|(hit, _)| *hit == RowHit::Field).unwrap().1;
+        let stride = paint.width * 4;
+        let x0 = field.x - paint.origin_x + FIELD_INSET;
+        let y0 = field.y - paint.origin_y + GLYPH_BASELINE;
+        assert!(glyph_drawn(&buf, stride, x0, y0, 'c'));
+        assert!(glyph_drawn(&buf, stride, x0, y0 + ROW_PX, 'd'));
+        assert!(glyph_drawn(&buf, stride, x0, y0 + 2 * ROW_PX, 'e'));
+        assert_eq!(ink_count(&buf), bits_on('c') + bits_on('d') + bits_on('e'));
+
+        let narrow = mark(10, 10, 20, 10);
+        let kept = place_editor(narrow, 1920, 1080, "a");
+        let minimum = ROW_PX + ROW_GAP + line_width(SHORT_RUN);
+        assert!(narrow.w / 2 < minimum);
+        assert_eq!(kept.field.w, line_width(SHORT_RUN));
+        assert_eq!(kept.back.w + ROW_GAP + kept.field.w, minimum);
+    }
+
+    #[test]
+    fn a_click_on_the_drawn_back_square_closes_after_the_layer_moves() {
+        let highlight = mark(45, 317, 803, 10);
+        let pad = place_row(highlight, 1920, 1080).note;
+        assert_eq!(pad.x, 748);
+        let mut row = ControlRow::new();
+        row.enter("lc-fb6ee93cbdf55d1a", highlight, None, 0);
+        row.open_editor("ab\ncd", None);
+        let paint = row.paint(MarkColor::Yellow, 1920, 1080).unwrap();
+        let back = paint.squares.iter().find(|(hit, _)| *hit == RowHit::Note).unwrap().1;
+        let field = paint.squares.iter().find(|(hit, _)| *hit == RowHit::Field).unwrap().1;
+        assert!(back.x + back.w <= field.x);
+        assert_ne!(back.x, pad.x);
+        assert_eq!(back.x, paint.origin_x);
+        assert_eq!(back.y, paint.origin_y);
+        assert!(paint.squares.iter().all(|(hit, _)| !matches!(hit, RowHit::Check | RowHit::Deny)));
+        let layer = (paint.origin_x, paint.origin_y);
+        let stale = row_screen_point((pad.x, pad.y), layer, 4, 4);
+        let updated = row_screen_point(layer, layer, 4, 4);
+        assert_eq!(stale, updated);
+        assert_ne!(pad.x + 4, stale.0);
+        assert!(stale.0 >= back.x && stale.0 < back.x + back.w);
+        assert!(stale.1 >= back.y && stale.1 < back.y + back.h);
+        assert_eq!(row.hit(stale.0, stale.1, 1920, 1080), RowHit::Note);
+        assert_eq!(row.hit(updated.0, updated.1, 1920, 1080), RowHit::Note);
+        row.push_text("!");
+        row.press(RowHit::Note);
+        assert_eq!(row.release(RowHit::Note), Release::Back);
+        let flush = row.back().expect("the latest text");
+        assert_eq!(flush.text, "ab\ncd!");
+        assert!(!row.editor_open());
+
+        let overlay = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/overlay.rs")).unwrap();
+        assert!(overlay.contains("row_screen_point"));
+        let surface = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/overlay/row_surface.rs")).unwrap();
+        assert!(surface.contains("pointer_origin"));
+        assert!(surface.contains("on_row"));
     }
 }

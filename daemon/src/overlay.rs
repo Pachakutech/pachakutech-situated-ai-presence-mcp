@@ -1204,10 +1204,18 @@ impl Dispatch<wl_pointer::WlPointer, ()> for OverlayState {
                     return;
                 }
                 // A press on the row is that square. It is not also a tint sample.
+                // The layer origin is the drawn square, including after the field moves it.
                 if state.on_row {
                     if button != crate::task::BTN_LEFT {
                         return;
                     }
+                    let layer = state.row.as_ref().map(|row| (row.origin_x, row.origin_y)).unwrap_or(state.pointer_origin);
+                    let (x, y) = crate::control_row::row_screen_point(
+                        state.pointer_origin,
+                        layer,
+                        state.pointer_xy.0 as i32,
+                        state.pointer_xy.1 as i32,
+                    );
                     if down {
                         state.row_input.push(crate::control_row::RowInput::Press { x, y });
                     } else {

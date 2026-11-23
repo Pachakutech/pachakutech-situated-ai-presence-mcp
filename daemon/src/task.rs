@@ -4355,6 +4355,44 @@ mod tests {
     }
 
     #[test]
+    fn a_note_keeps_its_newlines_and_an_empty_draft_stores_nothing() {
+        let (mut book, mut ledger, _) = hover_book(&["lc-a"]);
+        book.row_enter("lc-a", row_px(), None, 40_000, &mut ledger);
+        click_row(&mut book, &mut ledger, crate::control_row::RowHit::Note, 40_000);
+        assert!(book.row_editor_open());
+        book.row_back(&mut ledger, 40_050);
+        assert!(!book.row_editor_open());
+        assert!(note_rows(&ledger, "lc-a").is_empty());
+
+        book.row_enter("lc-a", row_px(), None, 42_000, &mut ledger);
+        click_row(&mut book, &mut ledger, crate::control_row::RowHit::Note, 42_000);
+        book.row_type("ab\ncd", &mut ledger, 42_000);
+        let notes = note_rows(&ledger, "lc-a");
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].2, "ab\ncd");
+        let paint = book.row_paint(1920, 1080).unwrap();
+        assert!(paint.squares.iter().all(|(hit, _)| !matches!(hit, crate::control_row::RowHit::Check | crate::control_row::RowHit::Deny)));
+        let back = paint.squares.iter().find(|(hit, _)| *hit == crate::control_row::RowHit::Note).unwrap().1;
+        book.row_press_at(back.x + 4, back.y + 4);
+        book.row_release_at(back.x + 4, back.y + 4, &mut ledger, 42_100);
+        assert!(!book.row_editor_open());
+        assert_eq!(note_rows(&ledger, "lc-a").len(), 1);
+        assert_eq!(note_rows(&ledger, "lc-a")[0].2, "ab\ncd");
+
+        book.row_enter("lc-a", row_px(), None, 42_200, &mut ledger);
+        click_row(&mut book, &mut ledger, crate::control_row::RowHit::Note, 42_200);
+        let loaded = book.row_paint(1920, 1080).unwrap().text;
+        assert_eq!(loaded, "ab\ncd");
+        for _ in 0..loaded.chars().count() {
+            book.row_backspace(&mut ledger, 42_250);
+        }
+        book.row_back(&mut ledger, 42_300);
+        assert!(!book.row_editor_open());
+        assert_eq!(note_rows(&ledger, "lc-a").len(), 1);
+        assert_eq!(note_rows(&ledger, "lc-a")[0].2, "ab\ncd");
+    }
+
+    #[test]
     fn a_socket_cannot_write_the_hover_row() {
         use crate::ledger::route_note;
         use crate::protocol::{AddNoteBody, NoteVia, Proposal};
