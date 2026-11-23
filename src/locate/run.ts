@@ -178,6 +178,17 @@ export async function listHyprClients(): Promise<Client[]> {
   return asClients(await hyprJson(["clients", "-j"]));
 }
 
+/** The workspace on screen. A missing report is -1, so a tour sample keeps no words. */
+export async function readActiveWorkspace(): Promise<number> {
+  try {
+    const workspace = await hyprJson(["activeworkspace", "-j"]);
+    const id = Number((workspace as { id?: number }).id ?? -1);
+    return Number.isFinite(id) ? id : -1;
+  } catch {
+    return -1;
+  }
+}
+
 async function focused(): Promise<{ address?: string; workspace: number }> {
   const [active, workspace] = await Promise.all([
     hyprJson(["activewindow", "-j"]).catch(() => ({})),

@@ -5,10 +5,10 @@ import { DaemonClient } from "../daemonClient.js";
 import { launchListed, locatePortOpen, navigateLocate, spawnListed } from "./openSource.js";
 import { followScroll, glassMarks, keepHeld, linesFromColumns, lociFromProject, onPage, type GlassLocus, type HandName, type OpenPage, type SourcedLocus, type Uv } from "./glass.js";
 import { noteOwnedScroll, releaseScroll as clearScrollHold, scrollDrifted } from "./scrollHold.js";
-import { listHyprClients, outputSize, readPageGeneration, readPdfPageCount, readScrollMetrics, readScrollTop, readViewerPage } from "./run.js";
+import { listHyprClients, outputSize, readActiveWorkspace, readPageGeneration, readPdfPageCount, readScrollMetrics, readScrollTop, readViewerPage } from "./run.js";
 import { runTour, type GlassHit, type TourItem, type TourView } from "./tour.js";
 import { driveUntilStop, type DriveIo, type OpenRequest } from "./driveTour.js";
-import { frameAfterSettle, glassPhraseBox, settleLine, settleRule, uvPixels, type GlassFrame } from "./core.js";
+import { columnsInsideViewer, frameAfterSettle, glassPhraseBox, settleLine, settleRule, uvPixels, viewerGlass, type GlassFrame, type ViewerGlass } from "./core.js";
 import { latchedWindowClosed, viewerStillMapped, type ViewerKind } from "./viewer.js";
 
 function asTourView(detail: Record<string, unknown>, taskId: string): TourView {
@@ -496,6 +496,17 @@ function liveIo(client: DaemonClient, presenceId: string | undefined, stopping: 
     }
   }
 
+  /** The latched client's rectangle for this sample. No address yet keeps no words. */
+  async function viewerMask(): Promise<ViewerGlass> {
+    try {
+      const [clients, activeWorkspace] = await Promise.all([listHyprClients(), readActiveWorkspace()]);
+      return viewerGlass(viewerAddress, clients, activeWorkspace);
+    } catch {
+      return viewerGlass(null, [], -1);
+    }
+  }
+
+  /** Marks from this sample. The words are the ones inside the latched viewer. */
   async function readGlass(task: TourView): Promise<GlassHit[]> {
     const detail = await client.call("queryScreenText", {});
     if (detail.fresh !== true) return [];
@@ -506,12 +517,17 @@ function liveIo(client: DaemonClient, presenceId: string | undefined, stopping: 
     const h = Array.isArray(detail.h) ? (detail.h as number[]) : [];
     const width = typeof detail.width === "number" && detail.width > 0 ? detail.width : 1;
     const height = typeof detail.height === "number" && detail.height > 0 ? detail.height : 1;
+    const mask = await viewerMask();
+    const kept = columnsInsideViewer(text, x, y, w, h, mask);
     const loci = await candidates(task, await pageNow(task));
-    return glassMarks(loci, linesFromColumns(text, x, y, w, h), { w: width, h: height });
+    return glassMarks(loci, linesFromColumns(kept.text, kept.x, kept.y, kept.w, kept.h), { w: width, h: height });
   }
 
-  /** Other loci of this sample, in the hand they already have. The current phrase waits for the aim. */
-  async function paintOpening(view: TourView, frame: GlassFrame): Promise<void> {
+  /**
+   * Other loci of this sample, in the hand they already have. The current phrase waits for the aim.
+   * The words are the ones inside the latched viewer.
+   */
+  async function paintOpening(view: TourView, frame: GlassFrame, mask: ViewerGlass): Promise<void> {
     const text = frame.text ?? [];
     const x = frame.x ?? [];
     const y = frame.y ?? [];
@@ -519,9 +535,10 @@ function liveIo(client: DaemonClient, presenceId: string | undefined, stopping: 
     const h = frame.h ?? [];
     const width = frame.width && frame.width > 0 ? frame.width : 1;
     const height = frame.height && frame.height > 0 ? frame.height : 1;
+    const kept = columnsInsideViewer(text, x, y, w, h, mask);
     const current = view.items[view.index]?.phraseId;
     const loci = await candidates(view, await pageNow(view));
-    const marks = glassMarks(loci, linesFromColumns(text, x, y, w, h), { w: width, h: height });
+    const marks = glassMarks(loci, linesFromColumns(kept.text, kept.x, kept.y, kept.w, kept.h), { w: width, h: height });
     for (const mark of marks) {
       if (mark.phraseId === current) continue;
       await paint(mark.phraseId, { u: mark.u, v: mark.v, w: mark.w, h: mark.h }, mark.phraseId);
@@ -613,21 +630,26 @@ function liveIo(client: DaemonClient, presenceId: string | undefined, stopping: 
       if (!placed.ok) console.error("tour: the find has not answered");
       await rememberViewer();
       const settle = Date.now();
+      let sampleMask: ViewerGlass = { viewer: null, activeWorkspace: -1, others: [] };
       const frame = await frameAfterSettle(
         settle,
-        async () => asGlassFrame(await client.call("queryScreenText", {})),
+        async () => {
+          const sample = asGlassFrame(await client.call("queryScreenText", {}));
+          sampleMask = await viewerMask();
+          return sample;
+        },
         () => Date.now(),
         (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
         undefined,
         undefined,
-        (candidate) => glassPhraseBox(item.phraseId, item.query ?? "", candidate) != null,
+        (candidate) => glassPhraseBox(item.phraseId, item.query ?? "", candidate, sampleMask) != null,
         () => openingStill(item),
         async (sample) => {
-          if (openingView) await paintOpening(openingView, sample);
+          if (openingView) await paintOpening(openingView, sample, sampleMask);
         },
       );
       if (!frame) return { ok: false };
-      const box = glassPhraseBox(item.phraseId, item.query ?? "", frame);
+      const box = glassPhraseBox(item.phraseId, item.query ?? "", frame, sampleMask);
       if (!box) return { ok: false };
       return { ok: true, ...box };
     },

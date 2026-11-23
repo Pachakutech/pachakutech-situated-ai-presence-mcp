@@ -1,7 +1,19 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { capturedAfterSettle, frameAfterSettle, GLASS_READ_MS, glassPhraseBox, sheetUnpainted } from "../src/locate/core.ts";
+import {
+  capturedAfterSettle,
+  columnsInsideViewer,
+  frameAfterSettle,
+  GLASS_READ_MS,
+  glassPhraseBox,
+  linesFromColumns,
+  sheetUnpainted,
+  viewerGlass,
+  type GlassClient,
+  type ViewerGlass,
+} from "../src/locate/core.ts";
+import { runTour, type TourDeps, type TourItem } from "../src/locate/tour.ts";
 
 test("a capture that started before the settle is not the reading", () => {
   assert.equal(GLASS_READ_MS, 8000);
@@ -684,4 +696,252 @@ test("placePdf turns the page and does not scroll by eighty pixels", async () =>
   assert.equal(placed.page, 2);
   assert.deepEqual(actions, ["go-first-page", "go-next-page"]);
   assert.equal(shots, 0);
+});
+
+const VERSE = ["We", "are", "the", "hollow", "men"];
+const VERSE_TEXT = VERSE.join(" ");
+
+function row(words: string[], x0: number, y: number, step = 50, w = 40, h = 16) {
+  return {
+    text: words.slice(),
+    x: words.map((_, i) => x0 + i * step),
+    y: words.map(() => y),
+    w: words.map(() => w),
+    h: words.map(() => h),
+  };
+}
+
+function joinRows(...rows: ReturnType<typeof row>[]) {
+  return {
+    text: rows.flatMap((item) => item.text),
+    x: rows.flatMap((item) => item.x),
+    y: rows.flatMap((item) => item.y),
+    w: rows.flatMap((item) => item.w),
+    h: rows.flatMap((item) => item.h),
+  };
+}
+
+function glassClient(address: string, x: number, y: number, w: number, h: number, workspace: number): GlassClient {
+  return { address, x, y, w, h, workspace };
+}
+
+test("the verse inside the viewer is the box and the chat line never reaches the lines", () => {
+  const viewer = glassClient("0xview", 480, 40, 1000, 1000, 1);
+  const chat = glassClient("0xchat", 0, 280, 420, 80, 1);
+  const mask = viewerGlass("0xview", [viewer, chat], 1);
+  const raw = joinRows(row(VERSE, 45, 317), row(VERSE, 520, 640));
+  const kept = columnsInsideViewer(raw.text, raw.x, raw.y, raw.w, raw.h, mask);
+  assert.deepEqual(kept.text, VERSE);
+  assert.deepEqual(kept.y, [640, 640, 640, 640, 640]);
+  assert.equal(kept.x[0], 520);
+  const lines = linesFromColumns(kept.text, kept.x, kept.y, kept.w, kept.h);
+  assert.equal(lines.length, 1);
+  assert.equal(
+    lines[0].words.some((word) => word.y === 317),
+    false,
+  );
+  const box = glassPhraseBox("lc-verse", VERSE_TEXT, { fresh: true, width: 1920, height: 1080, ...raw }, mask);
+  assert.ok(box);
+  assert.equal(box.u, 520 / 1920);
+  assert.equal(box.v, 640 / 1080);
+  assert.equal(box.w, 240 / 1920);
+  assert.equal(box.h, 16 / 1080);
+
+  const core = readFileSync(new URL("../src/locate/core.ts", import.meta.url), "utf8");
+  const phrase = core.slice(core.indexOf("export function glassPhraseBox"), core.indexOf("export function seek"));
+  assert.ok(phrase.indexOf("columnsInsideViewer") < phrase.indexOf("linesFromColumns"));
+  assert.equal(phrase.includes("linesFromColumns(frame.text"), false);
+  assert.equal(phrase.includes("linesFromColumns(kept.text"), true);
+  const live = readFileSync(new URL("../src/locate/driveTourLive.ts", import.meta.url), "utf8");
+  const read = live.slice(live.indexOf("async function readGlass"), live.indexOf("async function paintOpening"));
+  const painted = live.slice(live.indexOf("async function paintOpening"), live.indexOf("async function openingStill"));
+  for (const body of [read, painted]) {
+    assert.ok(body.indexOf("columnsInsideViewer") < body.indexOf("linesFromColumns"));
+    assert.equal(body.includes("linesFromColumns(text"), false);
+    assert.equal(body.includes("linesFromColumns(kept.text"), true);
+  }
+  const locate = live.slice(live.indexOf("async locate(item)"), live.indexOf("async highlight(hit"));
+  const calls = [...locate.matchAll(/glassPhraseBox\([^)]*\)/g)].map((match) => match[0]);
+  assert.equal(calls.length, 2);
+  assert.ok(calls.every((call) => call.includes("sampleMask")));
+});
+
+test("a word at screen (1000, 700) stays there inside a window at (960, 0)", () => {
+  const mask = viewerGlass("0xview", [glassClient("0xview", 960, 0, 960, 1080, 1)], 1);
+  const raw = joinRows(row(["mark"], 1000, 700), row(["rim"], 1900, 700));
+  const kept = columnsInsideViewer(raw.text, raw.x, raw.y, raw.w, raw.h, mask);
+  const lines = linesFromColumns(kept.text, kept.x, kept.y, kept.w, kept.h);
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].words.length, 1);
+  assert.equal(lines[0].words[0].x, 1000);
+  assert.equal(lines[0].words[0].y, 700);
+  const box = glassPhraseBox("lc-1", "mark", { width: 1920, height: 1080, ...raw }, mask);
+  assert.ok(box);
+  assert.equal(box.u, 1000 / 1920);
+  assert.equal(box.v, 700 / 1080);
+  assert.equal(box.w, 40 / 1920);
+  assert.equal(box.h, 16 / 1080);
+});
+
+test("a viewer on another workspace keeps no words and the search stays open", async () => {
+  const words = row(VERSE, 100, 200);
+  const mask: ViewerGlass = {
+    viewer: { x: 0, y: 0, w: 1920, h: 1080, workspace: 2 },
+    activeWorkspace: 1,
+    others: [],
+  };
+  const kept = columnsInsideViewer(words.text, words.x, words.y, words.w, words.h, mask);
+  assert.deepEqual(kept.text, []);
+
+  let now = 1_000;
+  let polls = 0;
+  let open = true;
+  const accepted: boolean[] = [];
+  const frame = await frameAfterSettle(
+    0,
+    async () => ({
+      fresh: true,
+      seq: polls + 1,
+      ageMs: 5,
+      workedMs: 5,
+      width: 1920,
+      height: 1080,
+      text: words.text,
+      x: words.x,
+      y: words.y,
+      w: words.w,
+      h: words.h,
+    }),
+    () => now,
+    async (ms) => {
+      now += ms;
+      polls += 1;
+      if (polls >= 3) open = false;
+    },
+    GLASS_READ_MS,
+    50,
+    (candidate) => {
+      const hit = glassPhraseBox("ph-1", VERSE_TEXT, candidate, mask) != null;
+      accepted.push(hit);
+      return hit;
+    },
+    () => open,
+  );
+  assert.equal(frame, null);
+  assert.ok(polls >= 3);
+  assert.ok(accepted.length >= 3);
+  assert.equal(accepted.some(Boolean), false);
+
+  const signals: string[] = [];
+  const resolved: string[] = [];
+  const spoken: string[] = [];
+  const items: TourItem[] = [{ phraseId: "ph-1", query: VERSE_TEXT, narration: "We are the hollow men.", scroll: false }];
+  const deps: TourDeps = {
+    movesEnabled: false,
+    async queryTask(taskId) {
+      return { taskId, state: "active", index: 0, items };
+    },
+    async locate() {
+      const box = glassPhraseBox(
+        "ph-1",
+        VERSE_TEXT,
+        { width: 1920, height: 1080, text: words.text, x: words.x, y: words.y, w: words.w, h: words.h },
+        mask,
+      );
+      return { ok: box != null };
+    },
+    async highlight() {},
+    async speak(text) {
+      spoken.push(text);
+    },
+    async waitSpeech() {
+      return "done";
+    },
+    async resolveItem(body) {
+      resolved.push(body.match);
+    },
+    async tourSignal(body) {
+      signals.push(body.signal);
+    },
+    async stopSpeech() {},
+    async preempted() {
+      return false;
+    },
+    now: () => 0,
+    async sleep() {},
+  };
+  await runTour("tk-1", deps);
+  assert.deepEqual(spoken, []);
+  assert.deepEqual(resolved, ["notYetFound"]);
+  assert.deepEqual(signals, ["begin"]);
+});
+
+test("a client on the viewer workspace covers the verse and another workspace does not", () => {
+  const viewer = glassClient("0xview", 400, 80, 900, 800, 1);
+  const cover = glassClient("0xcover", 440, 180, 400, 80, 1);
+  const abroad = glassClient("0xabroad", 440, 180, 400, 80, 2);
+  const verse = row(VERSE, 460, 200);
+  const covered = viewerGlass("0xview", [viewer, cover, abroad], 1);
+  assert.equal(covered.others.length, 2);
+  assert.equal(
+    covered.others.some((other) => other.x === viewer.x && other.y === viewer.y && other.w === viewer.w && other.h === viewer.h),
+    false,
+  );
+  const dropped = columnsInsideViewer(verse.text, verse.x, verse.y, verse.w, verse.h, covered);
+  assert.deepEqual(dropped.text, []);
+  const clear = viewerGlass("0xview", [viewer, abroad], 1);
+  const kept = columnsInsideViewer(verse.text, verse.x, verse.y, verse.w, verse.h, clear);
+  assert.deepEqual(kept.text, VERSE);
+  assert.equal(kept.x[0], 460);
+  assert.equal(kept.y[0], 200);
+});
+
+test("before an address is latched the sample has no words", () => {
+  const viewer = glassClient("0xview", 0, 0, 1920, 1080, 1);
+  const verse = row(VERSE, 100, 200);
+  const mask = viewerGlass(null, [viewer], 1);
+  assert.equal(mask.viewer, null);
+  const kept = columnsInsideViewer(verse.text, verse.x, verse.y, verse.w, verse.h, mask);
+  assert.deepEqual(kept.text, []);
+  const missing = viewerGlass("0xgone", [viewer], 1);
+  assert.equal(missing.viewer, null);
+  const still = columnsInsideViewer(verse.text, verse.x, verse.y, verse.w, verse.h, missing);
+  assert.deepEqual(still.text, []);
+});
+
+test("queryScreenText still returns the words outside the window", () => {
+  const viewer = glassClient("0xview", 480, 40, 1000, 1000, 1);
+  const mask = viewerGlass("0xview", [viewer], 1);
+  const raw = joinRows(row(VERSE, 45, 317), row(VERSE, 520, 640));
+  const before = {
+    text: raw.text.slice(),
+    x: raw.x.slice(),
+    y: raw.y.slice(),
+    w: raw.w.slice(),
+    h: raw.h.slice(),
+  };
+  const kept = columnsInsideViewer(raw.text, raw.x, raw.y, raw.w, raw.h, mask);
+  assert.deepEqual(raw, before);
+  assert.equal(raw.text.length, 10);
+  assert.equal(kept.text.length, 5);
+  assert.equal(raw.y.filter((value) => value === 317).length, 5);
+
+  const screen = readFileSync(new URL("../daemon/src/screen_text.rs", import.meta.url), "utf8");
+  const snap = screen.slice(screen.indexOf("pub fn snapshot_json"), screen.indexOf("pub fn blank_disc"));
+  assert.equal(snap.includes('"text": reading.text'), true);
+  assert.equal(snap.includes("columnsInsideViewer"), false);
+  assert.equal(snap.includes("workspace"), false);
+  const ocr = screen.slice(screen.indexOf("fn ocr_frame"), screen.indexOf("pub fn spawn"));
+  assert.equal(ocr.includes("frame.width"), true);
+  assert.equal(ocr.includes("frame.height"), true);
+  assert.equal(ocr.includes("frame.rgba"), true);
+  assert.equal(ocr.includes("viewer"), false);
+  const socket = readFileSync(new URL("../daemon/src/socket.rs", import.meta.url), "utf8");
+  const arm = socket.slice(socket.indexOf("Proposal::QueryScreenText"), socket.indexOf("Proposal::QuerySpeech"));
+  assert.equal(arm.includes("snapshot_json"), true);
+  assert.equal(arm.includes("workspace"), false);
+  const live = readFileSync(new URL("../src/locate/driveTourLive.ts", import.meta.url), "utf8");
+  assert.equal(live.includes('client.call("queryScreenText", {})'), true);
+  const read = live.slice(live.indexOf("async function readGlass"), live.indexOf("async function paintOpening"));
+  assert.ok(read.indexOf("queryScreenText") < read.indexOf("columnsInsideViewer"));
 });

@@ -920,14 +920,32 @@ export async function frameAfterSettle(
   }
 }
 
-/** The current phrase on one desktop reading. A miss, including an ambiguous line, is absent. */
-export function glassPhraseBox(phraseId: string, opening: string, frame: GlassFrame): Uv | null {
+/**
+ * The current phrase on one desktop reading. A miss, including an ambiguous line, is absent.
+ * `mask` keeps the words inside the latched viewer before the lines are built. The tour passes it.
+ * Width and height stay the output size. Without `mask` the reading is the whole frame.
+ */
+export function glassPhraseBox(
+  phraseId: string,
+  opening: string,
+  frame: GlassFrame,
+  mask?: ViewerGlass,
+): Uv | null {
   const width = frame.width ?? 0;
   const height = frame.height ?? 0;
   if (!(width > 0) || !(height > 0)) return null;
+  const kept = mask
+    ? columnsInsideViewer(frame.text ?? [], frame.x ?? [], frame.y ?? [], frame.w ?? [], frame.h ?? [], mask)
+    : {
+        text: frame.text ?? [],
+        x: frame.x ?? [],
+        y: frame.y ?? [],
+        w: frame.w ?? [],
+        h: frame.h ?? [],
+      };
   const marks = glassMarks(
     [{ phraseId, opening, hand: "skip", current: true }],
-    linesFromColumns(frame.text ?? [], frame.x ?? [], frame.y ?? [], frame.w ?? [], frame.h ?? []),
+    linesFromColumns(kept.text, kept.x, kept.y, kept.w, kept.h),
     { w: width, h: height },
   );
   const hit = marks.find((mark) => mark.phraseId === phraseId);
@@ -951,6 +969,13 @@ export function fingerprint(lines: Line[]): string {
     .join("|");
 }
 
+/** The center sits inside the rectangle. A center on the far edge is outside. */
+function centerIn(word: Word, rect: Box): boolean {
+  const cx = word.x + word.w / 2;
+  const cy = word.y + word.h / 2;
+  return cx >= rect.x && cy >= rect.y && cx < rect.x + rect.w && cy < rect.y + rect.h;
+}
+
 /**
  * Screen-space words whose center sits in `window`, shifted into that window's
  * coordinates. A word an occluder covers is dropped.
@@ -959,9 +984,7 @@ export function toWindowWords(words: Word[], window: Box, occluders: Box[]): Wor
   const origin = { x: window.x, y: window.y };
   const local: Word[] = [];
   for (const word of words) {
-    const cx = word.x + word.w / 2;
-    const cy = word.y + word.h / 2;
-    if (cx < window.x || cy < window.y || cx >= window.x + window.w || cy >= window.y + window.h) continue;
+    if (!centerIn(word, window)) continue;
     local.push({ ...word, x: word.x - window.x, y: word.y - window.y });
   }
   return local.filter((word) => !coveredBy(word, origin, occluders));
@@ -981,4 +1004,78 @@ export function coveredBy(word: Word, origin: { x: number; y: number }, others: 
     if (r > x && b > y && ((r - x) * (b - y)) / area > 0.3) return true;
   }
   return false;
+}
+
+/** One Hyprland client the tour can mask against. The rectangle is screen `at` and `size`. */
+export type GlassClient = {
+  address: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  workspace: number;
+};
+
+/**
+ * The latched viewer for one sample, plus every other client.
+ * No address yet, or an address missing from the list, has no rectangle.
+ */
+export type ViewerGlass = {
+  viewer: { x: number; y: number; w: number; h: number; workspace: number } | null;
+  activeWorkspace: number;
+  others: { x: number; y: number; w: number; h: number; workspace: number }[];
+};
+
+/** The client the tour latched, in the geometry the list has now. */
+export function viewerGlass(
+  address: string | null,
+  clients: readonly GlassClient[],
+  activeWorkspace: number,
+): ViewerGlass {
+  if (!address) return { viewer: null, activeWorkspace, others: [] };
+  const row = clients.find((client) => client.address === address);
+  if (!row) return { viewer: null, activeWorkspace, others: [] };
+  return {
+    viewer: { x: row.x, y: row.y, w: row.w, h: row.h, workspace: row.workspace },
+    activeWorkspace,
+    others: clients
+      .filter((client) => client.address !== address)
+      .map((client) => ({ x: client.x, y: client.y, w: client.w, h: client.h, workspace: client.workspace })),
+  };
+}
+
+/**
+ * Words of one full-output reading kept for the tour.
+ * A word stays when its center sits inside the latched client. The screen box is unchanged.
+ * No latched client, or a client off the active workspace, keeps nothing.
+ * `coveredBy` drops a word another client on that workspace covers.
+ */
+export function columnsInsideViewer(
+  text: readonly string[],
+  x: readonly number[],
+  y: readonly number[],
+  w: readonly number[],
+  h: readonly number[],
+  mask: ViewerGlass,
+): { text: string[]; x: number[]; y: number[]; w: number[]; h: number[] } {
+  const empty = { text: [] as string[], x: [] as number[], y: [] as number[], w: [] as number[], h: [] as number[] };
+  const viewer = mask.viewer;
+  if (!viewer || viewer.workspace !== mask.activeWorkspace) return empty;
+  const occluders = mask.others
+    .filter((other) => other.workspace === viewer.workspace)
+    .map((other) => ({ x: other.x, y: other.y, w: other.w, h: other.h }));
+  const kept = { text: [] as string[], x: [] as number[], y: [] as number[], w: [] as number[], h: [] as number[] };
+  const n = Math.min(text.length, x.length, y.length, w.length, h.length);
+  for (let i = 0; i < n; i++) {
+    if (!text[i] || !(w[i] > 0) || !(h[i] > 0)) continue;
+    const word: Word = { x: x[i], y: y[i], w: w[i], h: h[i], text: text[i], conf: 1 };
+    if (!centerIn(word, viewer)) continue;
+    if (coveredBy(word, { x: 0, y: 0 }, occluders)) continue;
+    kept.text.push(word.text);
+    kept.x.push(word.x);
+    kept.y.push(word.y);
+    kept.w.push(word.w);
+    kept.h.push(word.h);
+  }
+  return kept;
 }
