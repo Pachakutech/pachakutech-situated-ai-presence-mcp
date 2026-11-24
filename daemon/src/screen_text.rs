@@ -227,10 +227,11 @@ fn ocr_frame(frame: &IngressFrame, dir: &std::path::Path) -> Result<Reading, Str
     let ppm = dir.join("frame.ppm");
     let base = dir.join("frame");
     write_ppm(&ppm, frame.width, frame.height, &frame.rgba).map_err(|e| format!("ppm: {e}"))?;
+    // The whole output is a page. A crop of a box stays on the block mode.
     let output = Command::new("tesseract")
         .arg(&ppm)
         .arg(&base)
-        .args(["--psm", "6", "tsv"])
+        .args(["--psm", "3", "tsv"])
         .output()
         .map_err(|e| format!("tesseract: {e}"))?;
     if !output.status.success() {
