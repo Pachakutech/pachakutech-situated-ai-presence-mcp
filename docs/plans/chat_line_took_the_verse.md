@@ -35,9 +35,13 @@ The opening stays open until a sample contains the phrase. The sample that conta
 
 The locus text is the verse. The bar is whichever line on the desktop first holds those words as a run. A sentence that quotes the verse, sitting on the same output as the poem, is such a line, and the bar is that whole line.
 
+The mask for that is `docs/plans/glass_inside_the_viewer.md`. The sampler stays on the whole output. This task keeps the words inside the latched viewer. The masked run is `docs/plans/opening_outlasted_the_task.md`: the find placed the verse, the verse was still one token, and the task expired before a bar.
+
 ## Read with
 
 - `docs/plans/hollow_line_unhighlighted.md`, the run where the poem line was one token and no bar was sent
 - `docs/plans/opening_stays_open.md`, the search resumes on the sample that contains the phrase
 - `docs/plans/complete/half_the_quote.md`, half the words exact, a slip does not count
 - `src/locate/core.ts`, `findRun`, `unionBox`, `glassMarks`
+- `docs/plans/glass_inside_the_viewer.md`, the tour keeps the words inside the latched viewer
+- `docs/plans/words_inside_the_token.md`, a cell that holds the words in order can be the hit

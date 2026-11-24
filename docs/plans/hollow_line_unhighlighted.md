@@ -72,6 +72,8 @@ The union merges rectangles. It does not merge the tokens of a bad frame with th
 
 `placeForTour` drops the find rectangle before those frames. The continuous pass reads the whole output in `--psm 6`. The allyl bars the union spent its time on were large lines this reader could split. This verse is 11 pixels tall, and the token is under the 40-character drop, so the glue is kept and the five-word run fails. The selection the find paints is cleared before `findInPage` returns.
 
+The 11 pixels are the line's size inside that full frame. On 23 November the same command on a crop of only those lines returned `We`, `are`, `the`, `hollow`, `men`. The sampler's one block is the whole output, and this line is small inside it. That is the reason in `docs/plans/opening_outlasted_the_task.md`. The fit that would accept the cell is `docs/plans/words_inside_the_token.md`.
+
 ## What the plans say now
 
 This run closed because the 14:52 `dist` treated two missed samples as a finished locate. The plans no longer use that completion. The search stays open until a sample contains the phrase, and that sample is when the tour resumes. Abandoning, because the window closes, the task leaves the item, or the driver stops, records the miss and does not mark the narration done. A clock is not one of those ends. `opening_stays_open.md` states the completion. `narration_done_on_a_miss.md` is the latch that still sends `narrationDone` when `locate` returns with no phrase.
