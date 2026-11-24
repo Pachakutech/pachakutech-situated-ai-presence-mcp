@@ -206,6 +206,11 @@ function sequence(lines: Line[]): Seq[] {
 
 type Hit = { start: number; end: number; cost: number };
 
+/** Half or more of the quote's words are exact. A slip does not count. */
+function halfPresent(present: number, total: number): boolean {
+  return present * 2 >= total;
+}
+
 /**
  * Match `phrase` as an ordered run.
  * A slip still joins a token. The hit stays when half or more of the
@@ -232,7 +237,7 @@ function matchPhrase(seq: Seq[], from: number, phrase: string[]): Hit | null {
       return null;
     }
   }
-  if (qi !== phrase.length || present * 2 < phrase.length) return null;
+  if (qi !== phrase.length || !halfPresent(present, phrase.length)) return null;
   return { start: from, end, cost };
 }
 
@@ -294,10 +299,186 @@ export function openingKnown(measured: Box | null, readOnGlass: boolean): boolea
   return measured !== null && measured.w >= 8 && measured.h >= 8;
 }
 
+/** Letters of one OCR cell. A non-letter is dropped. It is not a boundary. */
+function cellLetters(text: string): string {
+  return text.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+/** Letters inside one cell that belong to no word: before it, between its words, and after it. */
+const CELL_GAP = 2;
+
+type Cell = { letters: string; seqStart: number; seqEnd: number };
+
+type Take = { words: number; present: number; cost: number };
+
+/**
+ * The token walk splits a cell on every non-letter. These cells keep the
+ * letters in order so a later fit can read several words out of one cell.
+ * The indexes stay on that token walk. A drift between the two reads drops
+ * the cells, and the token walk is all that runs.
+ */
+function cellsAligned(seq: Seq[], lines: Line[]): Cell[] {
+  const cells: Cell[] = [];
+  let cursor = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const lineStart = cursor;
+    while (cursor < seq.length && seq[cursor].line === i) cursor++;
+    let walked = 0;
+    const lineCells: Cell[] = [];
+    for (const word of lines[i].words) {
+      const parts = tokens(word.text);
+      if (!parts.length) continue;
+      const seqStart = lineStart + walked;
+      walked += parts.length;
+      const letters = cellLetters(word.text);
+      if (!letters) continue;
+      lineCells.push({ letters, seqStart, seqEnd: lineStart + walked - 1 });
+    }
+    if (walked !== cursor - lineStart) return [];
+    cells.push(...lineCells);
+  }
+  if (cursor !== seq.length) return [];
+  return cells;
+}
+
+/**
+ * Words of `phrase` that this cell can hold, in order.
+ * A word is a span of the cell's letters, within `tokenCost`. A gap of at
+ * most `CELL_GAP` letters may sit before the first word, between words, and
+ * after the last word. A word does not start in the next cell.
+ */
+function takesInCell(letters: string, phrase: string[]): Take[] {
+  if (!letters || !phrase.length) return [];
+  const n = letters.length;
+  const bags = new Map<string, Map<number, number>>();
+  const bagAt = (words: number, pos: number): Map<number, number> => {
+    const key = `${words}:${pos}`;
+    let bag = bags.get(key);
+    if (!bag) {
+      bag = new Map();
+      bags.set(key, bag);
+    }
+    return bag;
+  };
+  bagAt(0, 0).set(0, 0);
+  const reachable: number[][] = Array.from({ length: phrase.length + 1 }, () => []);
+  reachable[0].push(0);
+  for (let words = 0; words < phrase.length; words++) {
+    const positions = reachable[words];
+    if (!positions.length) break;
+    const word = phrase[words];
+    const minLen = Math.max(1, word.length - 2);
+    const seen = new Set<number>();
+    for (const pos of positions) {
+      const bag = bagAt(words, pos);
+      for (const [present, cost] of bag) {
+        for (let gap = 0; gap <= CELL_GAP; gap++) {
+          const start = pos + gap;
+          if (start >= n) break;
+          const maxLen = Math.min(n - start, word.length + 2);
+          for (let len = minLen; len <= maxLen; len++) {
+            const step = tokenCost(letters.slice(start, start + len), word);
+            if (step === null) continue;
+            const nextPos = start + len;
+            const nextPresent = present + (step === 0 ? 1 : 0);
+            const nextCost = cost + step;
+            const nextBag = bagAt(words + 1, nextPos);
+            const prev = nextBag.get(nextPresent);
+            if (prev === undefined || nextCost < prev) nextBag.set(nextPresent, nextCost);
+            if (!seen.has(nextPos)) {
+              seen.add(nextPos);
+              reachable[words + 1].push(nextPos);
+            }
+          }
+        }
+      }
+    }
+  }
+  const takes: Take[] = [];
+  for (let words = 1; words <= phrase.length; words++) {
+    const merged = new Map<number, number>();
+    for (const pos of reachable[words]) {
+      if (n - pos > CELL_GAP) continue;
+      const bag = bags.get(`${words}:${pos}`);
+      if (!bag) continue;
+      for (const [present, cost] of bag) {
+        const prev = merged.get(present);
+        if (prev === undefined || cost < prev) merged.set(present, cost);
+      }
+    }
+    for (const [present, cost] of merged) takes.push({ words, present, cost });
+  }
+  return takes;
+}
+
+/**
+ * The token walk missed. Read each cell's own letters, in line order.
+ * A cell takes one or more remaining words, and the next cell continues.
+ * A cell that takes none ends this start. The cost is the sum of the slips.
+ */
+function gluedPhrases(cells: Cell[], phrase: string[]): Hit[] {
+  const hits: Hit[] = [];
+  const total = phrase.length;
+  if (!total || !cells.length) return hits;
+  const cache = new Map<string, Take[]>();
+  const takesFrom = (index: number, from: number): Take[] => {
+    const key = `${index}:${from}`;
+    const saved = cache.get(key);
+    if (saved) return saved;
+    const found = takesInCell(cells[index].letters, phrase.slice(from));
+    cache.set(key, found);
+    return found;
+  };
+  for (let start = 0; start < cells.length; start++) {
+    let states: Map<number, number>[] = Array.from({ length: total + 1 }, () => new Map());
+    states[0].set(0, 0);
+    let best: { cell: number; cost: number; present: number } | null = null;
+    const last = Math.min(cells.length - 1, start + total - 1);
+    for (let index = start; index <= last; index++) {
+      const next: Map<number, number>[] = Array.from({ length: total + 1 }, () => new Map());
+      let grew = false;
+      for (let words = 0; words < total; words++) {
+        if (states[words].size === 0) continue;
+        const options = takesFrom(index, words);
+        if (!options.length) continue;
+        for (const [present, cost] of states[words]) {
+          for (const take of options) {
+            const nextWords = words + take.words;
+            if (nextWords > total) continue;
+            const nextPresent = present + take.present;
+            const nextCost = cost + take.cost;
+            const have = next[nextWords].get(nextPresent);
+            if (have === undefined || nextCost < have) next[nextWords].set(nextPresent, nextCost);
+            grew = true;
+          }
+        }
+      }
+      if (!grew) break;
+      states = next;
+      for (const [present, cost] of states[total]) {
+        if (!halfPresent(present, total)) continue;
+        if (
+          !best ||
+          cost < best.cost ||
+          (cost === best.cost && present > best.present) ||
+          (cost === best.cost && present === best.present && index < best.cell)
+        ) {
+          best = { cell: index, cost, present };
+        }
+      }
+    }
+    if (!best) continue;
+    hits.push({ start: cells[start].seqStart, end: cells[best.cell].seqEnd, cost: best.cost });
+    start = best.cell;
+  }
+  return hits;
+}
+
 /**
  * A query is a phrase, or `start ... end` for a passage. The passage unions
  * every line from the first anchor through the second, and nothing past it.
  * Several alignments keep the closest. Two at that same distance stay ambiguous.
+ * One token per word is the hit. A cell's own letters are read only when that walk misses.
  */
 export function findRun(lines: Line[], query: string): Run | "ambiguous" | null {
   const parts = query
@@ -306,9 +487,15 @@ export function findRun(lines: Line[], query: string): Run | "ambiguous" | null 
     .filter((part) => part.length > 0);
   if (!parts.length || parts.length > 2) return null;
   const seq = sequence(lines);
-  if (parts.length === 1) return pickRun(seq, allPhrases(seq, parts[0]));
-  const lefts = allPhrases(seq, parts[0]);
-  const rights = allPhrases(seq, parts[1]);
+  const cells = cellsAligned(seq, lines);
+  const hitsOf = (phrase: string[]): Hit[] => {
+    const tokenHits = allPhrases(seq, phrase);
+    if (tokenHits.length) return tokenHits;
+    return gluedPhrases(cells, phrase);
+  };
+  if (parts.length === 1) return pickRun(seq, hitsOf(parts[0]));
+  const lefts = hitsOf(parts[0]);
+  const rights = hitsOf(parts[1]);
   const pairs: Hit[] = [];
   for (const left of lefts) {
     const right = rights.find((hit) => hit.start > left.end && seq[hit.end].line - seq[left.start].line < PASSAGE_LINES);
