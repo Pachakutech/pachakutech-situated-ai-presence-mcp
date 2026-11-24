@@ -72,7 +72,7 @@ The highlight is sent only after `locate` returns a box. `locate` returns a box 
 
 ## What this leaves
 
-A verse the find has already put on screen can sit inside the viewer as one OCR token for the whole life of the task. The opening will not paint it, and when the task expires the miss itself is refused, so the register stays `pending` and the driver prints `task_not_active`. The fit for that cell is `docs/plans/words_inside_the_token.md`. The sampler stays the one full-frame block.
+A verse the find has already put on screen can sit inside the viewer as one OCR token for the whole life of the task. The opening will not paint it, and when the task expires the miss itself is refused, so the register stays `pending` and the driver prints `task_not_active`. The fit for that cell is `docs/plans/words_inside_the_token.md`. The sampler stays one full-frame pass. The mode for that pass is `docs/plans/page_for_the_frame.md`.
 
 ## Read with
 
@@ -85,3 +85,4 @@ A verse the find has already put on screen can sit inside the viewer as one OCR 
 - `daemon/src/task.rs` — `DEFAULT_TTL_S` 120, `consider` skips the item clock when narration is present, `resolveItem` returns `task_not_active` when the task is not live.
 - `docs/plans/words_inside_the_token.md` — the plan that fits the stored words into a glued cell.
 - `daemon/src/screen_text.rs` — `ocr_frame` runs Tesseract `--psm 6` on the whole output.
+- `docs/plans/page_for_the_frame.md` — the full frame takes the page mode, and a crop keeps the block mode.

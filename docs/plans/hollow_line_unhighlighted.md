@@ -70,7 +70,7 @@ On this run it had no rectangle to take. `settleRule` runs when a frame already 
 
 The union merges rectangles. It does not merge the tokens of a bad frame with the tokens of the next one. A later frame that split `We are the hollow men` into five words would have been the first box, and the union would have run from there. No frame in this minute did that.
 
-`placeForTour` drops the find rectangle before those frames. The continuous pass reads the whole output in `--psm 6`. The allyl bars the union spent its time on were large lines this reader could split. This verse is 11 pixels tall, and the token is under the 40-character drop, so the glue is kept and the five-word run fails. The selection the find paints is cleared before `findInPage` returns.
+`placeForTour` drops the find rectangle before those frames. The continuous pass reads the whole output in `--psm 6`. The page mode for that frame is `docs/plans/page_for_the_frame.md`. The allyl bars the union spent its time on were large lines this reader could split. This verse is 11 pixels tall, and the token is under the 40-character drop, so the glue is kept and the five-word run fails. The selection the find paints is cleared before `findInPage` returns.
 
 The 11 pixels are the line's size inside that full frame. On 23 November the same command on a crop of only those lines returned `We`, `are`, `the`, `hollow`, `men`. The sampler's one block is the whole output, and this line is small inside it. That is the reason in `docs/plans/opening_outlasted_the_task.md`. The fit that would accept the cell is `docs/plans/words_inside_the_token.md`.
 

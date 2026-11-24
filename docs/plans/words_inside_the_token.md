@@ -38,7 +38,7 @@ The evidence cell, letters `welarelthelballowmen`, fits as `we`, one filler `l`,
 
 ## Out of scope
 
-A second OCR, a crop from the find rectangle, a change to `--psm`, and substituting the sidecar for the sampler. The 120 second task deadline and `task_not_active` on an expired miss. Splitting one word across two cells. `unionBox` still paints the whole line of a hit. The design sentence in `local_multimodal_reflex.md`.
+A second OCR, a crop from the find rectangle, and substituting the sidecar for the sampler. A change to `--psm` is `docs/plans/page_for_the_frame.md`. The 120 second task deadline and `task_not_active` on an expired miss. Splitting one word across two cells. `unionBox` still paints the whole line of a hit. The design sentence in `local_multimodal_reflex.md`.
 
 ## Done when
 
